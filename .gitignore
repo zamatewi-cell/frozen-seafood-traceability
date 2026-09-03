@@ -1,0 +1,38 @@
+# Local reference material: copyrighted course examples, not project requirements
+/01需求分析/
+/实践任务书.docx
+~$*.docx
+*.rp
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+application-local.yml
+application-local.yaml
+
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.log
+.mvn/timing.properties
+
+# Node / Vue
+node_modules/
+dist/
+.vite/
+coverage/
+
+# IDE and OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Runtime data and uploads
+logs/
+uploads/
+tmp/

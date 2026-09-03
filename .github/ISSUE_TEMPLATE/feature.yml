@@ -1,0 +1,48 @@
+name: 功能需求
+description: 提交与 PRD 对应、可验收的功能或改进
+title: "[Feature] "
+labels: []
+body:
+  - type: input
+    id: prd_id
+    attributes:
+      label: PRD 功能编号
+      description: 例如 FR-BATCH-002；不适用时说明原因。
+      placeholder: FR-XXX-000
+    validations:
+      required: true
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景与目标
+      description: 当前问题是什么，完成后谁获得什么价值？
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与不做项
+      description: 明确本 Issue 包含和不包含的内容。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件
+      description: 使用 Given / When / Then 或可客观判断的检查项。
+      placeholder: |
+        - [ ] Given ... When ... Then ...
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: 设计与影响
+      description: 涉及页面、权限、API、数据库、测试、文档和兼容性的内容。
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 依赖与风险
+      description: 依赖哪些 Issue/决策，有哪些风险或待确认项？
