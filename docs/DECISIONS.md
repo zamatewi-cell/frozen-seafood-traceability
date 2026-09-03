@@ -1,6 +1,6 @@
 # 当前决策与待决策
 
-本文件记录规划阶段已经形成的关键判断。正式技术方案采用独立 ADR 文件，在团队评审后创建。
+本文件记录规划阶段已经形成的关键判断。Phase 1 技术方案已形成独立 ADR；课程硬约束变化时通过新 ADR 修订，不直接覆盖历史决定。
 
 ## 已确定
 
@@ -14,14 +14,19 @@
 | D-006 | 区块链、真实 IoT 和真实监管接口不进入 MVP | 缺少外部条件，且不是建立可用追溯闭环的前提 |
 | D-007 | GitHub 仓库默认私有，不自动添加开源许可证 | 原始参考资料有版权提示，公开范围和许可证尚未确认 |
 
-## 待评审
+## Phase 1 已接受 ADR
 
-| ADR | 问题 | 可选方向 |
-|---|---|---|
-| ADR-001 | Java 与 Spring Boot 版本 | 课程兼容：Java 8 + Spring Boot 2.7.x；若允许升级则重新评估 |
-| ADR-002 | MySQL 版本 | 课程指定版本兼容 vs. 当前维护版本；需教师确认 |
-| ADR-003 | 前端工程工具 | Vue CLI 兼容旧模板 vs. Vite；需结合验收环境 |
-| ADR-004 | 身份认证方式 | Session 或短期令牌；根据部署拓扑与安全边界决定 |
-| ADR-005 | 附件存储 | 本地受控目录或对象存储；实训环境优先简单可复现 |
-| ADR-006 | 温度数据入口 | 手工、CSV 模拟或教师提供设备/接口 |
-| ADR-007 | 部署方案 | 本机、学校服务器或云主机 |
+| ADR | 决策摘要 |
+|---|---|
+| [ADR-001](adr/ADR-001-java-and-spring-boot.md) | Temurin Java 21 LTS + Spring Boot 3.5.16；教师强制 Java 8 时单独回退 |
+| [ADR-002](adr/ADR-002-mysql.md) | MySQL 8.4 LTS + Flyway |
+| [ADR-003](adr/ADR-003-vue-toolchain.md) | Vue 3 + TypeScript + Vite 8；Element Plus、X6、ECharts |
+| [ADR-004](adr/ADR-004-authentication.md) | 同源服务端会话 + CSRF |
+| [ADR-005](adr/ADR-005-attachment-storage.md) | 受控本地附件目录 + 可替换存储端口 |
+| [ADR-006](adr/ADR-006-temperature-ingestion.md) | 人工/模拟 P0，CSV P1，真实设备 P2 |
+| [ADR-007](adr/ADR-007-deployment.md) | Docker Compose 单体部署 + 本机 Maven 备选 |
+
+## 外部待确认
+
+- 教师是否强制 Java 8、MySQL 5.5 或 Vue CLI；若强制，将触发 ADR 修订。
+- 最终部署目标是本机、学校服务器还是云主机；当前 Compose 方案适配三者。
