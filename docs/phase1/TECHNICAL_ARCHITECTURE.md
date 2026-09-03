@@ -7,7 +7,7 @@
 ```mermaid
 flowchart TB
   Browser[PC 管理端 / 消费者 H5] -->|HTTPS JSON| Web[Vue 3 + TypeScript]
-  Web -->|Same-origin /api| App[Spring Boot 3.5]
+  Web -->|Same-origin /api| App[Spring Boot 4.1]
   App --> Auth[认证与权限]
   App --> Master[组织/产品/规则]
   App --> Batch[批次/操作/谱系]
@@ -27,13 +27,15 @@ flowchart TB
 
 | 层 | 选择 | 基线 |
 |---|---|---|
-| JDK | Eclipse Temurin | Java 21 LTS |
-| 服务端 | Spring Boot | 3.5.16 |
+| JDK | Eclipse Temurin | Java 25 LTS；`release=25` |
+| 服务端 | Spring Boot | 4.1.1；Spring Framework 7、Jakarta EE 11 |
 | 构建 | Maven Wrapper | Maven 3.9.x |
-| 数据访问 | MyBatis-Plus Boot 3 Starter | 3.5.17 |
-| 安全 | Spring Security | 由 Boot BOM 管理 |
-| 迁移 | Flyway | 由 Boot BOM 管理；迁移脚本入库 |
-| 数据库 | MySQL | 8.4 LTS，`utf8mb4`、UTC |
+| Web | `spring-boot-starter-webmvc` | Servlet 6.1；不使用已弃用的旧 Web starter 名称 |
+| JSON | Jackson 3 | 由 Boot BOM 管理；DTO 序列化契约纳入测试 |
+| 数据访问 | `mybatis-plus-spring-boot4-starter` | MyBatis-Plus 3.5.17 |
+| 安全 | Spring Security 7 | 由 Boot BOM 管理 |
+| 迁移 | `spring-boot-starter-flyway` | 由 Boot BOM 管理；迁移脚本入库 |
+| 数据库 | MySQL | 8.4 LTS 可复现基线；本机 9.1.0 仅兼容验证 |
 | API | REST + OpenAPI 3.1 | `/api/v1` |
 | 前端 | Vue 3 + TypeScript | Vue 3 当前稳定小版本 |
 | 工具链 | Node.js 24 LTS + Vite 8 | 锁文件固定补丁版本 |
@@ -45,7 +47,7 @@ flowchart TB
 | 前端测试 | Vitest + Vue Test Utils | 组件与状态 |
 | E2E | Playwright | 核心演示链 |
 
-说明：本地已安装 Java 25，但项目不直接跟随个人环境。Java 21 对课程成员更稳妥；若教师强制 Java 8，则启用 ADR-001 的兼容回退方案，而不是在同一主线兼容两套运行时。
+说明：开发机已验证 Temurin 25.0.3、Maven 3.9.6 和 MySQL Server 9.1.0。项目统一使用 Java 25；数据库仍由 Compose/Testcontainers 固定 MySQL 8.4 LTS，避免把个人电脑上的短周期 Innovation 版本变成团队隐式依赖。若教师强制 Java 8，则启用 ADR-001 的兼容回退方案，而不是在同一主线兼容两套运行时。
 
 ## 3. Java 模块边界
 
@@ -92,4 +94,3 @@ com.example.traceability
 - 谱系查询使用递归 CTE，默认深度 12、最大深度 50、最大节点 5,000；达到上限返回截断标识。
 - 公开查询使用专用投影，避免加载内部附件和审计明细。
 - 温度明细分页/分桶读取，图表默认返回阶段摘要和异常区间，不一次返回全部原始点。
-

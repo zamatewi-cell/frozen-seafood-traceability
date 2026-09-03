@@ -18,8 +18,8 @@
 
 | ADR | 决策摘要 |
 |---|---|
-| [ADR-001](adr/ADR-001-java-and-spring-boot.md) | Temurin Java 21 LTS + Spring Boot 3.5.16；教师强制 Java 8 时单独回退 |
-| [ADR-002](adr/ADR-002-mysql.md) | MySQL 8.4 LTS + Flyway |
+| [ADR-001](adr/ADR-001-java-and-spring-boot.md) | Temurin Java 25 LTS + Spring Boot 4.1.1；教师强制 Java 8 时单独回退 |
+| [ADR-002](adr/ADR-002-mysql.md) | MySQL 8.4 LTS + Flyway；本机 9.1.0 仅兼容验证 |
 | [ADR-003](adr/ADR-003-vue-toolchain.md) | Vue 3 + TypeScript + Vite 8；Element Plus、X6、ECharts |
 | [ADR-004](adr/ADR-004-authentication.md) | 同源服务端会话 + CSRF |
 | [ADR-005](adr/ADR-005-attachment-storage.md) | 受控本地附件目录 + 可替换存储端口 |

@@ -51,7 +51,7 @@ flowchart LR
 
 ## 技术约束说明
 
-实践任务书提出 JDK 8、Spring Boot、MyBatis-Plus、MySQL、Vue 3 的学习目标。精确版本将在架构评审时形成 ADR 后锁定：若必须使用 JDK 8，应选择兼容的 Spring Boot 2.7.x；Spring Boot 3.x 不能与 JDK 8 搭配。任务书中的 MySQL 5.5 和 Vue CLI 属于旧模板信息，未获得教师确认前不作为最终版本决策。
+实践任务书提出 JDK 8、Spring Boot、MyBatis-Plus、MySQL、Vue 3 的学习目标。主线已通过 ADR 锁定为 Java 25 LTS + Spring Boot 4.1.1；Boot 4 使用 Spring Framework 7、Jakarta EE 11、Jackson 3 和专用模块化 starter。若教师明确强制 JDK 8，应单独回退到 Spring Boot 2.7.x，不能在 Boot 4 主线兼容。数据库以 MySQL 8.4 LTS 为团队/CI 基线，本机 MySQL 9.1.0 仅用于兼容验证；任务书中的 MySQL 5.5 和 Vue CLI 属于旧模板信息。
 
 ## 当前里程碑
 
@@ -60,10 +60,11 @@ flowchart LR
 - [x] 建立开发流程和 GitHub 协作模板
 - [x] 用户确认 MVP 核心范围与 UI 设计方向
 - [x] 完成角色权限矩阵、交互原型、数据模型和 API 草案
-- [ ] 完成 Phase 1 浏览器视觉走查和团队/教师评审
+- [x] 完成 Phase 1 浏览器视觉走查
+- [ ] 完成团队/教师评审
 - [ ] 建立最小纵向闭环：建批次 → 记事件 → 生成追溯码 → 公开查询
 - [ ] 完成异常、追溯、召回、测试、部署和答辩材料
 
 ## 下一步
 
-按 [Phase 1 交付索引](docs/phase1/README.md) 完成视觉走查和评审。教师若未强制旧技术版本，则按 ADR 基线进入 Phase 2，先实现“建批次 → 记事件 → 公开追溯码 → 消费者查询”的最小纵向闭环。
+按 [Phase 1 交付索引](docs/phase1/README.md) 完成团队/教师评审。教师若未强制旧技术版本，则按 Java 25 + Spring Boot 4.1.1 ADR 基线进入 Phase 2，先实现“建批次 → 记事件 → 公开追溯码 → 消费者查询”的最小纵向闭环。
