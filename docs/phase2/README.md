@@ -79,7 +79,7 @@ com.example.traceability
 
 ### 4.1 MySQL 8.4 Docker Compose 编排 (`deploy/docker-compose.yml`)
 项目以仓库根目录 `deploy/docker-compose.yml` 作为唯一的 MySQL 8.4 容器编排来源：
-- **启动方式**：支持通过 `docker compose -f deploy/docker-compose.yml up -d` 或 `cd deploy && docker compose up -d` 一键启动服务。
+- **启动方式**：复制根目录 `.env.example` 为 `.env` 后，在仓库根目录执行 `docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait`；若进入 `deploy/` 目录，则执行 `docker compose --env-file ../.env up -d --wait`。显式指定 `--env-file`，避免 Compose 将 `deploy/` 识别为项目目录后漏读根目录凭据。
 - **端口映射**：`3307:3306`（严格规避宿主机本地可能存在的 3306 端口冲突）。
 - **统一字符集与时区**：字符集 `utf8mb4`，排序规则 `utf8mb4_0900_ai_ci`，时区 `+00:00` (UTC)。
 - **健康检查**：配置 `mysqladmin ping` 容器健康度探针。

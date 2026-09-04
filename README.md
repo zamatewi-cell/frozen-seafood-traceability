@@ -59,8 +59,8 @@ flowchart LR
 # 首次启动前复制模板，并修改 .env 中的本地开发密码
 cp .env.example .env
 
-# 在仓库根目录启动数据库
-docker compose -f deploy/docker-compose.yml up -d
+# 在仓库根目录启动数据库；显式读取根目录 .env
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 ```
 
 ## 技术约束说明
