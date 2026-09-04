@@ -1,0 +1,734 @@
+openapi: 3.1.0
+info:
+  title: 冷冻海产品溯源系统 API
+  version: 0.1.0-draft
+  description: 教学演练原型接口，不代表真实物联网、防伪或第三方认证能力。
+  license:
+    name: Proprietary teaching project
+    identifier: LicenseRef-Proprietary
+servers:
+  - url: /api/v1
+    description: 企业与管理端
+tags:
+  - name: Auth
+    description: 登录、注销与当前用户
+  - name: Batches
+    description: 批次、批次操作与数量平衡
+  - name: Trace
+    description: 追溯事件与谱系查询
+  - name: Transfers
+    description: 企业交接确认
+  - name: Quality
+    description: 温控、告警、冻结与模拟召回
+  - name: Public
+    description: 消费者公开白名单接口
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: 登录并建立服务端会话
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/LoginSuccess'}
+        '401': {$ref: '#/components/responses/Problem'}
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: 注销当前会话
+      operationId: logout
+      responses:
+        '204': {description: 会话已注销}
+        '401': {$ref: '#/components/responses/Problem'}
+  /me:
+    get:
+      tags: [Auth]
+      summary: 获取当前用户与数据范围
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: 当前会话主体
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/CurrentUser'}
+        '401': {$ref: '#/components/responses/Problem'}
+  /batches:
+    get:
+      tags: [Batches]
+      summary: 按权限范围分页查询批次
+      operationId: listBatches
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Size'}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/BatchStatus'}
+      responses:
+        '200':
+          description: 批次分页结果
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchPage'}
+        '403': {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [Batches]
+      summary: 创建批次草稿
+      operationId: createBatch
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateBatchRequest'}
+      responses:
+        '201':
+          description: 批次草稿
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchEnvelope'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    get:
+      tags: [Batches]
+      summary: 获取批次详情
+      operationId: getBatch
+      responses:
+        '200':
+          description: 批次详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchEnvelope'}
+        '404': {$ref: '#/components/responses/Problem'}
+    patch:
+      tags: [Batches]
+      summary: 更新批次草稿
+      operationId: updateDraftBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateBatchRequest'}
+      responses:
+        '200':
+          description: 已更新草稿
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchEnvelope'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /batch-operations:
+    post:
+      tags: [Batches]
+      summary: 创建拆分、合并或加工操作草稿
+      operationId: createBatchOperation
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateBatchOperationRequest'}
+      responses:
+        '201':
+          description: 操作草稿
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/BatchOperation'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /batch-operations/{operationId}/submit:
+    post:
+      tags: [Batches]
+      summary: 提交批次操作并生成谱系边
+      operationId: submitBatchOperation
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200':
+          description: 数量平衡且谱系边已创建
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/BatchOperation'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/genealogy:
+    get:
+      tags: [Trace]
+      summary: 正向、反向或双向查询批次谱系
+      operationId: getBatchGenealogy
+      parameters:
+        - {$ref: '#/components/parameters/BatchId'}
+        - name: direction
+          in: query
+          schema: {type: string, enum: [UPSTREAM, DOWNSTREAM, BOTH], default: BOTH}
+        - name: maxDepth
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 50, default: 12}
+      responses:
+        '200':
+          description: 权限裁剪后的谱系图
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/Genealogy'}
+        '403': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/events:
+    get:
+      tags: [Trace]
+      summary: 查询批次追溯事件
+      operationId: listBatchEvents
+      parameters:
+        - {$ref: '#/components/parameters/BatchId'}
+      responses:
+        '200':
+          description: 事件列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: {$ref: '#/components/schemas/TraceEvent'}
+        '403': {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [Trace]
+      summary: 提交批次追溯事件
+      operationId: createTraceEvent
+      parameters:
+        - {$ref: '#/components/parameters/BatchId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTraceEventRequest'}
+      responses:
+        '201':
+          description: 已提交事件
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/TraceEvent'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /transfers/{transferId}/accept:
+    post:
+      tags: [Transfers]
+      summary: 接收方接受交接
+      operationId: acceptTransfer
+      parameters:
+        - name: transferId
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AcceptTransferRequest'}
+      responses:
+        '200':
+          description: 交接已接受
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /transfers/{transferId}/reject:
+    post:
+      tags: [Transfers]
+      summary: 接收方拒绝交接
+      operationId: rejectTransfer
+      parameters:
+        - name: transferId
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason, occurredAt]
+              properties:
+                reason: {type: string, minLength: 2, maxLength: 500}
+                occurredAt: {type: string, format: date-time}
+      responses:
+        '200':
+          description: 交接已拒绝
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /temperature-records:
+    post:
+      tags: [Quality]
+      summary: 录入温度并按适用规则判定
+      operationId: createTemperatureRecord
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTemperatureRecordRequest'}
+      responses:
+        '201':
+          description: 温度记录及判定结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/TemperatureRecord'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /alerts/{alertId}/acknowledge:
+    post:
+      tags: [Quality]
+      summary: 质量管理员确认告警
+      operationId: acknowledgeAlert
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: 告警已确认}
+        '409': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/freeze:
+    post:
+      tags: [Quality]
+      summary: 冻结批次并阻止后续流转
+      operationId: freezeBatch
+      parameters:
+        - {$ref: '#/components/parameters/BatchId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: {type: string, minLength: 2, maxLength: 500}
+      responses:
+        '200': {description: 批次已冻结}
+        '409': {$ref: '#/components/responses/Problem'}
+  /recalls:
+    post:
+      tags: [Quality]
+      summary: 创建模拟召回草稿
+      operationId: createRecall
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRecallRequest'}
+      responses:
+        '201':
+          description: 模拟召回草稿
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/Recall'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /public/traces/{publicTraceId}:
+    servers:
+      - url: /api/public/v1
+    get:
+      tags: [Public]
+      summary: 查询消费者公开追溯投影
+      operationId: getPublicTrace
+      security: []
+      parameters:
+        - name: publicTraceId
+          in: path
+          required: true
+          schema: {type: string, minLength: 20, maxLength: 40}
+      responses:
+        '200':
+          description: 严格白名单的消费者追溯结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/PublicTrace'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '429': {$ref: '#/components/responses/Problem'}
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: TRACESESSION
+  parameters:
+    BatchId:
+      name: batchId
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    Page:
+      name: page
+      in: query
+      schema: {type: integer, minimum: 1, default: 1}
+    Size:
+      name: size
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 16, maxLength: 128}
+  responses:
+    Problem:
+      description: 标准问题详情
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    LoginSuccess:
+      description: 登录成功并设置安全会话 Cookie
+      headers:
+        Set-Cookie:
+          schema: {type: string}
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: '#/components/schemas/SuccessEnvelope'}
+              - type: object
+                properties:
+                  data: {$ref: '#/components/schemas/CurrentUser'}
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {}
+        meta: {$ref: '#/components/schemas/ResponseMeta'}
+    ResponseMeta:
+      type: object
+      required: [requestId, timestamp]
+      properties:
+        requestId: {type: string}
+        timestamp: {type: string, format: date-time}
+    Problem:
+      type: object
+      required: [type, title, status, code, requestId]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string}
+        status: {type: integer}
+        code: {type: string}
+        detail: {type: string}
+        instance: {type: string}
+        requestId: {type: string}
+        fieldErrors:
+          type: array
+          items:
+            type: object
+            required: [field, code, message]
+            properties:
+              field: {type: string}
+              code: {type: string}
+              message: {type: string}
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 3, maxLength: 64}
+        password: {type: string, minLength: 8, maxLength: 128, writeOnly: true}
+    CurrentUser:
+      type: object
+      required: [id, displayName, orgId, roles]
+      properties:
+        id: {type: integer, format: int64}
+        displayName: {type: string}
+        orgId: {type: integer, format: int64}
+        roles: {type: array, items: {type: string}}
+        scopes: {type: array, items: {type: string}}
+    BatchStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, FROZEN, RECALLED, CLOSED]
+    Batch:
+      type: object
+      required: [id, batchNo, productId, quantity, unitCode, status, version]
+      properties:
+        id: {type: integer, format: int64}
+        batchNo: {type: string}
+        productId: {type: integer, format: int64}
+        quantity: {type: number, multipleOf: 0.001}
+        unitCode: {type: string, example: kg}
+        originType: {type: string, enum: [DOMESTIC_CAPTURE, DOMESTIC_FARMED, IMPORT]}
+        originText: {type: string}
+        status: {$ref: '#/components/schemas/BatchStatus'}
+        version: {type: integer, minimum: 0}
+    CreateBatchRequest:
+      type: object
+      required: [batchNo, productId, quantity, unitCode, originType, originText]
+      properties:
+        batchNo: {type: string, minLength: 1, maxLength: 64}
+        productId: {type: integer, format: int64}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        unitCode: {type: string, example: kg}
+        originType: {type: string, enum: [DOMESTIC_CAPTURE, DOMESTIC_FARMED, IMPORT]}
+        originText: {type: string, maxLength: 255}
+        productionDate: {type: string, format: date}
+    UpdateBatchRequest:
+      type: object
+      required: [version]
+      properties:
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        originText: {type: string, maxLength: 255}
+        version: {type: integer, minimum: 0}
+    BatchEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Batch'}
+    BatchPage:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/Batch'}
+            meta:
+              allOf:
+                - {$ref: '#/components/schemas/ResponseMeta'}
+                - type: object
+                  properties:
+                    page:
+                      type: object
+                      required: [number, size, totalElements, totalPages]
+                      properties:
+                        number: {type: integer, minimum: 1}
+                        size: {type: integer, minimum: 1}
+                        totalElements: {type: integer, minimum: 0}
+                        totalPages: {type: integer, minimum: 0}
+    BatchOperationItem:
+      type: object
+      required: [role, quantity, unitCode]
+      properties:
+        batchId: {type: integer, format: int64}
+        role: {type: string, enum: [INPUT, OUTPUT, LOSS, WASTE, SAMPLE]}
+        quantity: {type: number, minimum: 0, multipleOf: 0.001}
+        unitCode: {type: string}
+    CreateBatchOperationRequest:
+      type: object
+      required: [operationType, occurredAt, items]
+      properties:
+        operationType: {type: string, enum: [MERGE, SPLIT, PROCESS, REPACK]}
+        occurredAt: {type: string, format: date-time}
+        items:
+          type: array
+          minItems: 2
+          items: {$ref: '#/components/schemas/BatchOperationItem'}
+    BatchOperation:
+      type: object
+      required: [id, operationType, status, items, balanced]
+      properties:
+        id: {type: integer, format: int64}
+        operationType: {type: string}
+        status: {type: string, enum: [DRAFT, SUBMITTED, CORRECTED]}
+        balanced: {type: boolean}
+        items: {type: array, items: {$ref: '#/components/schemas/BatchOperationItem'}}
+    Genealogy:
+      type: object
+      required: [rootBatchId, nodes, edges, truncated]
+      properties:
+        rootBatchId: {type: integer, format: int64}
+        nodes: {type: array, items: {$ref: '#/components/schemas/Batch'}}
+        edges:
+          type: array
+          items:
+            type: object
+            required: [operationId, parentBatchId, childBatchId, relationType]
+            properties:
+              operationId: {type: integer, format: int64}
+              parentBatchId: {type: integer, format: int64}
+              childBatchId: {type: integer, format: int64}
+              relationType: {type: string}
+        truncated: {type: boolean}
+        visitedNodes: {type: integer}
+        maxDepthReached: {type: integer}
+    TraceEvent:
+      type: object
+      required: [id, batchId, eventType, occurredAt, recordedAt, dataSource, status]
+      properties:
+        id: {type: integer, format: int64}
+        batchId: {type: integer, format: int64}
+        eventType: {type: string}
+        occurredAt: {type: string, format: date-time}
+        recordedAt: {type: string, format: date-time, readOnly: true}
+        dataSource: {$ref: '#/components/schemas/DataSource'}
+        status: {type: string, enum: [SUBMITTED, CORRECTED]}
+        summary: {type: string}
+    CreateTraceEventRequest:
+      type: object
+      required: [eventType, occurredAt, dataSource, summary]
+      properties:
+        eventType: {type: string}
+        occurredAt: {type: string, format: date-time}
+        dataSource: {$ref: '#/components/schemas/DataSource'}
+        summary: {type: string, maxLength: 500}
+    DataSource:
+      type: string
+      enum: [MANUAL, IMPORT, SIMULATED, DEVICE]
+    AcceptTransferRequest:
+      type: object
+      required: [receivedQuantity, unitCode, occurredAt]
+      properties:
+        receivedQuantity: {type: number, minimum: 0, multipleOf: 0.001}
+        unitCode: {type: string}
+        occurredAt: {type: string, format: date-time}
+        differenceReason: {type: string, maxLength: 500}
+    Transfer:
+      type: object
+      required: [id, batchId, senderOrgId, receiverOrgId, quantity, unitCode, status]
+      properties:
+        id: {type: integer, format: int64}
+        batchId: {type: integer, format: int64}
+        senderOrgId: {type: integer, format: int64}
+        receiverOrgId: {type: integer, format: int64}
+        quantity: {type: number, multipleOf: 0.001}
+        unitCode: {type: string}
+        status: {type: string, enum: [DRAFT, PENDING, ACCEPTED, REJECTED]}
+    TransferEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Transfer'}
+    CreateTemperatureRecordRequest:
+      type: object
+      required: [stageCode, measuredAt, temperature, unitCode, dataSource]
+      properties:
+        batchId: {type: integer, format: int64}
+        shipmentId: {type: integer, format: int64}
+        stageCode: {type: string}
+        measuredAt: {type: string, format: date-time}
+        temperature: {type: number, multipleOf: 0.01}
+        unitCode: {type: string, const: CELSIUS}
+        dataSource: {$ref: '#/components/schemas/DataSource'}
+        deviceNo: {type: string, maxLength: 64}
+    TemperatureRecord:
+      allOf:
+        - {$ref: '#/components/schemas/CreateTemperatureRecordRequest'}
+        - type: object
+          required: [id, recordedAt, ruleStageId, evaluation]
+          properties:
+            id: {type: integer, format: int64}
+            recordedAt: {type: string, format: date-time}
+            ruleStageId: {type: integer, format: int64}
+            evaluation: {type: string, enum: [NORMAL, HIGH, LOW, MISSING_CONTEXT]}
+    CreateRecallRequest:
+      type: object
+      required: [rootBatchId, reason, severity, affectedBatchIds]
+      properties:
+        rootBatchId: {type: integer, format: int64}
+        reason: {type: string, minLength: 2, maxLength: 1000}
+        severity: {type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL]}
+        affectedBatchIds: {type: array, minItems: 1, uniqueItems: true, items: {type: integer, format: int64}}
+        notificationSummary: {type: string, maxLength: 1000}
+    Recall:
+      type: object
+      required: [id, recallNo, status, simulated]
+      properties:
+        id: {type: integer, format: int64}
+        recallNo: {type: string}
+        status: {type: string, enum: [DRAFT, IN_PROGRESS, CLOSED, CANCELLED]}
+        simulated: {type: boolean, const: true}
+    PublicTrace:
+      type: object
+      additionalProperties: false
+      required: [publicTraceId, product, batch, timeline, temperatureSummary, status, queriedAt, disclosure]
+      properties:
+        publicTraceId: {type: string}
+        product:
+          type: object
+          additionalProperties: false
+          properties:
+            name: {type: string}
+            category: {type: string}
+            specification: {type: string}
+        batch:
+          type: object
+          additionalProperties: false
+          properties:
+            publicBatchNo: {type: string}
+            originType: {type: string}
+            maskedOrigin: {type: string}
+            productionDate: {type: string, format: date}
+        timeline:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              event: {type: string}
+              occurredAt: {type: string, format: date-time}
+              dataSourceLabel: {type: string}
+        temperatureSummary:
+          type: object
+          additionalProperties: false
+          properties:
+            result: {type: string, enum: [NO_BREACH_RECORDED, BREACH_RECORDED, INSUFFICIENT_DATA]}
+            ruleNote: {type: string}
+        status: {type: string, enum: [ACTIVE, DISABLED, RECALLED]}
+        recallNotice: {type: string}
+        queriedAt: {type: string, format: date-time}
+        disclosure: {type: string}
+security:
+  - sessionCookie: []

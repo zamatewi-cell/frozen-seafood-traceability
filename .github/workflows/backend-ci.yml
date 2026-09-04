@@ -1,0 +1,88 @@
+name: Backend CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
+      - 'feat/**'
+      - 'fix/**'
+      - 'chore/**'
+      - 'test/**'
+    paths:
+      - 'server/**'
+      - 'deploy/docker-compose.yml'
+      - '.github/workflows/backend-ci.yml'
+  pull_request:
+    branches:
+      - main
+      - master
+      - dev
+    paths:
+      - 'server/**'
+      - 'deploy/docker-compose.yml'
+      - '.github/workflows/backend-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-test:
+    name: Backend Test + MySQL 8.4 Migration (Java 25)
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: seafood_trace
+          MYSQL_USER: trace_user
+          MYSQL_PASSWORD: ci-app-password
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-password"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      MYSQL_IT_ENABLED: 'true'
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3307'
+      DB_NAME: seafood_trace
+      DB_USERNAME: trace_user
+      DB_PASSWORD: ci-app-password
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+          cache: 'maven'
+          cache-dependency-path: 'server/pom.xml'
+
+      - name: Make Maven Wrapper executable
+        run: chmod +x server/mvnw
+
+      - name: Run unit, API contract, health and MySQL migration tests
+        working-directory: server
+        run: ./mvnw -B clean test --no-transfer-progress
+
+      - name: Upload Surefire test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: server/target/surefire-reports/
+          retention-days: 7
