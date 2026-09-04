@@ -9,6 +9,14 @@ server:
     encoding:
       charset: UTF-8
       force: true
+    session:
+      timeout: 30m
+      cookie:
+        name: TRACESESSION
+        http-only: true
+        same-site: lax
+        secure: ${SESSION_COOKIE_SECURE:false}
+        max-age: 1800s
 
 spring:
   application:
@@ -64,6 +72,7 @@ logging:
   level:
     root: INFO
     com.example.traceability: DEBUG
+    com.example.traceability.identity.mapper: INFO
 
 # Actuator 仅暴露无敏感信息的健康检查；环境变量、Bean 等端点不对外开放。
 management:
