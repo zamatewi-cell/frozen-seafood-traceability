@@ -2,7 +2,7 @@
 
 面向高校实训的冷冻海产品供应链追溯原型。系统以“批次、追溯事件、批次关系”为核心，记录来源、加工速冻、仓储、运输、交接、检测和销售等关键节点，支持消费者一码查询，以及企业侧的正向追踪、反向溯源和模拟召回。
 
-> 当前阶段：`Phase 1 / 产品与技术设计`。已形成交互原型、权限、数据、API、ADR 和测试设计，尚未进入生产业务编码阶段。
+> 当前阶段：`Phase 2 / 迭代开发（服务端最小骨架启动）`。已完成 Phase 1 设计评审与交互原型走查；已建立 Java 25 LTS + Spring Boot 4.1.1 服务端工程骨架、MySQL 8.4 容器基线（3307 端口隔离）、Flyway 数据库版本化迁移与 GitHub Actions CI 流水线。
 
 ## 项目边界
 
@@ -33,6 +33,8 @@ flowchart LR
 - [领域调研与依据](docs/RESEARCH.md)：法规、标准、旧参考资料差异与需求推导。
 - [开发流程规范](docs/DEVELOPMENT_PROCESS.md)：从需求到发布的阶段门、Issue、分支、提交、PR、测试和发布规则。
 - [Phase 1 交付索引](docs/phase1/README.md)：原型、权限矩阵、业务流程、数据模型、OpenAPI、ADR 与测试计划。
+- [Phase 2 交付总结](docs/phase2/README.md)：后端工程骨架、8 大业务域边界、统一响应契约、Flyway 迁移与 CI 体系。
+- [服务端工程自述](server/README.md)：Java 25 / Boot 4 开发指南、MySQL 8.4 容器 (3307 端口) 启动与测试指南。
 - [可交互原型](prototype/README.md)：经确认视觉稿转化的产品走查原型，不是生产 Vue 工程。
 - [参与贡献](CONTRIBUTING.md)：成员日常协作的精简入口。
 
@@ -40,18 +42,30 @@ flowchart LR
 
 ```text
 .
-├─ server/                 # Spring Boot 服务端（设计评审后创建）
+├─ server/                 # Spring Boot 服务端（已建立工程骨架与 8 大业务包）
 ├─ web/                    # Vue 3 Web 端（设计评审后创建）
 ├─ database/               # 版本化迁移与演示数据
 ├─ tests/                  # 跨端验收与测试资产
-├─ deploy/                 # 部署配置和运维说明
+├─ deploy/                 # 部署配置和运维说明（含 deploy/docker-compose.yml 数据库环境编排）
 ├─ docs/                   # 产品、调研、设计、测试与答辩资料
-└─ .github/                # Issue / PR 模板与后续 CI
+└─ .github/                # Issue / PR 模板与后端 CI 流水线
+```
+
+## 本地数据库快速启动
+
+开发环境通过 Docker Compose 一键启动 MySQL 8.4 LTS 服务（宿主机端口 `3307` 隔离，避开宿主机 3306 冲突）：
+
+```bash
+# 首次启动前复制模板，并修改 .env 中的本地开发密码
+cp .env.example .env
+
+# 在仓库根目录启动数据库
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ## 技术约束说明
 
-实践任务书提出 JDK 8、Spring Boot、MyBatis-Plus、MySQL、Vue 3 的学习目标。主线已通过 ADR 锁定为 Java 25 LTS + Spring Boot 4.1.1；Boot 4 使用 Spring Framework 7、Jakarta EE 11、Jackson 3 和专用模块化 starter。若教师明确强制 JDK 8，应单独回退到 Spring Boot 2.7.x，不能在 Boot 4 主线兼容。数据库以 MySQL 8.4 LTS 为团队/CI 基线，本机 MySQL 9.1.0 仅用于兼容验证；任务书中的 MySQL 5.5 和 Vue CLI 属于旧模板信息。
+实践任务书提出 JDK 8、Spring Boot、MyBatis-Plus、MySQL、Vue 3 的学习目标。主线已通过 ADR 锁定为 Java 25 LTS + Spring Boot 4.1.1；Boot 4 使用 Spring Framework 7、Jakarta EE 11、Jackson 3 和专用模块化 starter。若教师明确强制 JDK 8，应单独回退到 Spring Boot 2.7.x，不能在 Boot 4 主线兼容。数据库以 MySQL 8.4 LTS 为团队/CI 基线（本地 Docker 映射 3307 规避 Windows 宿主机 3306 冲突），本机 MySQL 9.1.0 仅用于兼容验证；任务书中的 MySQL 5.5 和 Vue CLI 属于旧模板信息。
 
 ## 当前里程碑
 
@@ -61,10 +75,11 @@ flowchart LR
 - [x] 用户确认 MVP 核心范围与 UI 设计方向
 - [x] 完成角色权限矩阵、交互原型、数据模型和 API 草案
 - [x] 完成 Phase 1 浏览器视觉走查
-- [ ] 完成团队/教师评审
+- [x] 完成团队/教师评审与 Phase 1 设计基线封版
+- [x] 完成 Phase 2 后端工程骨架建设（Spring Boot 4.1.1 + Java 25、Flyway V1、MySQL 8.4 容器、CI 流水线）
 - [ ] 建立最小纵向闭环：建批次 → 记事件 → 生成追溯码 → 公开查询
 - [ ] 完成异常、追溯、召回、测试、部署和答辩材料
 
 ## 下一步
 
-按 [Phase 1 交付索引](docs/phase1/README.md) 完成团队/教师评审。教师若未强制旧技术版本，则按 Java 25 + Spring Boot 4.1.1 ADR 基线进入 Phase 2，先实现“建批次 → 记事件 → 公开追溯码 → 消费者查询”的最小纵向闭环。
+依据 Phase 2 服务端骨架与 Flyway V1 数据模型，进入 Phase 3 最小纵向闭环研发，逐步打通 identity、masterdata 基础数据模型与“建批次 → 记事件 → 生成追溯码 → 消费者查询”的业务链路。

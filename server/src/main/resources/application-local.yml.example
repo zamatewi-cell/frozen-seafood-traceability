@@ -1,0 +1,42 @@
+# ==============================================================================
+# 冷冻海鲜溯源系统 - 本地开发配置模板 (application-local.yml.example)
+#
+# 使用指南:
+# 1. 复制本文件为 application-local.yml:
+#    cp application-local.yml.example application-local.yml
+# 2. application-local.yml 已被 .gitignore 忽略，绝对不要向 Git 提交任何明文凭证。
+# 3. 本地开发默认通过仓库根目录 Docker Compose (deploy/docker-compose.yml) 启动 MySQL 8.4，
+#    宿主机端口严格映射为 3307，彻底规避宿主机本地已存在的 3306 端口冲突。
+# 4. 可通过系统环境变量注入敏感连接参数，也可在 application-local.yml 中配置个人本地开发参数。
+# ==============================================================================
+
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  datasource:
+    # 数据库连接地址：默认连接本地 3307 端口的 Docker MySQL 实例
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/${DB_NAME:seafood_trace}?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    # 数据库用户名（请通过环境变量 DB_USERNAME 设置，或在本地文件中覆盖）
+    username: ${DB_USERNAME:trace_user}
+    # 数据库密码（严禁填写真实生产密码，推荐通过环境变量 DB_PASSWORD 注入）
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 1
+      connection-timeout: 20000
+
+  flyway:
+    # 是否在本地启动时执行 Flyway 迁移脚本
+    enabled: ${FLYWAY_ENABLED:true}
+    baseline-on-migrate: true
+    baseline-version: 0
+    clean-disabled: true
+    locations: classpath:db/migration
+
+logging:
+  level:
+    root: INFO
+    com.example.traceability: DEBUG
+    org.springframework.web: DEBUG
+    com.baomidou.mybatisplus: DEBUG

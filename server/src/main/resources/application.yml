@@ -1,0 +1,76 @@
+# ==============================================================================
+# 冷冻海鲜溯源系统 - 核心主配置文件
+# ==============================================================================
+
+server:
+  # 服务运行端口，默认 8080
+  port: ${SERVER_PORT:8080}
+  servlet:
+    encoding:
+      charset: UTF-8
+      force: true
+
+spring:
+  application:
+    # 微服务/应用标识
+    name: seafood-traceability-server
+  profiles:
+    # 默认激活本地开发配置环境
+    active: ${SPRING_PROFILES_ACTIVE:local}
+
+  # 数据源配置（使用环境变量占位符，默认端口 3307 规避本机 3306 冲突）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/${DB_NAME:seafood_trace}?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:trace_user}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  # Flyway 数据库版本迁移配置
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+    baseline-on-migrate: true
+    baseline-version: 0
+    clean-disabled: true
+    locations: classpath:db/migration
+    url: ${spring.datasource.url}
+    user: ${spring.datasource.username}
+    password: ${spring.datasource.password}
+
+  # JSON 序列化规范（ISO 8601 格式，禁止将日期序列化为时间戳整数）
+  jackson:
+    date-format: yyyy-MM-dd'T'HH:mm:ssXXX
+    time-zone: Asia/Shanghai
+    default-property-inclusion: non_null
+    datatype:
+      datetime:
+        write-dates-as-timestamps: false
+
+# MyBatis-Plus 持久层框架配置
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.example.traceability.**.domain
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+
+# 日志级别配置
+logging:
+  level:
+    root: INFO
+    com.example.traceability: DEBUG
+
+# Actuator 仅暴露无敏感信息的健康检查；环境变量、Bean 等端点不对外开放。
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
