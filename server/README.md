@@ -54,8 +54,8 @@
 # 先复制本地环境变量模板并修改开发密码
 cp .env.example .env
 
-# 在仓库根目录启动
-docker compose -f deploy/docker-compose.yml up -d
+# 在仓库根目录启动；显式读取根目录 .env
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 ```
 
 ### 3.3 数据库默认连接参数
@@ -70,7 +70,7 @@ docker compose -f deploy/docker-compose.yml up -d
 | **字符集** | `utf8mb4` | `utf8mb4_0900_ai_ci` | 固定参数配置 |
 | **时区** | `UTC (+00:00)` | `UTC` | 强制统一 UTC |
 
-> **提示**：可以通过 `docker compose ps` 查看健康检查状态（`healthy` 即代表 MySQL 初始化完成）。停止容器请执行 `docker compose down`；如需重置数据可执行 `docker compose down -v`。
+> **提示**：在仓库根目录执行 `docker compose --env-file .env -f deploy/docker-compose.yml ps` 可查看健康检查状态（`healthy` 即代表 MySQL 初始化完成）。停止容器请执行 `docker compose --env-file .env -f deploy/docker-compose.yml down`；如需重置数据，可在明确不再需要本地数据后执行 `docker compose --env-file .env -f deploy/docker-compose.yml down -v`。
 
 ---
 
