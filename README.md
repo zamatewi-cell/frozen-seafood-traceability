@@ -2,7 +2,7 @@
 
 面向高校实训的冷冻海产品供应链追溯原型。系统以“批次、追溯事件、批次关系”为核心，记录来源、加工速冻、仓储、运输、交接、检测和销售等关键节点，支持消费者一码查询，以及企业侧的正向追踪、反向溯源和模拟召回。
 
-> 当前阶段：`Phase 2 / 迭代开发（服务端最小骨架启动）`。已完成 Phase 1 设计评审与交互原型走查；已建立 Java 25 LTS + Spring Boot 4.1.1 服务端工程骨架、MySQL 8.4 容器基线（3307 端口隔离）、Flyway 数据库版本化迁移与 GitHub Actions CI 流水线。
+> 当前阶段：`Phase 3 / 最小纵向闭环研发`。已完成 Phase 1 设计评审与 Phase 2 后端工程骨架建设；已完成 Issue #7 会话认证与组织上下文（Session Auth & Organization Context），包含基于 Cookie 的安全会话、CSRF 防护、BCrypt 认证、防会话固定、白名单数据投影及动态活性复核；本阶段其余主数据维护（masterdata）、批次生命周期、追溯事件记录与消费者公开查询仍待推进。
 
 ## 项目边界
 
@@ -34,6 +34,7 @@ flowchart LR
 - [开发流程规范](docs/DEVELOPMENT_PROCESS.md)：从需求到发布的阶段门、Issue、分支、提交、PR、测试和发布规则。
 - [Phase 1 交付索引](docs/phase1/README.md)：原型、权限矩阵、业务流程、数据模型、OpenAPI、ADR 与测试计划。
 - [Phase 2 交付总结](docs/phase2/README.md)：后端工程骨架、8 大业务域边界、统一响应契约、Flyway 迁移与 CI 体系。
+- [Phase 3 交付文档](docs/phase3/README.md)：会话认证与组织上下文（Issue #7）契约、安全机制、动态活性复核与测试验证规范。
 - [服务端工程自述](server/README.md)：Java 25 / Boot 4 开发指南、MySQL 8.4 容器 (3307 端口) 启动与测试指南。
 - [可交互原型](prototype/README.md)：经确认视觉稿转化的产品走查原型，不是生产 Vue 工程。
 - [参与贡献](CONTRIBUTING.md)：成员日常协作的精简入口。
@@ -77,9 +78,10 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 - [x] 完成 Phase 1 浏览器视觉走查
 - [x] 完成团队/教师评审与 Phase 1 设计基线封版
 - [x] 完成 Phase 2 后端工程骨架建设（Spring Boot 4.1.1 + Java 25、Flyway V1、MySQL 8.4 容器、CI 流水线）
-- [ ] 建立最小纵向闭环：建批次 → 记事件 → 生成追溯码 → 公开查询
+- [x] 完成 Phase 3 会话认证与组织上下文（Issue #7：identity 安全会话、CSRF 防护、防会话固定、动态活性复核与组织上下文唯一推导）
+- [ ] 建立最小纵向闭环：主数据维护 → 建批次 → 记事件 → 生成追溯码 → 公开查询
 - [ ] 完成异常、追溯、召回、测试、部署和答辩材料
 
 ## 下一步
 
-依据 Phase 2 服务端骨架与 Flyway V1 数据模型，进入 Phase 3 最小纵向闭环研发，逐步打通 identity、masterdata 基础数据模型与“建批次 → 记事件 → 生成追溯码 → 消费者查询”的业务链路。
+在 Issue #7 会话认证与组织上下文安全基线确立的基础上，继续推进 Phase 3 最小纵向闭环研发，逐步打通 masterdata 主数据模型（企业、产品、冷库、检测项）与“建批次 → 记事件 → 生成追溯码 → 消费者查询”的核心业务链路。

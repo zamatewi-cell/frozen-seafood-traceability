@@ -23,6 +23,26 @@ tags:
   - name: Public
     description: 消费者公开白名单接口
 paths:
+  /auth/csrf:
+    get:
+      tags: [Auth]
+      summary: 获取会话绑定的 CSRF 凭据
+      operationId: getCsrfToken
+      security: []
+      responses:
+        '200':
+          description: 获取 CSRF 凭据成功
+          headers:
+            Set-Cookie:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/CsrfToken'}
   /auth/login:
     post:
       tags: [Auth]
@@ -36,7 +56,9 @@ paths:
             schema: {$ref: '#/components/schemas/LoginRequest'}
       responses:
         '200': {$ref: '#/components/responses/LoginSuccess'}
+        '400': {$ref: '#/components/responses/Problem'}
         '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
   /auth/logout:
     post:
       tags: [Auth]
@@ -45,6 +67,7 @@ paths:
       responses:
         '204': {description: 会话已注销}
         '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
   /me:
     get:
       tags: [Auth]
@@ -487,13 +510,25 @@ components:
       properties:
         username: {type: string, minLength: 3, maxLength: 64}
         password: {type: string, minLength: 8, maxLength: 128, writeOnly: true}
+    CsrfToken:
+      type: object
+      required: [headerName, parameterName, token]
+      properties:
+        headerName: {type: string, example: X-CSRF-TOKEN}
+        parameterName: {type: string, example: _csrf}
+        token: {type: string}
     CurrentUser:
       type: object
-      required: [id, displayName, orgId, roles]
+      additionalProperties: false
+      required: [userId, username, displayName, orgId, orgNo, orgName, orgType, roles, scopes]
       properties:
-        id: {type: integer, format: int64}
+        userId: {type: integer, format: int64}
+        username: {type: string}
         displayName: {type: string}
         orgId: {type: integer, format: int64}
+        orgNo: {type: string}
+        orgName: {type: string}
+        orgType: {type: string}
         roles: {type: array, items: {type: string}}
         scopes: {type: array, items: {type: string}}
     BatchStatus:

@@ -5,10 +5,15 @@ import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.common.exception.GlobalExceptionHandler;
 import com.example.traceability.common.filter.RequestIdFilter;
 import com.example.traceability.identity.config.SecurityConfiguration;
+import com.example.traceability.identity.mapper.AppUserMapper;
+import com.example.traceability.identity.mapper.OrganizationMapper;
+import com.example.traceability.identity.mapper.RoleMapper;
+import com.example.traceability.identity.mapper.UserRoleMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
@@ -46,6 +51,18 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
                 + "org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration")
 @Import({GlobalExceptionHandler.class, RequestIdFilter.class, SecurityConfiguration.class})
 class SampleControllerTest {
+
+    @MockitoBean
+    private AppUserMapper appUserMapper;
+
+    @MockitoBean
+    private OrganizationMapper organizationMapper;
+
+    @MockitoBean
+    private RoleMapper roleMapper;
+
+    @MockitoBean
+    private UserRoleMapper userRoleMapper;
 
     @Autowired
     private MockMvc mockMvc;

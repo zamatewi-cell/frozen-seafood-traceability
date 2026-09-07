@@ -14,22 +14,22 @@ import java.util.List;
 import java.util.UUID;
 
 /** 将 Spring Security 过滤器链中的 401/403 写成统一 RFC 9457 响应。 */
-final class SecurityProblemWriter {
+public class SecurityProblemWriter {
 
     private static final MediaType PROBLEM_JSON = MediaType.parseMediaType("application/problem+json");
 
     private final ObjectMapper objectMapper;
 
-    SecurityProblemWriter(ObjectMapper objectMapper) {
+    public SecurityProblemWriter(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
     }
 
-    void write(HttpServletRequest request,
-               HttpServletResponse response,
-               int status,
-               String code,
-               String title,
-               String detail) throws IOException {
+    public void write(HttpServletRequest request,
+                      HttpServletResponse response,
+                      int status,
+                      String code,
+                      String title,
+                      String detail) throws IOException {
         String requestId = resolveRequestId(request);
         response.setStatus(status);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
