@@ -64,6 +64,15 @@ class SampleControllerTest {
     @MockitoBean
     private UserRoleMapper userRoleMapper;
 
+    @MockitoBean
+    private com.example.traceability.masterdata.mapper.ProductMapper productMapper;
+
+    @MockitoBean
+    private com.example.traceability.masterdata.mapper.TemperatureRuleMapper temperatureRuleMapper;
+
+    @MockitoBean
+    private com.example.traceability.masterdata.mapper.TemperatureRuleStageMapper temperatureRuleStageMapper;
+
     @Autowired
     private MockMvc mockMvc;
 
