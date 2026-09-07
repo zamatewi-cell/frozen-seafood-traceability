@@ -78,6 +78,68 @@ public class GlobalExceptionHandler {
         return buildResponseEntity(problem, HttpStatus.BAD_REQUEST);
     }
 
+    /** 捕获方法级单参数校验异常 (HandlerMethodValidationException - Spring 6+/Boot 3+)。 */
+    @ExceptionHandler(org.springframework.web.method.annotation.HandlerMethodValidationException.class)
+    public ResponseEntity<Problem> handleHandlerMethodValidationException(
+            org.springframework.web.method.annotation.HandlerMethodValidationException ex, HttpServletRequest request) {
+
+        List<FieldErrorItem> fieldErrors = new ArrayList<>();
+        for (var result : ex.getParameterValidationResults()) {
+            String paramName = result.getMethodParameter().getParameterName();
+            for (var resolvable : result.getResolvableErrors()) {
+                fieldErrors.add(new FieldErrorItem(
+                        paramName != null ? paramName : "param",
+                        "Invalid",
+                        resolvable.getDefaultMessage() != null ? resolvable.getDefaultMessage() : "参数校验失败"
+                ));
+            }
+        }
+
+        Problem problem = Problem.builder()
+                .type(URI.create("https://example.invalid/problems/invalid-request"))
+                .title("请求参数无效")
+                .status(HttpStatus.BAD_REQUEST.value())
+                .code("INVALID_REQUEST")
+                .detail("请求参数校验不通过，存在 " + fieldErrors.size() + " 处校验错误")
+                .instance(request.getRequestURI())
+                .requestId(resolveRequestId(request))
+                .fieldErrors(fieldErrors)
+                .build();
+
+        log.warn("方法级参数校验未通过: uri={}, fieldErrorsCount={}", request.getRequestURI(), fieldErrors.size());
+        return buildResponseEntity(problem, HttpStatus.BAD_REQUEST);
+    }
+
+    /** 捕获 Bean Validation 约束违规异常 (ConstraintViolationException)。 */
+    @ExceptionHandler(jakarta.validation.ConstraintViolationException.class)
+    public ResponseEntity<Problem> handleConstraintViolationException(
+            jakarta.validation.ConstraintViolationException ex, HttpServletRequest request) {
+
+        List<FieldErrorItem> fieldErrors = new ArrayList<>();
+        for (var cv : ex.getConstraintViolations()) {
+            String field = cv.getPropertyPath() != null ? cv.getPropertyPath().toString() : "param";
+            fieldErrors.add(new FieldErrorItem(
+                    field,
+                    "Invalid",
+                    cv.getMessage() != null ? cv.getMessage() : "参数校验失败"
+            ));
+        }
+
+        Problem problem = Problem.builder()
+                .type(URI.create("https://example.invalid/problems/invalid-request"))
+                .title("请求参数无效")
+                .status(HttpStatus.BAD_REQUEST.value())
+                .code("INVALID_REQUEST")
+                .detail("请求参数校验不通过，存在 " + fieldErrors.size() + " 处校验错误")
+                .instance(request.getRequestURI())
+                .requestId(resolveRequestId(request))
+                .fieldErrors(fieldErrors)
+                .build();
+
+        log.warn("约束违规校验未通过: uri={}, fieldErrorsCount={}", request.getRequestURI(), fieldErrors.size());
+        return buildResponseEntity(problem, HttpStatus.BAD_REQUEST);
+    }
+
     /** 捕获空请求体、畸形 JSON 和无法反序列化的字段值。 */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Problem> handleHttpMessageNotReadableException(

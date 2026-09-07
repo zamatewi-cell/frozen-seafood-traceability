@@ -20,6 +20,10 @@ tags:
     description: 企业交接确认
   - name: Quality
     description: 温控、告警、冻结与模拟召回
+  - name: Products
+    description: 平台级产品主数据管理
+  - name: TemperatureRules
+    description: 分阶段版本化温控基准规则
   - name: Public
     description: 消费者公开白名单接口
 paths:
@@ -85,6 +89,154 @@ paths:
                     properties:
                       data: {$ref: '#/components/schemas/CurrentUser'}
         '401': {$ref: '#/components/responses/Problem'}
+  /products:
+    get:
+      tags: [Products]
+      summary: 分页多条件查询产品主数据列表
+      operationId: listProducts
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Size'}
+        - name: keyword
+          in: query
+          description: 产品编码或公开名称模糊匹配
+          schema: {type: string}
+        - name: category
+          in: query
+          description: 水产大类
+          schema: {$ref: '#/components/schemas/ProductCategory'}
+        - name: sourceType
+          in: query
+          description: 来源类型
+          schema: {$ref: '#/components/schemas/ProductSourceType'}
+        - name: status
+          in: query
+          description: 产品状态
+          schema: {$ref: '#/components/schemas/ProductStatus'}
+      responses:
+        '200':
+          description: 产品分页列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductPage'}
+        '401': {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [Products]
+      summary: 创建海产品主数据（仅限全平台管理角色）
+      operationId: createProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductCreateRequest'}
+      responses:
+        '201':
+          description: 创建产品成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /products/{productId}:
+    parameters:
+      - name: productId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+    get:
+      tags: [Products]
+      summary: 查询指定海产品详情
+      operationId: getProduct
+      responses:
+        '200':
+          description: 产品主数据详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+    patch:
+      tags: [Products]
+      summary: 乐观锁更新海产品主数据（仅限全平台管理角色）
+      operationId: patchProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductPatchRequest'}
+      responses:
+        '200':
+          description: 更新产品成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /products/{productId}/temperature-rules:
+    parameters:
+      - name: productId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+    get:
+      tags: [TemperatureRules]
+      summary: 查询指定产品的温控规则版本及各环节明细
+      operationId: listProductTemperatureRules
+      responses:
+        '200':
+          description: 温控规则列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TemperatureRuleListEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [TemperatureRules]
+      summary: 为海产品创建温控基准规则草稿（仅限全平台管理角色）
+      operationId: createTemperatureRuleDraft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TemperatureRuleCreateRequest'}
+      responses:
+        '201':
+          description: 创建规则草稿成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TemperatureRuleEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /temperature-rules/{ruleId}/publish:
+    parameters:
+      - name: ruleId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+    post:
+      tags: [TemperatureRules]
+      summary: 发布温控基准规则（仅限全平台管理角色）
+      operationId: publishTemperatureRule
+      responses:
+        '200':
+          description: 发布规则成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TemperatureRuleEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
   /batches:
     get:
       tags: [Batches]
@@ -484,6 +636,21 @@ components:
       properties:
         requestId: {type: string}
         timestamp: {type: string, format: date-time}
+    PageMeta:
+      type: object
+      required: [number, size, totalElements, totalPages]
+      properties:
+        number: {type: integer, minimum: 1, description: 当前页码}
+        size: {type: integer, minimum: 1, maximum: 100, description: 每页记录数}
+        totalElements: {type: integer, format: int64, minimum: 0, description: 符合条件的总记录数}
+        totalPages: {type: integer, minimum: 0, description: 总页数}
+    PagedResponseMeta:
+      allOf:
+        - {$ref: '#/components/schemas/ResponseMeta'}
+        - type: object
+          required: [page]
+          properties:
+            page: {$ref: '#/components/schemas/PageMeta'}
     Problem:
       type: object
       required: [type, title, status, code, requestId]
@@ -531,6 +698,163 @@ components:
         orgType: {type: string}
         roles: {type: array, items: {type: string}}
         scopes: {type: array, items: {type: string}}
+    ProductStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, INACTIVE]
+      description: 产品主数据状态 (DRAFT 草稿, ACTIVE 启用, INACTIVE 停用)
+    ProductCategory:
+      type: string
+      enum: [FISH, CRUSTACEAN, SHELLFISH, CEPHALOPOD, OTHER]
+      description: 水产大类
+    ProductSourceType:
+      type: string
+      enum: [DOMESTIC_CAPTURE, DOMESTIC_FARMED, IMPORT]
+      description: 水产品来源类型
+    RuleStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, RETIRED]
+      description: 温控规则状态 (DRAFT 草稿, ACTIVE 生效, RETIRED 废弃)
+    RuleStageCode:
+      type: string
+      enum: [PROCESSING, STORAGE, TRANSPORT, RETAIL]
+      description: 供应链环节代码
+    TemperatureUnit:
+      type: string
+      enum: [CELSIUS]
+      description: 温标单位 (强制 CELSIUS 摄氏度)
+    Product:
+      type: object
+      additionalProperties: false
+      required: [id, productCode, publicName, category, specification, sourceType, baseUnitCode, status, version]
+      properties:
+        id: {type: integer, format: int64}
+        productCode: {type: string, minLength: 2, maxLength: 32}
+        publicName: {type: string, minLength: 1, maxLength: 128}
+        scientificName: {type: string, maxLength: 128}
+        category: {$ref: '#/components/schemas/ProductCategory'}
+        specification: {type: string, minLength: 1, maxLength: 128}
+        sourceType: {$ref: '#/components/schemas/ProductSourceType'}
+        baseUnitCode: {type: string, maxLength: 16}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+        version: {type: integer, format: int64}
+        createdAt: {type: string, format: date-time}
+        createdBy: {type: integer, format: int64}
+        updatedAt: {type: string, format: date-time}
+        updatedBy: {type: integer, format: int64}
+    ProductCreateRequest:
+      type: object
+      required: [productCode, publicName, category, specification, sourceType]
+      properties:
+        productCode: {type: string, minLength: 2, maxLength: 32, pattern: '^[A-Za-z0-9_-]+$'}
+        publicName: {type: string, minLength: 1, maxLength: 128}
+        scientificName: {type: string, maxLength: 128}
+        category: {$ref: '#/components/schemas/ProductCategory'}
+        specification: {type: string, minLength: 1, maxLength: 128}
+        sourceType: {$ref: '#/components/schemas/ProductSourceType'}
+        baseUnitCode: {type: string, maxLength: 16, default: kg}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+    ProductPatchRequest:
+      type: object
+      required: [version]
+      properties:
+        version: {type: integer, format: int64, description: 乐观锁版本号}
+        productCode: {type: string, minLength: 2, maxLength: 32, pattern: '^[A-Za-z0-9_-]+$'}
+        publicName: {type: string, minLength: 1, maxLength: 128}
+        scientificName: {type: string, maxLength: 128}
+        category: {$ref: '#/components/schemas/ProductCategory'}
+        specification: {type: string, minLength: 1, maxLength: 128}
+        sourceType: {$ref: '#/components/schemas/ProductSourceType'}
+        baseUnitCode: {type: string, maxLength: 16}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+    ProductEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Product'}
+    ProductPage:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Product'}
+        meta: {$ref: '#/components/schemas/PagedResponseMeta'}
+    TemperatureRuleStage:
+      type: object
+      additionalProperties: false
+      required: [id, ruleId, stageCode, lowerLimit, upperLimit, unitCode, version]
+      properties:
+        id: {type: integer, format: int64}
+        ruleId: {type: integer, format: int64}
+        stageCode: {$ref: '#/components/schemas/RuleStageCode'}
+        lowerLimit: {type: number}
+        upperLimit: {type: number}
+        unitCode: {$ref: '#/components/schemas/TemperatureUnit'}
+        allowedDurationSeconds: {type: integer, minimum: 0}
+        sequenceNo: {type: integer, minimum: 1}
+        version: {type: integer, format: int64}
+        createdAt: {type: string, format: date-time}
+        createdBy: {type: integer, format: int64}
+        updatedAt: {type: string, format: date-time}
+        updatedBy: {type: integer, format: int64}
+    TemperatureRule:
+      type: object
+      additionalProperties: false
+      required: [id, productId, versionNo, name, effectiveFrom, status, stages, version]
+      properties:
+        id: {type: integer, format: int64}
+        productId: {type: integer, format: int64}
+        versionNo: {type: integer, minimum: 1}
+        name: {type: string, minLength: 1, maxLength: 128}
+        effectiveFrom: {type: string, format: date-time}
+        effectiveTo: {type: string, format: date-time}
+        status: {$ref: '#/components/schemas/RuleStatus'}
+        basisNote: {type: string}
+        stages:
+          type: array
+          items: {$ref: '#/components/schemas/TemperatureRuleStage'}
+        version: {type: integer, format: int64}
+        createdAt: {type: string, format: date-time}
+        createdBy: {type: integer, format: int64}
+        updatedAt: {type: string, format: date-time}
+        updatedBy: {type: integer, format: int64}
+    TemperatureRuleStageCreateRequest:
+      type: object
+      required: [stageCode, lowerLimit, upperLimit, unitCode]
+      properties:
+        stageCode: {$ref: '#/components/schemas/RuleStageCode'}
+        lowerLimit: {type: number}
+        upperLimit: {type: number}
+        unitCode: {$ref: '#/components/schemas/TemperatureUnit'}
+        allowedDurationSeconds: {type: integer, minimum: 0, default: 0}
+        sequenceNo: {type: integer, minimum: 1, default: 1}
+    TemperatureRuleCreateRequest:
+      type: object
+      required: [name, effectiveFrom, stages]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        effectiveFrom: {type: string, format: date-time}
+        effectiveTo: {type: string, format: date-time}
+        basisNote: {type: string}
+        stages:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/TemperatureRuleStageCreateRequest'}
+    TemperatureRuleEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/TemperatureRule'}
+    TemperatureRuleListEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/TemperatureRule'}
     BatchStatus:
       type: string
       enum: [DRAFT, ACTIVE, FROZEN, RECALLED, CLOSED]

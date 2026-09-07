@@ -59,6 +59,15 @@ class AuthControllerTest {
     private UserRoleMapper userRoleMapper;
 
     @MockitoBean
+    private com.example.traceability.masterdata.mapper.ProductMapper productMapper;
+
+    @MockitoBean
+    private com.example.traceability.masterdata.mapper.TemperatureRuleMapper temperatureRuleMapper;
+
+    @MockitoBean
+    private com.example.traceability.masterdata.mapper.TemperatureRuleStageMapper temperatureRuleStageMapper;
+
+    @MockitoBean
     private UserDetailsService userDetailsService;
 
     @Autowired

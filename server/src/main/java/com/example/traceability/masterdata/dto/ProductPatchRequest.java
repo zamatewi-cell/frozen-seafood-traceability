@@ -1,0 +1,53 @@
+package com.example.traceability.masterdata.dto;
+
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+
+/**
+ * 更新产品主数据请求 DTO。
+ * <p>
+ * 必须携带 {@code version} 用于 MyBatis-Plus 乐观锁版本并发检查。
+ * 其余字段为可选修改项。
+ * </p>
+ *
+ * @author Seafood Traceability Team
+ * @since 0.1.0
+ */
+public record ProductPatchRequest(
+
+        @NotNull(message = "乐观锁版本号 version 不能为空")
+        Long version,
+
+        @Size(min = 2, max = 32, message = "产品编码长度必须在 2 到 32 个字符之间")
+        @Pattern(regexp = "^[A-Za-z0-9_-]+$", message = "产品编码只能包含英文字母、数字、下划线和短横线")
+        String productCode,
+
+        @Size(min = 1, max = 128, message = "产品公开名称长度不能超过 128 个字符")
+        String publicName,
+
+        @Size(max = 128, message = "水产品学名不能超过 128 个字符")
+        String scientificName,
+
+        @Size(max = 32, message = "水产大类长度不能超过 32 个字符")
+        String category,
+
+        @Size(min = 1, max = 128, message = "产品规格说明不能超过 128 个字符")
+        String specification,
+
+        @Size(max = 32, message = "来源类型长度不能超过 32 个字符")
+        String sourceType,
+
+        @Pattern(regexp = "(?i)^kg$", message = "产品基准计量单位仅允许 kg")
+        @Size(max = 16, message = "基准计量单位不能超过 16 个字符")
+        String baseUnitCode,
+
+        @Size(max = 16, message = "产品状态不能超过 16 个字符")
+        String status
+) {
+    public ProductPatchRequest {
+        if (baseUnitCode != null && !baseUnitCode.isBlank()) {
+            baseUnitCode = baseUnitCode.trim().toLowerCase();
+        }
+    }
+}
