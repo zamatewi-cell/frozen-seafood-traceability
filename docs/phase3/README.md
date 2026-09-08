@@ -3,6 +3,7 @@
 本文档记录冷冻海产品溯源系统 Phase 3 的接口调用契约、安全设计机制、领域模型算法与测试分层规范：
 1. **第一部分**：会话认证与组织上下文交付规范（GitHub Issue #7 “session authentication and organization context”）
 2. **第二部分**：产品主数据与分阶段温控规则交付规范（GitHub Issue #9 “product master data and versioned temperature rules”）
+3. **第三部分**：组织范围批次草稿生命周期交付规范（GitHub Issue #11 “organization-scoped batch draft lifecycle”）
 
 ---
 
@@ -187,16 +188,16 @@ Get-Content .env | ForEach-Object {
 }
 $env:MYSQL_IT_ENABLED = "true"
 
-# 3. 推荐命令：进入 server 目录执行全量 clean test（52/52 全量通过）
+# 3. 推荐命令：进入 server 目录执行全量 clean test（全量测试通过）
 cd server
 .\mvnw.cmd clean test
 ```
 
 > **测试范围与命令区别说明**：
 > - **单独运行 `AuthMysqlIntegrationTest`**（命令：`.\mvnw.cmd test -Dtest=AuthMysqlIntegrationTest`）：仅单独执行 Phase 3 身份与会话层在真实数据库上的集成验证（覆盖 CSRF 校验、BCrypt 密码校验、会话固定防护、`/me` 白名单数据投影、数据库组织及角色活性动态复核、注销会话失效及测试数据物理销毁），耗时较短，适合在聚焦 identity 模块时快速迭代验证。
-> - **全量测试（包含 `MysqlMigrationIntegrationTest`，推荐命令：`.\mvnw.cmd clean test`）**：不仅包含全部 46 个离线单元/Mock 测试和上述 Phase 3 认证集成测试，还会执行 Phase 2 的 `MysqlMigrationIntegrationTest`，在真实 MySQL 8.4 容器中完整验证 Flyway V1 迁移脚本的幂等执行、全量表结构与索引完整性。在交付验收阶段强烈推荐使用全量命令，确保数据模型与会话鉴权体系端到端完全闭环。
+> - **全量测试（包含 `MysqlMigrationIntegrationTest`，推荐命令：`.\mvnw.cmd clean test`）**：不仅包含全部离线单元/Mock 测试和上述 Phase 3 认证集成测试，还会执行 Phase 2 的 `MysqlMigrationIntegrationTest`，在真实 MySQL 8.4 容器中完整验证 Flyway V1 迁移脚本的幂等执行、全量表结构与索引完整性。在交付验收阶段强烈推荐使用全量命令，确保数据模型与会话鉴权体系端到端完全闭环。
 >
-> **环境验证记录**：本项目已在本机基于 Docker 编排的 MySQL 8.4.0 容器（宿主机 3307 端口隔离）环境下完成全量测试套件验证，`MysqlMigrationIntegrationTest` 与 `AuthMysqlIntegrationTest` 全部绿标通过（52 passed, 0 failures, 0 errors, 0 skipped），测试数据在 `@AfterEach` 中彻底物理清理，无敏感密码哈希泄露，无复合主键告警。
+> **环境验证记录**：本项目已在本机基于 Docker 编排的 MySQL 8.4.0 容器（宿主机 3307 端口隔离）环境下完成全量测试套件验证，`MysqlMigrationIntegrationTest` 与 `AuthMysqlIntegrationTest` 全部绿标通过（0 failures, 0 errors, 0 skipped），测试数据在 `@AfterEach` 中彻底物理清理，无敏感密码哈希泄露，无复合主键告警。
 
 ---
 
@@ -494,3 +495,213 @@ $env:MYSQL_IT_ENABLED = "true"
 cd server
 .\mvnw.cmd clean test
 ```
+
+---
+
+# 第三部分：组织范围批次草稿生命周期交付规范 (Issue #11)
+
+## 一、核心目标与职责边界
+
+严格遵循 GitHub Issue #11 与整体架构设计，实现基础批次（Batch）草稿的创建、组织范围隔离分页查询、详情查看、增量更新及提交流转：
+
+1. **业务范围收敛**：
+   - 本切片仅实现基础批次的生命周期流转（`DRAFT -> ACTIVE`）；
+   - **不实现**批次拆分、合并、加工（`batch_operation`）、不生成谱系边（`batch_relation`）、不记录追溯事件（`trace_event`）、不生成或暴露消费者公开追溯码（`public_trace_code`）、不处理业务冻结/召回/关闭。
+2. **分层架构与控制反转**：
+   - 严格遵循 `web -> application -> domain -> mapper` 四层设计；
+   - 表现层 `BatchController` 严禁直接调用持久层 `BatchMapper`，所有跨表校验、权限检查、并发版本控制与幂等重试逻辑统一收敛于应用服务层 `BatchApplicationService`。
+3. **安全与组织隔离边界**：
+   - **写权限拦截**：创建草稿、更新草稿、提交激活强制要求企业操作员角色（`TraceSecurityPrincipal.roles` 必须包含 `OPERATOR`）；系统管理员按 RBAC 原则默认只读企业业务，无权代写，违者返回 **`403 ACCESS_DENIED`**；
+   - **组织上下文唯一服务端推导**：`orgId`、操作人 `userId`、审计时间及初始 `DRAFT` 状态严格由服务端生成，绝对不信任客户端传递；
+   - **读权限与数据范围隔离**：
+     - `PLATFORM` 作用域角色可查询全平台批次；
+     - 其余所有企业端已认证用户在列表查询时**必须在 Mapper/SQL 层强制限定 `org_id = principal.orgId`**，杜绝先查全表再在内存过滤；
+     - 详情查询强制校验所有权：库内已存在但属于其他组织的批次，返回 **`403 ORG_SCOPE_DENIED`**；批次不存在返回 **`404 RESOURCE_NOT_FOUND`**；
+   - **严格白名单数据投影**：响应仅暴露白名单业务属性，严禁泄露 `isDeleted` 逻辑删除标记及 `creationIdempotencyKey` 内部防重键；所有审计时间输出带明确 UTC 偏移的 ISO 8601 格式字符串。
+
+---
+
+## 二、领域模型与生命周期约束
+
+### 1. 实体核心属性与规范
+
+- **追溯批次主表 (Batch)**：
+  - `id`：内部自增主键；
+  - `orgId`（库字段 `org_id`）：当前持有企业组织 ID；
+  - `productId`（库字段 `product_id`）：关联海产品主数据 ID（创建与提交时必须处于 `ACTIVE` 状态）；
+  - `batchNo`（库字段 `batch_no`）：业务批次号，同组织内排他唯一（复合唯一索引 `uk_batch_org_no`），不同组织允许复用同一批次号；
+  - `batchType`（库字段 `batch_type`）：批次环节枚举（`SOURCE`, `PROCESSING`, `DISTRIBUTION`, `SALE`）；
+  - `quantity`（库字段 `quantity`）：批次当前数量，`DECIMAL(18,3)`，必须 `> 0` 且最多保留 3 位小数；
+  - `unitCode`（库字段 `unit_code`）：计量单位，Phase 1 严格限定为 `kg`，传入其他单位返回 400 `INVALID_REQUEST`；
+  - `originType`（库字段 `origin_type`）：水产品来源枚举（规范大写代码：`DOMESTIC_CAPTURE`, `DOMESTIC_FARMED`, `IMPORT`）；
+  - `originText`（库字段 `origin_text`）：企业端完整来源产地文本描述（最长 255 字符）；
+  - `productionDate`（`production_date`）：生产加工日期（`LocalDate`，可选）；
+  - `captureDate`（`capture_date`）：捕捞出塘日期（`LocalDate`，可选）；
+  - `freezeDate`（`freeze_date`）：速冻完成日期（`LocalDate`，可选）；
+  - `shelfLifeDays`（`shelf_life_days`）：保质期天数（可选，若提供必须 `> 0`）；
+  - `status`（库字段 `status`）：批次生命周期状态（`DRAFT`, `ACTIVE`, `FROZEN`, `RECALLED`, `CLOSED`）；
+  - `creationIdempotencyKey`（库字段 `creation_idempotency_key`）：创建防重幂等键（最长 128 字符，同组织唯一，响应 DTO 屏蔽）；
+  - `version`：乐观锁版本号（草稿更新与提交成功时原子递增）；
+  - `createdAt` / `updatedAt`：UTC 创建/更新时间。
+
+### 2. 数据库物理级约束保障 (Flyway V3)
+
+在 `V3__batch_constraints.sql` 中新增幂等键字段、同组织唯一索引及 MySQL 8.4 物理级 CHECK 约束：
+- `uk_batch_org_idempotency`：同一组织下创建幂等键唯一 `(org_id, creation_idempotency_key)`；
+- `chk_batch_batch_type`：限定批次类型枚举值域 `('SOURCE', 'PROCESSING', 'DISTRIBUTION', 'SALE')`；
+- `chk_batch_origin_type`：限定来源枚举值域 `('DOMESTIC_CAPTURE', 'DOMESTIC_FARMED', 'IMPORT')`；
+- `chk_batch_status`：限定批次状态值域 `('DRAFT', 'ACTIVE', 'FROZEN', 'RECALLED', 'CLOSED')`；
+- `chk_batch_quantity`：限定数量必须严格大于 0 (`quantity > 0`)；
+- `chk_batch_unit_code`：限定基础单位必须为 `kg` (`unit_code = 'kg'`)；
+- `chk_batch_shelf_life_days`：限定保质期天数必须可空或大于 0 (`shelf_life_days IS NULL OR shelf_life_days > 0`)。
+
+---
+
+## 三、并发控制、幂等防重与安全隔离机制
+
+```mermaid
+stateDiagram-v2
+    [*] --> DRAFT : OPERATOR 创建批次草稿 (校验产品 ACTIVE + 悲观行锁防TOCTOU + 幂等重放前置)
+    DRAFT --> DRAFT : OPERATOR 增量更新草稿 (单条 SQL 约束 id + org_id + status='DRAFT' + version + 当前读精准诊断)
+    DRAFT --> ACTIVE : OPERATOR 提交批次 (产品 ACTIVE 悲观行锁 + 单条 SQL 条件流转与版本自增 + 当前读诊断)
+    ACTIVE --> [*] : 进入下游业务流转 (后续切片)
+```
+
+1. **创建防重幂等键机制与当前读（Locking Read）并发竞态恢复**：
+   - 客户端在 `POST /api/v1/batches` 中强制携带 `Idempotency-Key` 请求头（长度限定为 16..128 字符）；
+   - 服务端首先查询 `(org_id, creationIdempotencyKey)` 进行同组织幂等预检：
+     - 若已存在且完整业务载荷相同（批号、产品、类型、数量、单位、来源、日期、保质期），直接返回原批次封套且不重复插入（即使产品在创建后变为 `INACTIVE` 仍正常重放）；
+     - 若已存在但载荷语义不一致，立即拒绝并抛出 **`409 IDEMPOTENCY_CONFLICT`**；
+   - **MySQL REPEATABLE READ 隔离级别当前读恢复机制**：在 MySQL 默认的 `REPEATABLE READ` 隔离级别下，事务内首次普通 `SELECT` 会建立 Read View 快照视图。若两个并发请求同时发起首次创建，另一个事务成功插入并提交后，本事务并发 `insert` 必然抛出 `DuplicateKeyException`。此时若使用普通快照读将无法看到另一事务已提交的记录，导致幂等重试误报为 `BATCH_NO_CONFLICT`。因此服务端必须采用当前锁定读 `SELECT ... FOR UPDATE`（`selectByOrgIdAndIdempotencyKeyForUpdate` 与 `selectByOrgIdAndBatchNoForUpdate`）穿透快照读盲区，精确获取存储引擎最新已提交行，正确返回原批次响应或判定真实批次号冲突。
+2. **单条 SQL 条件更新与当前读版本/状态精准分类**：
+   - 草稿更新与提交均执行单条原子更新 SQL：
+     `UPDATE batch SET ... version = version + 1 WHERE id = #{id} AND org_id = #{orgId} AND status = 'DRAFT' AND version = #{version} AND is_deleted = 0`；
+   - 检查返回值 `affectedRows`，若受影响行数为 0，同样通过当前锁定读 `selectByIdIgnoreTenantForUpdate(batchId)` 打破前置快照盲区，获取底层存储引擎最新记录，杜绝将并发状态变更（如已被并发提交为 ACTIVE）误分类为版本冲突（`VERSION_CONFLICT`），精准区分：
+     - 批次不存在：抛出 **`404 RESOURCE_NOT_FOUND`**；
+     - 跨组织越权：抛出 **`403 ORG_SCOPE_DENIED`**；
+     - 状态非草稿（如并发已被提交变为 ACTIVE）：抛出 **`409 INVALID_STATE_TRANSITION`**；
+     - 版本号不匹配（请求版本为旧值）：抛出 **`409 VERSION_CONFLICT`**。
+3. **关联产品活性强校验与排他行锁（TOCTOU 竞态消除）**：
+   - 创建批次（首次非重放）与提交激活批次前，均强制复核关联产品的最新状态；
+   - 采用 `productMapper.selectByIdForUpdate(productId)` 对产品记录加排他悲观行锁，确保在批次创建落库或草稿激活提交流转事务完成前，关联产品不能被并发事务停用，彻底消除“检查时为 ACTIVE 但流转时已停用”的 TOCTOU（Time-of-Check to Time-of-Use）竞态；
+   - 幂等命中重放路径绝不查询或锁定产品，保障高并发只读重试的高吞吐。
+4. **软删除批号与幂等键复用边界说明**：
+   - 软删除批号与幂等键复用策略属于未来删除/归档生命周期规范；本切片严格收敛于基础批次生命周期（`DRAFT -> ACTIVE`），系统不提供批次删除接口，保持数据库物理唯一索引 `(org_id, batch_no)` 与 `(org_id, creation_idempotency_key)` 约束稳定，不变更现有索引结构。
+
+---
+
+## 四、API 接口调用契约 (遵循 ISO 8601 与显式 UTC 偏移)
+
+### 1. 创建批次草稿 (`POST /api/v1/batches`)
+- **权限**：企业操作员（`OPERATOR` 角色），强制校验 CSRF；
+- **请求头**：`Idempotency-Key: <16..128字符>`；
+- **入参**：
+  ```json
+  {
+    "batchNo": "BATCH-20260908-001",
+    "productId": 100,
+    "batchType": "SOURCE",
+    "quantity": 100.500,
+    "unitCode": "kg",
+    "originType": "DOMESTIC_CAPTURE",
+    "originText": "东海舟山渔场3号捕捞作业区",
+    "productionDate": "2026-09-01",
+    "captureDate": "2026-09-01",
+    "freezeDate": "2026-09-02",
+    "shelfLifeDays": 180
+  }
+  ```
+- **响应**：`201 Created`
+  ```json
+  {
+    "data": {
+      "id": 1000,
+      "orgId": 10,
+      "productId": 100,
+      "batchNo": "BATCH-20260908-001",
+      "batchType": "SOURCE",
+      "quantity": 100.500,
+      "unitCode": "kg",
+      "originType": "DOMESTIC_CAPTURE",
+      "originText": "东海舟山渔场3号捕捞作业区",
+      "productionDate": "2026-09-01",
+      "captureDate": "2026-09-01",
+      "freezeDate": "2026-09-02",
+      "shelfLifeDays": 180,
+      "status": "DRAFT",
+      "version": 0,
+      "createdAt": "2026-09-08T09:30:00Z",
+      "createdBy": 101,
+      "updatedAt": "2026-09-08T09:30:00Z",
+      "updatedBy": 101
+    },
+    "meta": {
+      "requestId": "01J...",
+      "timestamp": "2026-09-08T17:30:00+08:00"
+    }
+  }
+  ```
+
+### 2. 分页查询批次列表 (`GET /api/v1/batches`)
+- **权限**：所有已登录用户；
+- **过滤参数**：`status`（状态精确过滤，支持 `DRAFT/ACTIVE/FROZEN/RECALLED/CLOSED`）、`page`（从 1 开始，默认 1）、`size`（1~100，默认 20）；
+- **响应**：`200 OK`，包含 `meta.page` 分页元数据。
+
+### 3. 获取批次详情 (`GET /api/v1/batches/{batchId}`)
+- **权限**：所有已登录用户；本组织或 `PLATFORM` scope 可查；跨组织已存在返回 403 `ORG_SCOPE_DENIED`，不存在返回 404；
+- **响应**：`200 OK`，白名单数据投影。
+
+### 4. 增量更新批次草稿 (`PATCH /api/v1/batches/{batchId}`)
+- **权限**：企业操作员（`OPERATOR` 角色），强制校验 CSRF；
+- **入参**（仅允许修改数量、产地描述、日期与保质期天数）：
+  ```json
+  {
+    "version": 0,
+    "quantity": 120.000,
+    "originText": "更新后的产地说明",
+    "shelfLifeDays": 240
+  }
+  ```
+- **响应**：`200 OK`，`version` 原子递增为 1。
+
+### 5. 提交激活批次草稿 (`POST /api/v1/batches/{batchId}/submit`)
+- **权限**：企业操作员（`OPERATOR` 角色），强制校验 CSRF；
+- **入参**：
+  ```json
+  {
+    "version": 1
+  }
+  ```
+- **流转前置校验**：关联海产品必须处于 `ACTIVE` 状态；批次当前必须为 `DRAFT` 状态；版本号必须匹配；
+- **响应**：`200 OK`，批次 `status` 流转为 `ACTIVE`，`version` 原子递增。
+
+---
+
+## 五、测试分层策略与执行方法
+
+### 1. 默认测试套件（CI 快速门禁与离线快速验证）
+采用纯单元测试（MockitoExtension）与 WebMvc 切片测试（WebMvcTest + MockMvc），不依赖外置容器：
+- `BatchApplicationServiceTest`：覆盖合法创建、非 OPERATOR 拒绝（403）、缺失/短幂等键（400）、非法枚举/单位/数量/保质期（400）、关联产品不存在（404）与停用（422）、批次号冲突（409）、同幂等键重试与语义冲突（409）、并发 DuplicateKey 恢复、草稿更新版本自增、跨组织更新拒绝（403）、旧版本冲突（409）、非草稿更新与提交拒绝（409）、草稿提交为 ACTIVE、跨组织详情拒绝（403）与全平台/本组织分页隔离。
+- `BatchControllerTest`：覆盖全接口匿名拦截（401）、写操作 CSRF 防护（403）、分页边界参数拦截（400）、缺少必填字段/版本号拦截（400）、白名单响应投影与带 UTC 偏移量的 ISO 8601 时间格式校验。
+
+**执行命令（需在 `server` 目录下执行）**：
+```powershell
+cd server
+.\mvnw.cmd clean test
+```
+
+### 2. 真实 MySQL 8.4 集成测试（受条件环境变量控制）
+测试类：`BatchMysqlIntegrationTest`
+- **控制条件**：仅在环境变量 `MYSQL_IT_ENABLED=true` 时激活；未配置时在默认构建中安全跳过（Skipped）；
+- **物理清理**：注入 `JdbcTemplate`，在 `@AfterEach` 中先按 `org_id` 彻底物理清理测试组织下的全部 `batch`（涵盖 MockMvc 接口生成与直接 SQL 插入），再按依赖反向顺序清理 `product -> user_role -> app_user -> role -> organization`，确保测试成功或失败均不污染数据库；
+- **测试内容**：
+  1. 真实会话登录与 CSRF 流程；
+  2. 双组织环境验证：组织 A 与组织 B 均可创建相同批次号，同组织内批次号排他冲突；
+  3. 组织 A 列表查询与详情查询严格隔离，组织 B 跨组织访问组织 A 批次返回 403 `ORG_SCOPE_DENIED`；
+  4. 关联停用产品创建批次返回 422 `PRODUCT_NOT_ACTIVE`；
+  5. 幂等键重放与冲突检测：同组织同 key 且归一化载荷相同时返回原批次（即使关联产品在创建后变为 `INACTIVE` 仍成功重放原批次）；不同载荷优先返回 409 `IDEMPOTENCY_CONFLICT`；
+  6. 平台管理员（`PLATFORM` scope）跨组织读列表，普通企业用户读隔离，平台非 `OPERATOR` 用户写操作拦截（403 `ACCESS_DENIED`）；
+  7. 草稿增量更新版本自增与提交流转为 ACTIVE；
+  8. **Flyway V3 物理 CHECK 约束拦截能力验证**：绕过应用层直插数据库，验证非法批次类型、非法来源类型、非法批次状态、数量小于等于 0、单位非 kg、保质期天数小于等于 0 以及重复幂等键均被 MySQL 8.4 物理约束精准拦截并抛出包含具体约束名（如 `chk_batch_batch_type`、`chk_batch_quantity`、`uk_batch_org_idempotency` 等）的 `DataAccessException`；
+  9. **MySQL REPEATABLE READ 快照读盲区与当前读穿透证据**：在同一 `TRANSACTION_REPEATABLE_READ` 事务中，普通快照读无法看到并发事务后提交的记录，而当前锁定读（`SELECT ... FOR UPDATE`）能够穿透快照读盲区，直接读取到底层最新已提交行；
+  10. **并发幂等双请求竞争验证**：两个并发线程携带相同幂等键同时发起创建请求，由数据库唯一索引和并发竞态恢复机制协同处理，只生成一行记录且两线程返回相同的批次 ID。

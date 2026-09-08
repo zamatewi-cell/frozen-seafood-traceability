@@ -68,6 +68,9 @@ class AuthControllerTest {
     private com.example.traceability.masterdata.mapper.TemperatureRuleStageMapper temperatureRuleStageMapper;
 
     @MockitoBean
+    private com.example.traceability.batch.mapper.BatchMapper batchMapper;
+
+    @MockitoBean
     private UserDetailsService userDetailsService;
 
     @Autowired

@@ -254,10 +254,12 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/BatchPage'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
     post:
       tags: [Batches]
-      summary: 创建批次草稿
+      summary: 创建批次草稿（仅限企业操作员）
       operationId: createBatch
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -272,6 +274,10 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/BatchEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
   /batches/{batchId}:
@@ -287,10 +293,12 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/BatchEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
     patch:
       tags: [Batches]
-      summary: 更新批次草稿
+      summary: 更新批次草稿（仅限企业操作员）
       operationId: updateDraftBatch
       requestBody:
         required: true
@@ -303,7 +311,35 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/BatchEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/submit:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    post:
+      tags: [Batches]
+      summary: 提交激活批次草稿（仅限企业操作员）
+      operationId: submitBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SubmitBatchRequest'}
+      responses:
+        '200':
+          description: 批次已激活
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
   /batch-operations:
     post:
       tags: [Batches]
@@ -855,40 +891,73 @@ components:
             data:
               type: array
               items: {$ref: '#/components/schemas/TemperatureRule'}
+    BatchType:
+      type: string
+      enum: [SOURCE, PROCESSING, DISTRIBUTION, SALE]
+      description: 批次环节类型 (SOURCE 来源/捕捞, PROCESSING 加工速冻, DISTRIBUTION 分销仓储, SALE 终端销售)
+    OriginType:
+      type: string
+      enum: [DOMESTIC_CAPTURE, DOMESTIC_FARMED, IMPORT]
+      description: 水产品来源类型 (DOMESTIC_CAPTURE 国内捕捞, DOMESTIC_FARMED 国内养殖, IMPORT 进口)
     BatchStatus:
       type: string
       enum: [DRAFT, ACTIVE, FROZEN, RECALLED, CLOSED]
+      description: 批次生命周期状态 (DRAFT 草稿, ACTIVE 生效流转, FROZEN 冻结, RECALLED 召回, CLOSED 关闭)
     Batch:
       type: object
-      required: [id, batchNo, productId, quantity, unitCode, status, version]
+      additionalProperties: false
+      required: [id, orgId, productId, batchNo, batchType, quantity, unitCode, originType, originText, status, version]
       properties:
         id: {type: integer, format: int64}
-        batchNo: {type: string}
+        orgId: {type: integer, format: int64}
         productId: {type: integer, format: int64}
-        quantity: {type: number, multipleOf: 0.001}
+        batchNo: {type: string, minLength: 1, maxLength: 64}
+        batchType: {$ref: '#/components/schemas/BatchType'}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
         unitCode: {type: string, example: kg}
-        originType: {type: string, enum: [DOMESTIC_CAPTURE, DOMESTIC_FARMED, IMPORT]}
-        originText: {type: string}
+        originType: {$ref: '#/components/schemas/OriginType'}
+        originText: {type: string, maxLength: 255}
+        productionDate: {type: string, format: date}
+        captureDate: {type: string, format: date}
+        freezeDate: {type: string, format: date}
+        shelfLifeDays: {type: integer, minimum: 1}
         status: {$ref: '#/components/schemas/BatchStatus'}
-        version: {type: integer, minimum: 0}
+        version: {type: integer, format: int64, minimum: 0}
+        createdAt: {type: string, format: date-time}
+        createdBy: {type: integer, format: int64}
+        updatedAt: {type: string, format: date-time}
+        updatedBy: {type: integer, format: int64}
     CreateBatchRequest:
       type: object
-      required: [batchNo, productId, quantity, unitCode, originType, originText]
+      required: [batchNo, productId, batchType, quantity, unitCode, originType, originText]
       properties:
         batchNo: {type: string, minLength: 1, maxLength: 64}
         productId: {type: integer, format: int64}
+        batchType: {$ref: '#/components/schemas/BatchType'}
         quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
         unitCode: {type: string, example: kg}
-        originType: {type: string, enum: [DOMESTIC_CAPTURE, DOMESTIC_FARMED, IMPORT]}
+        originType: {$ref: '#/components/schemas/OriginType'}
         originText: {type: string, maxLength: 255}
         productionDate: {type: string, format: date}
+        captureDate: {type: string, format: date}
+        freezeDate: {type: string, format: date}
+        shelfLifeDays: {type: integer, minimum: 1}
     UpdateBatchRequest:
       type: object
       required: [version]
       properties:
+        version: {type: integer, format: int64, minimum: 0}
         quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
         originText: {type: string, maxLength: 255}
-        version: {type: integer, minimum: 0}
+        productionDate: {type: string, format: date}
+        captureDate: {type: string, format: date}
+        freezeDate: {type: string, format: date}
+        shelfLifeDays: {type: integer, minimum: 1}
+    SubmitBatchRequest:
+      type: object
+      required: [version]
+      properties:
+        version: {type: integer, format: int64, minimum: 0, description: 期望当前乐观锁版本号}
     BatchEnvelope:
       allOf:
         - {$ref: '#/components/schemas/SuccessEnvelope'}
@@ -896,26 +965,13 @@ components:
           properties:
             data: {$ref: '#/components/schemas/Batch'}
     BatchPage:
-      allOf:
-        - {$ref: '#/components/schemas/SuccessEnvelope'}
-        - type: object
-          properties:
-            data:
-              type: array
-              items: {$ref: '#/components/schemas/Batch'}
-            meta:
-              allOf:
-                - {$ref: '#/components/schemas/ResponseMeta'}
-                - type: object
-                  properties:
-                    page:
-                      type: object
-                      required: [number, size, totalElements, totalPages]
-                      properties:
-                        number: {type: integer, minimum: 1}
-                        size: {type: integer, minimum: 1}
-                        totalElements: {type: integer, minimum: 0}
-                        totalPages: {type: integer, minimum: 0}
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Batch'}
+        meta: {$ref: '#/components/schemas/PagedResponseMeta'}
     BatchOperationItem:
       type: object
       required: [role, quantity, unitCode]

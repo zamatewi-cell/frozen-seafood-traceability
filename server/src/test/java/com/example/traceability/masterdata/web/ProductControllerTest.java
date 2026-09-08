@@ -83,6 +83,9 @@ class ProductControllerTest {
     @MockitoBean
     private com.example.traceability.masterdata.mapper.TemperatureRuleStageMapper temperatureRuleStageMapper;
 
+    @MockitoBean
+    private com.example.traceability.batch.mapper.BatchMapper batchMapper;
+
     private TraceSecurityPrincipal platformPrincipal;
     private TraceSecurityPrincipal operatorPrincipal;
 
