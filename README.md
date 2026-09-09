@@ -2,7 +2,7 @@
 
 面向高校实训的冷冻海产品供应链追溯原型。系统以“批次、追溯事件、批次关系”为核心，记录来源、加工速冻、仓储、运输、交接、检测和销售等关键节点，支持消费者一码查询，以及企业侧的正向追踪、反向溯源和模拟召回。
 
-> 当前阶段：`Phase 3 / 最小纵向闭环研发`。已完成 Phase 1 设计评审与 Phase 2 后端工程骨架建设；已完成 Issue #7 会话认证与组织上下文（Session Auth & Organization Context），包含基于 Cookie 的安全会话、CSRF 防护、BCrypt 认证、防会话固定、白名单数据投影及动态活性复核；已完成 Issue #9 产品主数据与分阶段温控规则（Product Master Data & Versioned Temperature Rules），包含产品创建/查询/更新、乐观锁、分阶段可版本化温控基准、半开区间防重叠判定算法与不可变发布；已完成 Issue #11 组织范围批次草稿生命周期（Organization-scoped Batch Draft Lifecycle），包含基础批次创建、Idempotency-Key 幂等防重与并发竞态恢复、同组织批号排他、SQL 层组织隔离、单条 SQL 条件更新兼防并发冲突与提交激活；本阶段后续追溯事件记录、谱系关系与消费者公开查询仍待推进。
+> 当前阶段：`Phase 3 / 最小纵向闭环研发`。已完成 Phase 1 设计评审与 Phase 2 后端工程骨架建设；已完成 Issue #7 会话认证与组织上下文（Session Auth & Organization Context），包含基于 Cookie 的安全会话、CSRF 防护、BCrypt 认证、防会话固定、白名单数据投影及动态活性复核；已完成 Issue #9 产品主数据与分阶段温控规则（Product Master Data & Versioned Temperature Rules），包含产品创建/查询/更新、乐观锁、分阶段可版本化温控基准、半开区间防重叠判定算法与不可变发布；已完成 Issue #11 组织范围批次草稿生命周期（Organization-scoped Batch Draft Lifecycle），包含基础批次创建、Idempotency-Key 幂等防重与并发竞态恢复、同组织批号排他、SQL 层组织隔离、单条 SQL 条件更新兼防并发冲突与提交激活；已完成 Issue #13 批次操作、物料平衡与谱系边（Batch Operations, Mass Balance & Genealogy Edges），包含拆分/合并/加工/分装操作草稿创建与提交、服务端 0.001kg 物料平衡复核、输入输出批次活性/唯一产出/历史累计量校验、MySQL 8.4 recursive CTE 环检测、稳定顺序行锁、两套幂等并发恢复、不可变谱系边生成及 Flyway V4 物理 CHECK 约束；本阶段后续追溯事件记录、生成公开追溯码与消费者公开查询仍待推进。
 
 ## 项目边界
 
@@ -81,7 +81,8 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 - [x] 完成 Phase 3 会话认证与组织上下文（Issue #7：identity 安全会话、CSRF 防护、防会话固定、动态活性复核与组织上下文唯一推导）
 - [x] 完成 Phase 3 产品主数据与分阶段温控规则（Issue #9：产品创建/查询/更新、乐观锁、分阶段可版本化温控基准、半开区间无重叠判定算法与不可变发布）
 - [x] 完成 Phase 3 组织范围批次草稿生命周期（Issue #11：基础批次草稿创建、Idempotency-Key 幂等防重与并发竞态恢复、同组织批号排他、SQL 层组织数据隔离、单条 SQL 条件原子更新与 ACTIVE 提交流转、Flyway V3 物理 CHECK 约束）
-- [ ] 推进最小纵向闭环后续切片：批次操作与谱系边 → 记追溯事件 → 生成公开追溯码 → 消费者一码查询
+- [x] 完成 Phase 3 批次操作、物料平衡与谱系边（Issue #13：批次操作草稿创建与提交、服务端物料平衡重新计算、引用批次活性/组织归属校验、输出批次唯一产出与声明量校验、输入批次累计量防超额、MySQL 8.4 recursive CTE 环检测、双幂等机制、不可变谱系边与 Flyway V4 物理约束）
+- [ ] 推进最小纵向闭环后续切片：记追溯事件 → 生成公开追溯码 → 消费者一码查询
 - [ ] 完成异常、追溯、召回、测试、部署和答辩材料
 
 ## 下一步

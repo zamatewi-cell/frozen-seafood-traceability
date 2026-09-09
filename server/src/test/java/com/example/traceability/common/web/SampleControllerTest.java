@@ -76,6 +76,15 @@ class SampleControllerTest {
     @MockitoBean
     private com.example.traceability.batch.mapper.BatchMapper batchMapper;
 
+    @MockitoBean
+    private com.example.traceability.batch.mapper.BatchOperationMapper batchOperationMapper;
+
+    @MockitoBean
+    private com.example.traceability.batch.mapper.BatchOperationItemMapper batchOperationItemMapper;
+
+    @MockitoBean
+    private com.example.traceability.batch.mapper.BatchRelationMapper batchRelationMapper;
+
     @Autowired
     private MockMvc mockMvc;
 
