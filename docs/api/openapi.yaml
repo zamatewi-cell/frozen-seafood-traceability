@@ -1006,7 +1006,7 @@ components:
       properties:
         id: {type: integer, format: int64, description: 操作明细项目ID}
         operationId: {type: integer, format: int64, description: 关联批次操作ID}
-        batchId: {type: integer, format: int64, description: "关联批次ID（INPUT与OUTPUT必有，LOSS/WASTE/SAMPLE为空）"}
+        batchId: {type: [integer, 'null'], format: int64, description: "关联批次ID（INPUT与OUTPUT必有，LOSS/WASTE/SAMPLE为null）"}
         role: {type: string, enum: [INPUT, OUTPUT, LOSS, WASTE, SAMPLE], description: 项目角色}
         quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: "数量（kg），严格大于0，最多3位小数", example: 100.000}
         unitCode: {type: string, enum: [kg], example: kg, description: "计量单位，当前阶段仅支持 kg"}
@@ -1015,7 +1015,7 @@ components:
       type: object
       required: [role, quantity, unitCode]
       properties:
-        batchId: {type: integer, format: int64, description: "关联批次ID（INPUT与OUTPUT必须提供，LOSS/WASTE/SAMPLE严禁提供）"}
+        batchId: {type: [integer, 'null'], format: int64, description: "关联批次ID（INPUT与OUTPUT必须提供，LOSS/WASTE/SAMPLE可省略或为null）"}
         role: {type: string, enum: [INPUT, OUTPUT, LOSS, WASTE, SAMPLE], description: 项目角色}
         quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: "数量（kg），严格大于0，最多3位小数", example: 100.000}
         unitCode: {type: string, enum: [kg], example: kg, description: "计量单位，当前阶段仅支持 kg"}
@@ -1025,7 +1025,7 @@ components:
       properties:
         operationType: {type: string, enum: [MERGE, SPLIT, PROCESS, REPACK], description: 操作类型}
         occurredAt: {type: string, format: date-time, description: "业务发生时间（ISO 8601 带毫秒与明确时区偏移，如 2026-09-09T12:00:00.123Z）"}
-        note: {type: string, maxLength: 500, description: 操作备注}
+        note: {type: [string, 'null'], maxLength: 500, description: 操作备注}
         items:
           type: array
           minItems: 2
@@ -1041,7 +1041,7 @@ components:
         occurredAt: {type: string, format: date-time, description: "业务实际发生时间（ISO 8601 带毫秒与明确UTC偏移，如 yyyy-MM-dd'T'HH:mm:ss.SSSXXX）"}
         recordedAt: {type: string, format: date-time, description: "系统登记时间（ISO 8601 带毫秒与明确UTC偏移）"}
         status: {type: string, enum: [DRAFT, SUBMITTED, CORRECTED], description: 生命周期状态}
-        note: {type: string, description: 操作备注}
+        note: {type: [string, 'null'], maxLength: 500, description: 操作备注}
         balanced: {type: boolean, description: 物料平衡计算结果（基于持久化明细与0.001kg容差）}
         version: {type: integer, format: int64, minimum: 0, description: 乐观锁版本号}
         createdAt: {type: string, format: date-time, description: "创建时间（ISO 8601 带毫秒与明确UTC偏移）"}
