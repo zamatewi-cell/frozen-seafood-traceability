@@ -4,6 +4,7 @@
 1. **第一部分**：会话认证与组织上下文交付规范（GitHub Issue #7 “session authentication and organization context”）
 2. **第二部分**：产品主数据与分阶段温控规则交付规范（GitHub Issue #9 “product master data and versioned temperature rules”）
 3. **第三部分**：组织范围批次草稿生命周期交付规范（GitHub Issue #11 “organization-scoped batch draft lifecycle”）
+4. **第四部分**：批次操作、物料平衡与谱系边交付规范（GitHub Issue #13 “batch operations, mass balance, and genealogy edges”）
 
 ---
 
@@ -531,7 +532,7 @@ cd server
   - `productId`（库字段 `product_id`）：关联海产品主数据 ID（创建与提交时必须处于 `ACTIVE` 状态）；
   - `batchNo`（库字段 `batch_no`）：业务批次号，同组织内排他唯一（复合唯一索引 `uk_batch_org_no`），不同组织允许复用同一批次号；
   - `batchType`（库字段 `batch_type`）：批次环节枚举（`SOURCE`, `PROCESSING`, `DISTRIBUTION`, `SALE`）；
-  - `quantity`（库字段 `quantity`）：批次当前数量，`DECIMAL(18,3)`，必须 `> 0` 且最多保留 3 位小数；
+  - `quantity`（库字段 `quantity`）：批次初始/声明数量，可用量派生，`DECIMAL(18,3)`，必须 `> 0` 且最多保留 3 位小数；
   - `unitCode`（库字段 `unit_code`）：计量单位，Phase 1 严格限定为 `kg`，传入其他单位返回 400 `INVALID_REQUEST`；
   - `originType`（库字段 `origin_type`）：水产品来源枚举（规范大写代码：`DOMESTIC_CAPTURE`, `DOMESTIC_FARMED`, `IMPORT`）；
   - `originText`（库字段 `origin_text`）：企业端完整来源产地文本描述（最长 255 字符）；
@@ -705,3 +706,155 @@ cd server
   8. **Flyway V3 物理 CHECK 约束拦截能力验证**：绕过应用层直插数据库，验证非法批次类型、非法来源类型、非法批次状态、数量小于等于 0、单位非 kg、保质期天数小于等于 0 以及重复幂等键均被 MySQL 8.4 物理约束精准拦截并抛出包含具体约束名（如 `chk_batch_batch_type`、`chk_batch_quantity`、`uk_batch_org_idempotency` 等）的 `DataAccessException`；
   9. **MySQL REPEATABLE READ 快照读盲区与当前读穿透证据**：在同一 `TRANSACTION_REPEATABLE_READ` 事务中，普通快照读无法看到并发事务后提交的记录，而当前锁定读（`SELECT ... FOR UPDATE`）能够穿透快照读盲区，直接读取到底层最新已提交行；
   10. **并发幂等双请求竞争验证**：两个并发线程携带相同幂等键同时发起创建请求，由数据库唯一索引和并发竞态恢复机制协同处理，只生成一行记录且两线程返回相同的批次 ID。
+
+---
+
+# 第四部分：批次操作、物料平衡与谱系边交付规范 (Issue #13)
+
+## 一、核心目标与职责边界
+
+严格遵循 GitHub Issue #13 与系统整体架构规范，实现批次操作草稿的创建、物料平衡计算、批次可用量与唯一来源强校验、有向图成环检测、两套独立幂等键以及谱系边的事务写入：
+
+1. **业务边界隔离**：
+   - 完整表达冷冻海产品的拆分（`SPLIT`）、合并（`MERGE`）、加工（`PROCESS`）与分装（`REPACK`）多对多业务拓扑，杜绝退化为固定线性流程；
+   - **不实现**谱系查询 API（`GET /batches/{id}/genealogy`）、图谱 UI 交互、库存台账自动扣减、单位非 kg 的换算规则及草稿删除。
+2. **安全与权限边界**：
+   - 创建草稿与提交操作强制要求企业操作员角色（`TraceSecurityPrincipal.roles` 必须包含 `OPERATOR`），平台管理员及其他角色无权代写（返回 403 `ACCESS_DENIED`）；
+   - 跨组织访问或操作其他企业批次返回 403 `ORG_SCOPE_DENIED`；
+   - 响应严格执行白名单投影，绝不泄露逻辑删除标识 `isDeleted` 与内部幂等防重键。
+3. **批次数量语义确立**：
+   - `batch.quantity` 严格保持为批次的初始/声明数量；批次的当前可用量与消耗量统一由已提交操作明细累计派生。
+
+---
+
+## 二、领域模型与生命周期约束
+
+### 1. 实体核心属性与规范
+
+- **批次操作主表 (BatchOperation)**：
+  - `id`：主键 ID；
+  - `orgId`（`org_id`）：执行组织 ID（服务端推导）；
+  - `operationNo`（`operation_no`）：业务流水单号（服务端自动生成）；
+  - `operationType`（`operation_type`）：操作类型（`MERGE`, `SPLIT`, `PROCESS`, `REPACK`）；
+  - `occurredAt`（`occurred_at`）：业务实际发生时间（UTC）；
+  - `recordedAt`（`recorded_at`）：系统登记时间（UTC，服务端生成）；
+  - `status`：生命周期状态（`DRAFT` 草稿，`SUBMITTED` 已提交，`CORRECTED` 已更正）；
+  - `idempotencyKey`（`idempotency_key`）：创建防重幂等键（16..128 字符，同组织唯一）；
+  - `submissionIdempotencyKey`（`submission_idempotency_key`）：提交防重幂等键（16..128 字符，同组织唯一）；
+  - `note`：操作备注（最长 500 字符）；
+  - `version`：乐观锁版本号（草稿提交时自增）。
+
+- **批次操作明细项目表 (BatchOperationItem)**：
+  - `id`：明细 ID；
+  - `operationId`（`operation_id`）：关联操作 ID；
+  - `batchId`（`batch_id`）：关联批次 ID（`INPUT`/`OUTPUT` 必须提供；`LOSS`/`WASTE`/`SAMPLE` 严禁提供）；
+  - `role`：项目角色（`INPUT`, `OUTPUT`, `LOSS`, `WASTE`, `SAMPLE`）；
+  - `quantity`：数量（必须 `> 0` 且最多 3 位小数）；
+  - `unitCode`（`unit_code`）：计量单位（Phase 1 限定为 `kg`）；
+  - `normalizedQuantity`（`normalized_quantity`）：折算基准单位数量（当前阶段恒等于 `quantity`）。
+
+- **批次谱系图谱边表 (BatchRelation)**：
+  - `id`：主键 ID；
+  - `operationId`（`operation_id`）：引起关系的转换操作 ID；
+  - `parentBatchId`（`parent_batch_id`）：原料父批次 ID；
+  - `childBatchId`（`child_batch_id`）：产出子批次 ID；
+  - `relationType`（`relation_type`）：关系类型（`MERGE`, `SPLIT`, `TRANSFORM`）；
+  - `createdAt`（`created_at`）：创建时间（UTC）。
+
+### 2. 数据库物理级约束保障 (Flyway V4)
+
+在 `V4__batch_operation_constraints.sql` 中补充 MySQL 8.4 物理约束与复合唯一索引：
+- `uk_op_org_idempotency`：同一组织下创建幂等键唯一 `(org_id, idempotency_key)`；
+- `uk_op_org_submission_idempotency`：同一组织下提交幂等键唯一 `(org_id, submission_idempotency_key)`；
+- `chk_op_type`：限定操作类型枚举 `('MERGE', 'SPLIT', 'PROCESS', 'REPACK')`；
+- `chk_op_status`：限定操作状态枚举 `('DRAFT', 'SUBMITTED', 'CORRECTED')`；
+- `chk_item_role`：限定明细角色枚举 `('INPUT', 'OUTPUT', 'LOSS', 'WASTE', 'SAMPLE')`；
+- `chk_item_quantity`：限定明细数量严格大于 0；
+- `chk_item_unit_code`：限定计量单位必须为 `kg`；
+- `chk_item_normalized_quantity`：限定基准折算数量严格大于 0；
+- `chk_relation_type`：限定关系类型枚举 `('TRANSFORM', 'SPLIT', 'MERGE')`；
+- `chk_relation_no_self_loop`：限定父子批次不得自环 `(parent_batch_id <> child_batch_id)`。
+
+---
+
+## 三、物料平衡、环检测与并发安全机制
+
+```mermaid
+flowchart TD
+    A[收到提交请求] --> B[校验提交幂等键与版本号]
+    B --> C[锁定操作行 SELECT FOR UPDATE]
+    C --> D[按 batchId 升序对批次排他加锁]
+    D --> E[复核批次本组织归属与 ACTIVE 状态]
+    E --> F[服务端独立重新计算物料平衡 0.001kg 容差]
+    F --> G[校验输出批次无既有上游且数量等于声明量]
+    G --> H[校验输入批次 历史累计+本次 <= 批次声明量]
+    H --> I[INPUT x OUTPUT 生成关系边并查自环]
+    I --> J[MySQL 8.4 recursive CTE 检测有向环]
+    J --> K[原子更新操作状态为 SUBMITTED 并递增版本]
+    K --> L[批量持久化谱系边至 batch_relation]
+```
+
+1. **物料平衡重新计算（Mass Balance）**：
+   服务端独立累计计算：
+   `sum(INPUT.normalizedQuantity) = sum(OUTPUT.normalizedQuantity) + sum(LOSS.normalizedQuantity) + sum(WASTE.normalizedQuantity) + sum(SAMPLE.normalizedQuantity)`
+   容差设定为绝对值 `<= 0.001 kg`。不平衡立即抛出 422 `BATCH_MASS_BALANCE_VIOLATION`，事务完整回滚，不留痕迹。
+2. **唯一产出来源与声明量一致性强校验**：
+   - 输出批次在 `batch_relation` 中不能存在既有上游边，一个批次只能由一次已提交操作产出（违规报 422 `BATCH_OUTPUT_ALREADY_PRODUCED`）；
+   - 输出明细数量必须与该批次声明数量一致（违规报 422 `BATCH_OUTPUT_QUANTITY_MISMATCH`）。
+3. **输入累计量派生与不可超额占用校验**：
+   - 统计该批次在所有状态为 `SUBMITTED` 的操作项目中的历史累计 INPUT 数量；
+   - 要求 `历史已提交 INPUT + 本次 INPUT <= 批次声明数量`；超出报 422 `BATCH_QUANTITY_EXCEEDED`。
+4. **MySQL 8.4 recursive CTE 成环检测**：
+   - 对拟生成的每条 `parent -> child` 有向边，执行递归公用表表达式（CTE）遍历图谱；
+   - 若从 `child` 出发沿着已提交下游边能到达 `parent`，则加入该边将形成环路，立即抛出 422 `BATCH_RELATION_CYCLE`。
+5. **死锁防范与当前读恢复**：
+   - 操作行先锁，涉及的批次按 `batchId` 严格数值升序排列逐行加锁；
+   - 并发冲突通过锁定当前读 `SELECT ... FOR UPDATE` 穿透 `REPEATABLE READ` 快照读，实现精准幂等重放或状态分类。
+
+---
+
+## 四、API 接口调用契约
+
+### 1. 创建批次操作草稿 (`POST /api/v1/batch-operations`)
+- **权限**：企业操作员（`OPERATOR`），强制校验 CSRF；
+- **请求头**：`Idempotency-Key: <16..128字符>`；
+- **入参示例**：
+  ```json
+  {
+    "operationType": "MERGE",
+    "occurredAt": "2026-09-09T10:00:00+08:00",
+    "note": "两产地扇贝原料合并清洗加工",
+    "items": [
+      { "role": "INPUT", "batchId": 101, "quantity": 600.000, "unitCode": "kg" },
+      { "role": "INPUT", "batchId": 102, "quantity": 420.000, "unitCode": "kg" },
+      { "role": "OUTPUT", "batchId": 103, "quantity": 480.000, "unitCode": "kg" },
+      { "role": "OUTPUT", "batchId": 104, "quantity": 520.000, "unitCode": "kg" },
+      { "role": "LOSS", "quantity": 20.000, "unitCode": "kg" }
+    ]
+  }
+  ```
+- **响应**：`201 Created`，返回包含系统生成流水号、时间、状态 `DRAFT` 及各项目的白名单封套。
+
+### 2. 提交批次操作并生成谱系边 (`POST /api/v1/batch-operations/{operationId}/submit`)
+- **权限**：企业操作员（`OPERATOR`），强制校验 CSRF；
+- **请求头**：`Idempotency-Key: <16..128字符>`（独立提交防重键）；
+- **入参示例**：
+  ```json
+  {
+    "version": 0
+  }
+  ```
+- **响应**：`200 OK`，返回状态 `SUBMITTED`、版本号递增至 1 的操作、明细以及生成的全部 `relations` 谱系边。
+
+---
+
+## 五、测试分层策略与执行方法
+
+### 1. 默认测试套件（本地及 CI 离线门禁）
+- `BatchOperationApplicationServiceTest`：纯业务逻辑单元测试（覆盖创建参数、基数约束、同键幂等重放与冲突诊断、物料平衡容差、输出批次已有上游拒绝、输入超额拒绝、自环拒绝、CTE 环检测拒绝、稳定顺序锁及提交流转）。
+- `BatchOperationControllerTest`：WebMvc 切片契约测试（覆盖匿名 401、操作员权限与 CSRF 403、参数校验 400、白名单响应字段与 UTC 时间格式验证）。
+
+### 2. 真实 MySQL 8.4 集成测试（环境变量控制）
+- 测试类：`BatchOperationMysqlIntegrationTest`（受 `MYSQL_IT_ENABLED=true` 控制）
+- 覆盖端到端标准链路（600kg+420kg -> 480kg+520kg+20kg损耗）、物料不平衡完整回滚、多跳环路检测回滚、双并发提交幂等恢复以及 Flyway V4 物理 CHECK 约束精准拦截验证。
+

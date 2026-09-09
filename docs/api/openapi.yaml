@@ -343,7 +343,7 @@ paths:
   /batch-operations:
     post:
       tags: [Batches]
-      summary: 创建拆分、合并或加工操作草稿
+      summary: 创建拆分、合并、加工或分装操作草稿（仅限企业操作员）
       operationId: createBatchOperation
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -363,11 +363,15 @@ paths:
                   - type: object
                     properties:
                       data: {$ref: '#/components/schemas/BatchOperation'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
   /batch-operations/{operationId}/submit:
     post:
       tags: [Batches]
-      summary: 提交批次操作并生成谱系边
+      summary: 提交批次操作并生成谱系边（仅限企业操作员）
       operationId: submitBatchOperation
       parameters:
         - name: operationId
@@ -375,6 +379,11 @@ paths:
           required: true
           schema: {type: integer, format: int64}
         - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SubmitBatchOperationRequest'}
       responses:
         '200':
           description: 数量平衡且谱系边已创建
@@ -386,6 +395,10 @@ paths:
                   - type: object
                     properties:
                       data: {$ref: '#/components/schemas/BatchOperation'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
   /batches/{batchId}/genealogy:
@@ -913,7 +926,7 @@ components:
         productId: {type: integer, format: int64}
         batchNo: {type: string, minLength: 1, maxLength: 64}
         batchType: {$ref: '#/components/schemas/BatchType'}
-        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次初始/声明数量，可用量派生}
         unitCode: {type: string, example: kg}
         originType: {$ref: '#/components/schemas/OriginType'}
         originText: {type: string, maxLength: 255}
@@ -934,7 +947,7 @@ components:
         batchNo: {type: string, minLength: 1, maxLength: 64}
         productId: {type: integer, format: int64}
         batchType: {$ref: '#/components/schemas/BatchType'}
-        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次初始/声明数量}
         unitCode: {type: string, example: kg}
         originType: {$ref: '#/components/schemas/OriginType'}
         originText: {type: string, maxLength: 255}
@@ -947,7 +960,7 @@ components:
       required: [version]
       properties:
         version: {type: integer, format: int64, minimum: 0}
-        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 修正后的批次初始/声明数量}
         originText: {type: string, maxLength: 255}
         productionDate: {type: string, format: date}
         captureDate: {type: string, format: date}
@@ -972,33 +985,63 @@ components:
           type: array
           items: {$ref: '#/components/schemas/Batch'}
         meta: {$ref: '#/components/schemas/PagedResponseMeta'}
+    SubmitBatchOperationRequest:
+      type: object
+      required: [version]
+      properties:
+        version: {type: integer, format: int64, minimum: 0, description: 期望当前乐观锁版本号}
+    BatchOperationRelation:
+      type: object
+      required: [operationId, parentBatchId, childBatchId, relationType]
+      properties:
+        id: {type: integer, format: int64}
+        operationId: {type: integer, format: int64}
+        parentBatchId: {type: integer, format: int64}
+        childBatchId: {type: integer, format: int64}
+        relationType: {type: string, enum: [MERGE, SPLIT, TRANSFORM]}
+        createdAt: {type: string, format: date-time}
     BatchOperationItem:
       type: object
       required: [role, quantity, unitCode]
       properties:
+        id: {type: integer, format: int64}
+        operationId: {type: integer, format: int64}
         batchId: {type: integer, format: int64}
         role: {type: string, enum: [INPUT, OUTPUT, LOSS, WASTE, SAMPLE]}
         quantity: {type: number, minimum: 0, multipleOf: 0.001}
         unitCode: {type: string}
+        normalizedQuantity: {type: number, minimum: 0, multipleOf: 0.001}
     CreateBatchOperationRequest:
       type: object
       required: [operationType, occurredAt, items]
       properties:
         operationType: {type: string, enum: [MERGE, SPLIT, PROCESS, REPACK]}
         occurredAt: {type: string, format: date-time}
+        note: {type: string, maxLength: 500}
         items:
           type: array
           minItems: 2
           items: {$ref: '#/components/schemas/BatchOperationItem'}
     BatchOperation:
       type: object
-      required: [id, operationType, status, items, balanced]
+      required: [id, orgId, operationNo, operationType, status, items, balanced, version]
       properties:
         id: {type: integer, format: int64}
-        operationType: {type: string}
+        orgId: {type: integer, format: int64}
+        operationNo: {type: string}
+        operationType: {type: string, enum: [MERGE, SPLIT, PROCESS, REPACK]}
+        occurredAt: {type: string, format: date-time}
+        recordedAt: {type: string, format: date-time}
         status: {type: string, enum: [DRAFT, SUBMITTED, CORRECTED]}
+        note: {type: string}
         balanced: {type: boolean}
+        version: {type: integer, format: int64, minimum: 0}
+        createdAt: {type: string, format: date-time}
+        createdBy: {type: integer, format: int64}
+        updatedAt: {type: string, format: date-time}
+        updatedBy: {type: integer, format: int64}
         items: {type: array, items: {$ref: '#/components/schemas/BatchOperationItem'}}
+        relations: {type: array, items: {$ref: '#/components/schemas/BatchOperationRelation'}}
     Genealogy:
       type: object
       required: [rootBatchId, nodes, edges, truncated]
