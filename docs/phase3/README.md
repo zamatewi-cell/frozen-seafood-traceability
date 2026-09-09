@@ -857,4 +857,3 @@ flowchart TD
 ### 2. 真实 MySQL 8.4 集成测试（环境变量控制）
 - 测试类：`BatchOperationMysqlIntegrationTest`（受 `MYSQL_IT_ENABLED=true` 控制）
 - 覆盖端到端标准链路（600kg+420kg -> 480kg+520kg+20kg损耗）、物料不平衡完整回滚、多跳环路检测回滚、双并发提交幂等恢复以及 Flyway V4 物理 CHECK 约束精准拦截验证。
-
