@@ -32,6 +32,7 @@ import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -125,6 +126,14 @@ public class BatchOperationApplicationService {
         Set<Long> referencedBatchIds = new HashSet<>();
 
         for (BatchOperationItemRequest item : itemRequests) {
+            if (item == null) {
+                throw new BusinessException(
+                        HttpStatus.BAD_REQUEST,
+                        "INVALID_REQUEST",
+                        "参数校验失败",
+                        "操作明细项目列表中不得包含空项目"
+                );
+            }
             if (!BatchItemRole.isValid(item.role())) {
                 throw new BusinessException(
                         HttpStatus.BAD_REQUEST,
@@ -226,7 +235,7 @@ public class BatchOperationApplicationService {
         op.setOrgId(orgId);
         op.setOperationNo(operationNo);
         op.setOperationType(opType.name());
-        op.setOccurredAt(req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
+        op.setOccurredAt(req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime().truncatedTo(ChronoUnit.MILLIS));
         op.setRecordedAt(nowUtc);
         op.setStatus(BatchOperationStatus.DRAFT.name());
         op.setIdempotencyKey(cleanIdempotencyKey);
@@ -562,14 +571,29 @@ public class BatchOperationApplicationService {
         }
 
         // 9. 单条原子更新状态流转、记录提交幂等键并递增版本号
-        int affected = operationMapper.submitOperation(
-                operationId,
-                orgId,
-                req.version(),
-                cleanSubmissionKey,
-                nowUtc,
-                principal.getUserId()
-        );
+        int affected;
+        try {
+            affected = operationMapper.submitOperation(
+                    operationId,
+                    orgId,
+                    req.version(),
+                    cleanSubmissionKey,
+                    nowUtc,
+                    principal.getUserId()
+            );
+        } catch (DuplicateKeyException e) {
+            // 捕获提交幂等键唯一索引冲突 (uk_op_org_submission_idempotency)
+            BatchOperation keyOwner = operationMapper.selectByOrgIdAndSubmissionKeyForUpdate(orgId, cleanSubmissionKey);
+            if (keyOwner != null && !keyOwner.getId().equals(operationId)) {
+                throw new BusinessException(
+                        HttpStatus.CONFLICT,
+                        "IDEMPOTENCY_CONFLICT",
+                        "幂等提交冲突",
+                        "提交幂等键已被本组织其他批次操作使用: " + cleanSubmissionKey
+                );
+            }
+            throw e;
+        }
 
         if (affected == 0) {
             // 当前锁定读排查
@@ -652,9 +676,8 @@ public class BatchOperationApplicationService {
         if (!Objects.equals(existing.getOperationType(), opType.name())) {
             return false;
         }
-        LocalDateTime reqOccurred = req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
-        long diffSeconds = Math.abs(java.time.temporal.ChronoUnit.SECONDS.between(existing.getOccurredAt(), reqOccurred));
-        if (diffSeconds > 1) {
+        LocalDateTime reqOccurred = req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime().truncatedTo(ChronoUnit.MILLIS);
+        if (!existing.getOccurredAt().isEqual(reqOccurred)) {
             return false;
         }
         String cleanNote = req.note() != null ? req.note().trim() : null;
@@ -666,24 +689,57 @@ public class BatchOperationApplicationService {
             return false;
         }
 
-        for (int i = 0; i < existingItems.size(); i++) {
-            BatchOperationItem ei = existingItems.get(i);
-            BatchOperationItemRequest ri = req.items().get(i);
-
-            if (!Objects.equals(ei.getRole(), BatchItemRole.fromCode(ri.role()).name())) {
-                return false;
-            }
-            if (!Objects.equals(ei.getBatchId(), ri.batchId())) {
-                return false;
-            }
-            if (ei.getQuantity().compareTo(ri.quantity()) != 0) {
-                return false;
-            }
-            if (!"kg".equalsIgnoreCase(ri.unitCode().trim())) {
-                return false;
-            }
+        Map<NormalizedItemKey, Integer> existingCounts = new HashMap<>();
+        for (BatchOperationItem ei : existingItems) {
+            existingCounts.merge(NormalizedItemKey.fromEntity(ei), 1, Integer::sum);
         }
-        return true;
+
+        Map<NormalizedItemKey, Integer> requestCounts = new HashMap<>();
+        for (BatchOperationItemRequest ri : req.items()) {
+            requestCounts.merge(NormalizedItemKey.fromRequest(ri), 1, Integer::sum);
+        }
+
+        return Objects.equals(existingCounts, requestCounts);
+    }
+
+    private record NormalizedItemKey(String role, Long batchId, BigDecimal quantity, String unitCode) {
+        private static NormalizedItemKey fromEntity(BatchOperationItem item) {
+            return new NormalizedItemKey(
+                    item.getRole(),
+                    item.getBatchId(),
+                    item.getQuantity(),
+                    item.getUnitCode() != null ? item.getUnitCode().trim().toLowerCase() : "kg"
+            );
+        }
+
+        private static NormalizedItemKey fromRequest(BatchOperationItemRequest req) {
+            return new NormalizedItemKey(
+                    BatchItemRole.fromCode(req.role()).name(),
+                    req.batchId(),
+                    req.quantity(),
+                    req.unitCode() != null ? req.unitCode().trim().toLowerCase() : "kg"
+            );
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof NormalizedItemKey other)) return false;
+            return Objects.equals(role, other.role)
+                    && Objects.equals(batchId, other.batchId)
+                    && (quantity == null ? other.quantity == null : other.quantity != null && quantity.compareTo(other.quantity) == 0)
+                    && Objects.equals(unitCode, other.unitCode);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(
+                    role,
+                    batchId,
+                    quantity != null ? quantity.stripTrailingZeros() : null,
+                    unitCode
+            );
+        }
     }
 
     private BatchOperationResponse buildResponse(
@@ -699,7 +755,28 @@ public class BatchOperationApplicationService {
                 .map(BatchRelationResponse::fromEntity)
                 .toList();
 
-        return BatchOperationResponse.fromEntity(op, itemResponses, relationResponses, Boolean.TRUE);
+        // 从持久化 items 重新计算真实物料平衡 (0.001kg 容差)
+        BigDecimal sumInput = BigDecimal.ZERO;
+        BigDecimal sumOutputAndLoss = BigDecimal.ZERO;
+        for (BatchOperationItem item : items) {
+            BigDecimal qty = item.getNormalizedQuantity() != null ? item.getNormalizedQuantity() : item.getQuantity();
+            if (qty == null) {
+                qty = BigDecimal.ZERO;
+            }
+            if (BatchItemRole.INPUT.name().equals(item.getRole())) {
+                sumInput = sumInput.add(qty);
+            } else if (BatchItemRole.OUTPUT.name().equals(item.getRole())
+                    || BatchItemRole.LOSS.name().equals(item.getRole())
+                    || BatchItemRole.WASTE.name().equals(item.getRole())
+                    || BatchItemRole.SAMPLE.name().equals(item.getRole())) {
+                sumOutputAndLoss = sumOutputAndLoss.add(qty);
+            }
+        }
+
+        BigDecimal diff = sumInput.subtract(sumOutputAndLoss).abs();
+        boolean balanced = diff.compareTo(new BigDecimal("0.001")) <= 0;
+
+        return BatchOperationResponse.fromEntity(op, itemResponses, relationResponses, balanced);
     }
 
     private String validateIdempotencyKey(String key, String headerName) {

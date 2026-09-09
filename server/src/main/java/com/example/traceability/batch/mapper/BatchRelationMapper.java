@@ -46,17 +46,18 @@ public interface BatchRelationMapper extends BaseMapper<BatchRelation> {
      * @param targetParentBatchId 拟新增边的父批次 ID（目标检测点）
      * @return 可达路径计数；若大于 0 则表明会成环
      */
-    @Select("WITH RECURSIVE downstream_path (current_batch_id, depth) AS ( " +
-            "    SELECT #{startChildBatchId} AS current_batch_id, 0 AS depth " +
-            "    UNION ALL " +
-            "    SELECT r.child_batch_id, p.depth + 1 " +
+    @Select("WITH RECURSIVE downstream_reachable (current_batch_id) AS ( " +
+            "    SELECT r.child_batch_id " +
             "    FROM batch_relation r " +
-            "    JOIN downstream_path p ON r.parent_batch_id = p.current_batch_id " +
-            "    WHERE p.depth < 50 " +
+            "    WHERE r.parent_batch_id = #{startChildBatchId} " +
+            "    UNION " +
+            "    SELECT r.child_batch_id " +
+            "    FROM batch_relation r " +
+            "    JOIN downstream_reachable p ON r.parent_batch_id = p.current_batch_id " +
             ") " +
             "SELECT COUNT(*) " +
-            "FROM downstream_path " +
-            "WHERE current_batch_id = #{targetParentBatchId} AND depth > 0")
+            "FROM downstream_reachable " +
+            "WHERE current_batch_id = #{targetParentBatchId}")
     int checkCycleWithCte(
             @Param("startChildBatchId") Long startChildBatchId,
             @Param("targetParentBatchId") Long targetParentBatchId

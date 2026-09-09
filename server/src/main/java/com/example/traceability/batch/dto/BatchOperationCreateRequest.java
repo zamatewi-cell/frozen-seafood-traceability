@@ -29,6 +29,6 @@ public record BatchOperationCreateRequest(
 
         @NotNull(message = "操作明细 items 不能为空")
         @Size(min = 2, message = "操作明细 items 至少包含 2 个项目")
-        List<@Valid BatchOperationItemRequest> items
+        List<@NotNull @Valid BatchOperationItemRequest> items
 ) {
 }

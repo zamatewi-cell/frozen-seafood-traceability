@@ -262,6 +262,32 @@ class BatchOperationControllerTest {
     }
 
     @Test
+    @DisplayName("请求体 items 中包含 null 元素返回 400 INVALID_REQUEST")
+    void createOperation_nullItemInItems_badRequest() throws Exception {
+        String jsonWithNullItem = """
+                {
+                  "operationType": "MERGE",
+                  "occurredAt": "2026-09-09T10:00:00Z",
+                  "items": [
+                    { "role": "INPUT", "batchId": 1, "quantity": 100, "unitCode": "kg" },
+                    null
+                  ]
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/batch-operations")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonWithNullItem))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.fieldErrors").isArray());
+    }
+
+    @Test
     @DisplayName("提交操作缺失 version 参数返回 400 INVALID_REQUEST")
     void submitOperation_missingVersion_badRequest() throws Exception {
         mockMvc.perform(post("/api/v1/batch-operations/100/submit")
@@ -386,6 +412,54 @@ class BatchOperationControllerTest {
                 .andExpect(jsonPath("$.data.isDeleted").doesNotExist())
                 .andExpect(jsonPath("$.data.idempotencyKey").doesNotExist())
                 .andExpect(jsonPath("$.data.submissionIdempotencyKey").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("创建不平衡草稿成功响应契约返回 balanced=false")
+    void createOperation_unbalanced_responseContract() throws Exception {
+        OffsetDateTime now = OffsetDateTime.parse("2026-09-09T10:00:00Z");
+        BatchOperationResponse response = new BatchOperationResponse(
+                100L,
+                10L,
+                "OP202609091000000001",
+                "PROCESS",
+                now,
+                now,
+                "DRAFT",
+                "不平衡加工草稿",
+                false,
+                0L,
+                now,
+                101L,
+                now,
+                101L,
+                List.of(
+                        new BatchOperationItemResponse(1L, 100L, 101L, "INPUT", new BigDecimal("100.000"), "kg", new BigDecimal("100.000")),
+                        new BatchOperationItemResponse(2L, 100L, 103L, "OUTPUT", new BigDecimal("90.000"), "kg", new BigDecimal("90.000"))
+                ),
+                List.of()
+        );
+
+        when(operationService.createDraftOperation(any(), any(), any())).thenReturn(response);
+
+        BatchOperationCreateRequest req = new BatchOperationCreateRequest(
+                "PROCESS",
+                now,
+                "不平衡加工草稿",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", 101L, new BigDecimal("100.000"), "kg"),
+                        new BatchOperationItemRequest("OUTPUT", 103L, new BigDecimal("90.000"), "kg")
+                )
+        );
+
+        mockMvc.perform(post("/api/v1/batch-operations")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.balanced").value(false));
     }
 
     @Test

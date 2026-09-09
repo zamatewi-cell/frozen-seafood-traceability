@@ -34,6 +34,8 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -255,6 +257,28 @@ class BatchOperationApplicationServiceTest {
     }
 
     @Test
+    @DisplayName("items 中包含 null 元素拒绝创建 (400 INVALID_REQUEST)")
+    void createDraft_nullItemInItems_badRequest() {
+        BatchOperationCreateRequest req = new BatchOperationCreateRequest(
+                "PROCESS",
+                OffsetDateTime.now(ZoneOffset.UTC),
+                "备注",
+                Arrays.asList(
+                        new BatchOperationItemRequest("INPUT", 101L, new BigDecimal("100.000"), "kg"),
+                        null
+                )
+        );
+
+        assertThatThrownBy(() -> operationService.createDraftOperation(req, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(be.getCode()).isEqualTo("INVALID_REQUEST");
+                });
+    }
+
+    @Test
     @DisplayName("MERGE 基数不合法（少于2个INPUT）拒绝创建 (400 INVALID_REQUEST)")
     void createDraft_mergeCardinalityInvalid_badRequest() {
         BatchOperationCreateRequest req = new BatchOperationCreateRequest(
@@ -343,6 +367,95 @@ class BatchOperationApplicationServiceTest {
         assertThat(resp.operationNo()).startsWith("OP");
         verify(operationMapper).insert((BatchOperation) any());
         verify(itemMapper).insertBatch(any());
+    }
+
+    @Test
+    @DisplayName("创建不平衡草稿（输入100kg产出90kg）时 balanced 标识为 false")
+    void createDraft_unbalanced_returnsBalancedFalse() {
+        OffsetDateTime occurredAt = OffsetDateTime.now(ZoneOffset.UTC);
+        BatchOperationCreateRequest req = new BatchOperationCreateRequest(
+                "PROCESS",
+                occurredAt,
+                "不平衡草稿",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", 101L, new BigDecimal("100.000"), "kg"),
+                        new BatchOperationItemRequest("OUTPUT", 102L, new BigDecimal("90.000"), "kg")
+                )
+        );
+
+        when(operationMapper.selectByOrgIdAndIdempotencyKey(10L, VALID_IDEMPOTENCY_KEY)).thenReturn(null);
+
+        BatchOperationItem i1 = new BatchOperationItem();
+        i1.setId(1L);
+        i1.setRole("INPUT");
+        i1.setBatchId(101L);
+        i1.setQuantity(new BigDecimal("100.000"));
+        i1.setUnitCode("kg");
+        i1.setNormalizedQuantity(new BigDecimal("100.000"));
+
+        BatchOperationItem i2 = new BatchOperationItem();
+        i2.setId(2L);
+        i2.setRole("OUTPUT");
+        i2.setBatchId(102L);
+        i2.setQuantity(new BigDecimal("90.000"));
+        i2.setUnitCode("kg");
+        i2.setNormalizedQuantity(new BigDecimal("90.000"));
+
+        when(itemMapper.selectByOperationId(any())).thenReturn(List.of(i1, i2));
+
+        BatchOperationResponse resp = operationService.createDraftOperation(req, VALID_IDEMPOTENCY_KEY, operatorPrincipal);
+
+        assertThat(resp).isNotNull();
+        assertThat(resp.balanced()).isFalse();
+    }
+
+    @Test
+    @DisplayName("创建平衡草稿（输入100kg产出90kg+损失10kg）时 balanced 标识为 true")
+    void createDraft_balanced_returnsBalancedTrue() {
+        OffsetDateTime occurredAt = OffsetDateTime.now(ZoneOffset.UTC);
+        BatchOperationCreateRequest req = new BatchOperationCreateRequest(
+                "PROCESS",
+                occurredAt,
+                "平衡草稿",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", 101L, new BigDecimal("100.000"), "kg"),
+                        new BatchOperationItemRequest("OUTPUT", 102L, new BigDecimal("90.000"), "kg"),
+                        new BatchOperationItemRequest("LOSS", null, new BigDecimal("10.000"), "kg")
+                )
+        );
+
+        when(operationMapper.selectByOrgIdAndIdempotencyKey(10L, VALID_IDEMPOTENCY_KEY)).thenReturn(null);
+
+        BatchOperationItem i1 = new BatchOperationItem();
+        i1.setId(1L);
+        i1.setRole("INPUT");
+        i1.setBatchId(101L);
+        i1.setQuantity(new BigDecimal("100.000"));
+        i1.setUnitCode("kg");
+        i1.setNormalizedQuantity(new BigDecimal("100.000"));
+
+        BatchOperationItem i2 = new BatchOperationItem();
+        i2.setId(2L);
+        i2.setRole("OUTPUT");
+        i2.setBatchId(102L);
+        i2.setQuantity(new BigDecimal("90.000"));
+        i2.setUnitCode("kg");
+        i2.setNormalizedQuantity(new BigDecimal("90.000"));
+
+        BatchOperationItem i3 = new BatchOperationItem();
+        i3.setId(3L);
+        i3.setRole("LOSS");
+        i3.setBatchId(null);
+        i3.setQuantity(new BigDecimal("10.000"));
+        i3.setUnitCode("kg");
+        i3.setNormalizedQuantity(new BigDecimal("10.000"));
+
+        when(itemMapper.selectByOperationId(any())).thenReturn(List.of(i1, i2, i3));
+
+        BatchOperationResponse resp = operationService.createDraftOperation(req, VALID_IDEMPOTENCY_KEY, operatorPrincipal);
+
+        assertThat(resp).isNotNull();
+        assertThat(resp.balanced()).isTrue();
     }
 
     @Test
@@ -438,6 +551,157 @@ class BatchOperationApplicationServiceTest {
                 });
     }
 
+    @Test
+    @DisplayName("items 乱序重排多重集合内容一致时成功幂等重放原草稿")
+    void createDraft_reorderedItems_replay() {
+        OffsetDateTime occurredAt = OffsetDateTime.parse("2026-09-09T10:00:00.123Z");
+        // 请求中的 items 顺序颠倒：OUTPUT 在前，LOSS 居中，INPUT 在后
+        BatchOperationCreateRequest req = new BatchOperationCreateRequest(
+                "PROCESS",
+                occurredAt,
+                "去壳加工",
+                List.of(
+                        new BatchOperationItemRequest("OUTPUT", 102L, new BigDecimal("90.000"), "kg"),
+                        new BatchOperationItemRequest("LOSS", null, new BigDecimal("10.000"), "kg"),
+                        new BatchOperationItemRequest("INPUT", 101L, new BigDecimal("100.000"), "kg")
+                )
+        );
+
+        BatchOperation existing = new BatchOperation();
+        existing.setId(88L);
+        existing.setOrgId(10L);
+        existing.setOperationNo("OP-EXISTING-001");
+        existing.setOperationType("PROCESS");
+        existing.setOccurredAt(occurredAt.toLocalDateTime());
+        existing.setRecordedAt(LocalDateTime.now(ZoneOffset.UTC));
+        existing.setStatus("DRAFT");
+        existing.setNote("去壳加工");
+        existing.setVersion(0L);
+
+        // 库中已持久化的 items 顺序为常规顺序：INPUT, OUTPUT, LOSS
+        BatchOperationItem ei1 = new BatchOperationItem();
+        ei1.setId(1L);
+        ei1.setRole("INPUT");
+        ei1.setBatchId(101L);
+        ei1.setQuantity(new BigDecimal("100.000"));
+        ei1.setUnitCode("kg");
+        ei1.setNormalizedQuantity(new BigDecimal("100.000"));
+
+        BatchOperationItem ei2 = new BatchOperationItem();
+        ei2.setId(2L);
+        ei2.setRole("OUTPUT");
+        ei2.setBatchId(102L);
+        ei2.setQuantity(new BigDecimal("90.000"));
+        ei2.setUnitCode("kg");
+        ei2.setNormalizedQuantity(new BigDecimal("90.000"));
+
+        BatchOperationItem ei3 = new BatchOperationItem();
+        ei3.setId(3L);
+        ei3.setRole("LOSS");
+        ei3.setBatchId(null);
+        ei3.setQuantity(new BigDecimal("10.000"));
+        ei3.setUnitCode("kg");
+        ei3.setNormalizedQuantity(new BigDecimal("10.000"));
+
+        when(operationMapper.selectByOrgIdAndIdempotencyKey(10L, VALID_IDEMPOTENCY_KEY)).thenReturn(existing);
+        when(itemMapper.selectByOperationId(88L)).thenReturn(List.of(ei1, ei2, ei3));
+
+        BatchOperationResponse resp = operationService.createDraftOperation(req, VALID_IDEMPOTENCY_KEY, operatorPrincipal);
+
+        assertThat(resp.id()).isEqualTo(88L);
+        assertThat(resp.operationNo()).isEqualTo("OP-EXISTING-001");
+        verify(operationMapper, never()).insert((BatchOperation) any());
+    }
+
+    @Test
+    @DisplayName("同组织相同幂等键但 occurredAt 相差 1ms 判定为冲突抛出 409 IDEMPOTENCY_CONFLICT")
+    void createDraft_occurredAtDiffersByOneMilli_conflict() {
+        OffsetDateTime originalOccurredAt = OffsetDateTime.parse("2026-09-09T10:00:00.123Z");
+        OffsetDateTime diffOccurredAt = originalOccurredAt.plus(1, ChronoUnit.MILLIS); // 相差 1 毫秒
+
+        BatchOperationCreateRequest req = new BatchOperationCreateRequest(
+                "PROCESS",
+                diffOccurredAt,
+                "去壳加工",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", 101L, new BigDecimal("100.000"), "kg"),
+                        new BatchOperationItemRequest("OUTPUT", 102L, new BigDecimal("100.000"), "kg")
+                )
+        );
+
+        BatchOperation existing = new BatchOperation();
+        existing.setId(88L);
+        existing.setOrgId(10L);
+        existing.setOperationType("PROCESS");
+        existing.setOccurredAt(originalOccurredAt.toLocalDateTime());
+        existing.setNote("去壳加工");
+
+        when(operationMapper.selectByOrgIdAndIdempotencyKey(10L, VALID_IDEMPOTENCY_KEY)).thenReturn(existing);
+
+        assertThatThrownBy(() -> operationService.createDraftOperation(req, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(be.getCode()).isEqualTo("IDEMPOTENCY_CONFLICT");
+                });
+    }
+
+    @Test
+    @DisplayName("occurredAt 纳秒不同但在毫秒截断后相同时成功幂等重放原草稿")
+    void createDraft_occurredAtSameMilliDifferentNanos_replay() {
+        // 原时间: .123000000 秒
+        OffsetDateTime existingOccurredAt = OffsetDateTime.parse("2026-09-09T10:00:00.123Z");
+        // 请求时间携带高精纳秒: .123456789 秒
+        OffsetDateTime reqOccurredAt = existingOccurredAt.plusNanos(456789);
+
+        BatchOperationCreateRequest req = new BatchOperationCreateRequest(
+                "PROCESS",
+                reqOccurredAt,
+                "去壳加工",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", 101L, new BigDecimal("100.000"), "kg"),
+                        new BatchOperationItemRequest("OUTPUT", 102L, new BigDecimal("100.000"), "kg")
+                )
+        );
+
+        BatchOperation existing = new BatchOperation();
+        existing.setId(88L);
+        existing.setOrgId(10L);
+        existing.setOperationNo("OP-EXISTING-001");
+        existing.setOperationType("PROCESS");
+        existing.setOccurredAt(existingOccurredAt.toLocalDateTime());
+        existing.setRecordedAt(LocalDateTime.now(ZoneOffset.UTC));
+        existing.setStatus("DRAFT");
+        existing.setNote("去壳加工");
+        existing.setVersion(0L);
+
+        BatchOperationItem ei1 = new BatchOperationItem();
+        ei1.setId(1L);
+        ei1.setRole("INPUT");
+        ei1.setBatchId(101L);
+        ei1.setQuantity(new BigDecimal("100.000"));
+        ei1.setUnitCode("kg");
+        ei1.setNormalizedQuantity(new BigDecimal("100.000"));
+
+        BatchOperationItem ei2 = new BatchOperationItem();
+        ei2.setId(2L);
+        ei2.setRole("OUTPUT");
+        ei2.setBatchId(102L);
+        ei2.setQuantity(new BigDecimal("100.000"));
+        ei2.setUnitCode("kg");
+        ei2.setNormalizedQuantity(new BigDecimal("100.000"));
+
+        when(operationMapper.selectByOrgIdAndIdempotencyKey(10L, VALID_IDEMPOTENCY_KEY)).thenReturn(existing);
+        when(itemMapper.selectByOperationId(88L)).thenReturn(List.of(ei1, ei2));
+
+        BatchOperationResponse resp = operationService.createDraftOperation(req, VALID_IDEMPOTENCY_KEY, operatorPrincipal);
+
+        assertThat(resp.id()).isEqualTo(88L);
+        assertThat(resp.operationNo()).isEqualTo("OP-EXISTING-001");
+        verify(operationMapper, never()).insert((BatchOperation) any());
+    }
+
     // =========================================================================
     // 2. 提交批次操作测试
     // =========================================================================
@@ -496,6 +760,83 @@ class BatchOperationApplicationServiceTest {
         assertThat(resp.id()).isEqualTo(100L);
         assertThat(resp.status()).isEqualTo("SUBMITTED");
         verify(operationMapper, never()).submitOperation(anyLong(), anyLong(), anyLong(), anyString(), any(), anyLong());
+    }
+
+    @Test
+    @DisplayName("提交幂等键被同组织其他操作占用时并发更新抛出 409 IDEMPOTENCY_CONFLICT 且不生成边")
+    void submitOperation_submissionKeyOccupiedByOtherOperation_conflict() {
+        BatchOperationSubmitRequest req = new BatchOperationSubmitRequest(0L);
+
+        BatchOperation op = new BatchOperation();
+        op.setId(100L);
+        op.setOrgId(10L);
+        op.setStatus("DRAFT");
+        op.setVersion(0L);
+        op.setOperationType("PROCESS");
+
+        BatchOperationItem inItem = new BatchOperationItem();
+        inItem.setId(1L);
+        inItem.setOperationId(100L);
+        inItem.setRole("INPUT");
+        inItem.setBatchId(101L);
+        inItem.setQuantity(new BigDecimal("100.000"));
+        inItem.setNormalizedQuantity(new BigDecimal("100.000"));
+
+        BatchOperationItem outItem = new BatchOperationItem();
+        outItem.setId(2L);
+        outItem.setOperationId(100L);
+        outItem.setRole("OUTPUT");
+        outItem.setBatchId(102L);
+        outItem.setQuantity(new BigDecimal("100.000"));
+        outItem.setNormalizedQuantity(new BigDecimal("100.000"));
+
+        when(operationMapper.selectByIdIgnoreTenant(100L)).thenReturn(op);
+        when(operationMapper.selectByOrgIdAndSubmissionKey(10L, VALID_SUBMISSION_KEY)).thenReturn(null);
+        when(operationMapper.selectByIdForUpdate(100L)).thenReturn(op);
+        when(itemMapper.selectByOperationId(100L)).thenReturn(List.of(inItem, outItem));
+
+        Batch b101 = new Batch();
+        b101.setId(101L);
+        b101.setOrgId(10L);
+        b101.setBatchNo("B-101");
+        b101.setQuantity(new BigDecimal("100.000"));
+        b101.setStatus("ACTIVE");
+
+        Batch b102 = new Batch();
+        b102.setId(102L);
+        b102.setOrgId(10L);
+        b102.setBatchNo("B-102");
+        b102.setQuantity(new BigDecimal("100.000"));
+        b102.setStatus("ACTIVE");
+
+        when(batchMapper.selectByIdIgnoreTenantForUpdate(101L)).thenReturn(b101);
+        when(batchMapper.selectByIdIgnoreTenantForUpdate(102L)).thenReturn(b102);
+        when(relationMapper.countUpstreamRelationsByChildBatchId(102L)).thenReturn(0);
+        when(itemMapper.sumSubmittedInputQuantityByBatchId(101L)).thenReturn(BigDecimal.ZERO);
+        when(relationMapper.checkCycleWithCte(102L, 101L)).thenReturn(0);
+
+        // 模拟并发更新时触发唯一键冲突 DuplicateKeyException
+        when(operationMapper.submitOperation(eq(100L), eq(10L), eq(0L), eq(VALID_SUBMISSION_KEY), any(), anyLong()))
+                .thenThrow(new DuplicateKeyException("uk_op_org_submission_idempotency conflict"));
+
+        // 锁定读恢复：查到被另外一个操作 999L 占用了该提交幂等键
+        BatchOperation otherOp = new BatchOperation();
+        otherOp.setId(999L);
+        otherOp.setOrgId(10L);
+        otherOp.setStatus("SUBMITTED");
+        otherOp.setSubmissionIdempotencyKey(VALID_SUBMISSION_KEY);
+        when(operationMapper.selectByOrgIdAndSubmissionKeyForUpdate(10L, VALID_SUBMISSION_KEY)).thenReturn(otherOp);
+
+        assertThatThrownBy(() -> operationService.submitOperation(100L, req, VALID_SUBMISSION_KEY, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(be.getCode()).isEqualTo("IDEMPOTENCY_CONFLICT");
+                });
+
+        // 杜绝产生关系边
+        verify(relationMapper, never()).insertBatch(any());
     }
 
     @Test

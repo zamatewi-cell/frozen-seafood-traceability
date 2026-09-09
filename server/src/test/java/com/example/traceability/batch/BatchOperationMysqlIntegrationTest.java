@@ -40,6 +40,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -214,6 +215,7 @@ class BatchOperationMysqlIntegrationTest {
                         .content(objectMapper.writeValueAsString(createReq)))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.data.status").value("DRAFT"))
+                .andExpect(jsonPath("$.data.balanced").value(true))
                 .andExpect(jsonPath("$.data.operationType").value("PROCESS"))
                 .andExpect(jsonPath("$.data.version").value(0))
                 .andExpect(jsonPath("$.data.items.length()").value(5))
@@ -305,6 +307,8 @@ class BatchOperationMysqlIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(createReq)))
                 .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.status").value("DRAFT"))
+                .andExpect(jsonPath("$.data.balanced").value(false))
                 .andReturn();
 
         Long opId = objectMapper.readTree(createRes.getResponse().getContentAsString()).path("data").path("id").asLong();
@@ -746,6 +750,251 @@ class BatchOperationMysqlIntegrationTest {
                         "VALUES (?, ?, 'PROCESS', NOW(), 'SUBMITTED', ?, ?, 0, 0, NOW(), NOW())",
                 org.getId(), "OP-SUB-2-" + suffix, "idem-sub-2-" + suffix, sameSubKey
         ));
+    }
+
+    @Test
+    @DisplayName("创建幂等性深度验证 - items 乱序重排幂等重放、occurredAt 纳秒规范化安全重放、相差 1ms 报 409 IDEMPOTENCY_CONFLICT")
+    void testCreateIdempotency_ReorderedItemsAndMilliPrecisionSemantics() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Organization org = createOrg("ORG_IDEM_" + suffix, "测试创建幂等企业");
+        Role opRole = getOrCreateRole("OPERATOR", "企业操作员", "ORG_ONLY");
+        AppUser user = createUser(org.getId(), "op_idem_" + suffix, "Password123!");
+        bindUserRole(user.getId(), opRole.getId());
+        Product product = createProduct("PRD_IDEM_" + suffix, "大西洋鲑", "ACTIVE");
+        HttpSession session = loginAndGetSession(user.getUsername(), "Password123!");
+
+        Batch bIn = createActiveBatch(org.getId(), product.getId(), "B-IDEM-IN-" + suffix, new BigDecimal("100.000"));
+        Batch bOut = createActiveBatch(org.getId(), product.getId(), "B-IDEM-OUT-" + suffix, new BigDecimal("90.000"));
+
+        String createKey = "idem-key-" + UUID.randomUUID();
+        OffsetDateTime baseTime = OffsetDateTime.parse("2026-09-09T12:00:00.123456789Z");
+
+        // 1. 首次创建草稿 (INPUT -> OUTPUT -> LOSS)
+        BatchOperationCreateRequest req1 = new BatchOperationCreateRequest(
+                "PROCESS",
+                baseTime,
+                "幂等测试备注",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", bIn.getId(), new BigDecimal("100.000")),
+                        new BatchOperationItemRequest("OUTPUT", bOut.getId(), new BigDecimal("90.000")),
+                        new BatchOperationItemRequest("LOSS", null, new BigDecimal("10.000"))
+                )
+        );
+
+        MvcResult res1 = mockMvc.perform(post("/api/v1/batch-operations")
+                        .session((MockHttpSession) session)
+                        .with(csrf())
+                        .header("Idempotency-Key", createKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req1)))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        Long opId = objectMapper.readTree(res1.getResponse().getContentAsString()).path("data").path("id").asLong();
+        createdOperationIds.add(opId);
+
+        // 2. 验证 items 乱序重排 (OUTPUT -> LOSS -> INPUT)，多重集合语义一致，成功重放原草稿
+        BatchOperationCreateRequest reqReordered = new BatchOperationCreateRequest(
+                "PROCESS",
+                baseTime,
+                "幂等测试备注",
+                List.of(
+                        new BatchOperationItemRequest("OUTPUT", bOut.getId(), new BigDecimal("90.000")),
+                        new BatchOperationItemRequest("LOSS", null, new BigDecimal("10.000")),
+                        new BatchOperationItemRequest("INPUT", bIn.getId(), new BigDecimal("100.000"))
+                )
+        );
+
+        mockMvc.perform(post("/api/v1/batch-operations")
+                        .session((MockHttpSession) session)
+                        .with(csrf())
+                        .header("Idempotency-Key", createKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(reqReordered)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.id").value(opId));
+
+        // 3. 验证毫秒截断一致（纳秒部分变化但毫秒相同，如 .123999999Z），成功重放原草稿
+        OffsetDateTime sameMilliDifferentNanos = OffsetDateTime.parse("2026-09-09T12:00:00.123999999Z");
+        BatchOperationCreateRequest reqNanos = new BatchOperationCreateRequest(
+                "PROCESS",
+                sameMilliDifferentNanos,
+                "幂等测试备注",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", bIn.getId(), new BigDecimal("100.000")),
+                        new BatchOperationItemRequest("OUTPUT", bOut.getId(), new BigDecimal("90.000")),
+                        new BatchOperationItemRequest("LOSS", null, new BigDecimal("10.000"))
+                )
+        );
+
+        mockMvc.perform(post("/api/v1/batch-operations")
+                        .session((MockHttpSession) session)
+                        .with(csrf())
+                        .header("Idempotency-Key", createKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(reqNanos)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.id").value(opId));
+
+        // 4. 验证 occurredAt 相差 1ms（.124Z），判定为冲突抛出 409 IDEMPOTENCY_CONFLICT
+        OffsetDateTime diffOneMilli = baseTime.truncatedTo(ChronoUnit.MILLIS).plus(1, ChronoUnit.MILLIS);
+        BatchOperationCreateRequest reqDiffMilli = new BatchOperationCreateRequest(
+                "PROCESS",
+                diffOneMilli,
+                "幂等测试备注",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", bIn.getId(), new BigDecimal("100.000")),
+                        new BatchOperationItemRequest("OUTPUT", bOut.getId(), new BigDecimal("90.000")),
+                        new BatchOperationItemRequest("LOSS", null, new BigDecimal("10.000"))
+                )
+        );
+
+        mockMvc.perform(post("/api/v1/batch-operations")
+                        .session((MockHttpSession) session)
+                        .with(csrf())
+                        .header("Idempotency-Key", createKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(reqDiffMilli)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"));
+    }
+
+    @Test
+    @DisplayName("提交幂等键争用分类 - 两不同 DRAFT 操作争用同一 submission_idempotency_key 报 409 IDEMPOTENCY_CONFLICT，当前操作保持 DRAFT 且零边遗留")
+    void testSubmissionIdempotencyConflict_BetweenDifferentDraftOperations() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Organization org = createOrg("ORG_SUB_CF_" + suffix, "测试提交冲突企业");
+        Role opRole = getOrCreateRole("OPERATOR", "企业操作员", "ORG_ONLY");
+        AppUser user = createUser(org.getId(), "op_sub_cf_" + suffix, "Password123!");
+        bindUserRole(user.getId(), opRole.getId());
+        Product product = createProduct("PRD_SUB_CF_" + suffix, "小龙虾", "ACTIVE");
+        HttpSession session = loginAndGetSession(user.getUsername(), "Password123!");
+
+        // 准备 2 组独立的输入输出批次
+        Batch bIn1 = createActiveBatch(org.getId(), product.getId(), "B-SCF-IN1-" + suffix, new BigDecimal("100.000"));
+        Batch bOut1 = createActiveBatch(org.getId(), product.getId(), "B-SCF-OUT1-" + suffix, new BigDecimal("100.000"));
+
+        Batch bIn2 = createActiveBatch(org.getId(), product.getId(), "B-SCF-IN2-" + suffix, new BigDecimal("50.000"));
+        Batch bOut2 = createActiveBatch(org.getId(), product.getId(), "B-SCF-OUT2-" + suffix, new BigDecimal("50.000"));
+
+        // 创建操作 1 和 操作 2 两个草稿
+        Long op1Id = createDraftOperation(session, new BatchOperationCreateRequest(
+                "REPACK", OffsetDateTime.now(ZoneOffset.UTC), "草稿1",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", bIn1.getId(), new BigDecimal("100.000")),
+                        new BatchOperationItemRequest("OUTPUT", bOut1.getId(), new BigDecimal("100.000"))
+                )
+        ));
+        createdOperationIds.add(op1Id);
+
+        Long op2Id = createDraftOperation(session, new BatchOperationCreateRequest(
+                "REPACK", OffsetDateTime.now(ZoneOffset.UTC), "草稿2",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", bIn2.getId(), new BigDecimal("50.000")),
+                        new BatchOperationItemRequest("OUTPUT", bOut2.getId(), new BigDecimal("50.000"))
+                )
+        ));
+        createdOperationIds.add(op2Id);
+
+        String contestedSubmissionKey = "contested-sub-key-" + UUID.randomUUID();
+
+        // 操作 1 成功提交，占用 contestedSubmissionKey
+        mockMvc.perform(post("/api/v1/batch-operations/{operationId}/submit", op1Id)
+                        .session((MockHttpSession) session)
+                        .with(csrf())
+                        .header("Idempotency-Key", contestedSubmissionKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new BatchOperationSubmitRequest(0L))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("SUBMITTED"));
+
+        // 操作 2 试图使用相同的 contestedSubmissionKey 提交
+        mockMvc.perform(post("/api/v1/batch-operations/{operationId}/submit", op2Id)
+                        .session((MockHttpSession) session)
+                        .with(csrf())
+                        .header("Idempotency-Key", contestedSubmissionKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new BatchOperationSubmitRequest(0L))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"));
+
+        // 物理验证：操作 2 仍为 DRAFT 状态，且未生成任何边
+        String op2Status = jdbcTemplate.queryForObject("SELECT status FROM batch_operation WHERE id = ?", String.class, op2Id);
+        assertThat(op2Status).isEqualTo("DRAFT");
+
+        Integer op2Relations = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM batch_relation WHERE operation_id = ?", Integer.class, op2Id);
+        assertThat(op2Relations).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("递归 CTE 环检测验证 - 突破原50层限制，51条边深度长链成环（B52 -> B1）被精准拦截（422 BATCH_RELATION_CYCLE）")
+    void testRecursiveCte_CycleDetectionOver50DepthChain() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Organization org = createOrg("ORG_51C_" + suffix, "测试超长链环检测企业");
+        Role opRole = getOrCreateRole("OPERATOR", "企业操作员", "ORG_ONLY");
+        AppUser user = createUser(org.getId(), "op_51c_" + suffix, "Password123!");
+        bindUserRole(user.getId(), opRole.getId());
+        Product product = createProduct("PRD_51C_" + suffix, "深海鳕鱼", "ACTIVE");
+        HttpSession session = loginAndGetSession(user.getUsername(), "Password123!");
+
+        // 创建 52 个批次: B_1, B_2, ..., B_52
+        int nodeCount = 52;
+        List<Batch> batches = new ArrayList<>(nodeCount);
+        for (int i = 1; i <= nodeCount; i++) {
+            Batch b = createActiveBatch(org.getId(), product.getId(), "B-51C-" + i + "-" + suffix, new BigDecimal("10.000"));
+            batches.add(b);
+        }
+
+        // 顺序提交 51 次 REPACK 操作，构建有向链: B_1 -> B_2 -> B_3 -> ... -> B_52 (共 51 条边)
+        for (int i = 0; i < nodeCount - 1; i++) {
+            Batch parent = batches.get(i);
+            Batch child = batches.get(i + 1);
+            Long opId = createAndSubmitOperation(session, "REPACK", parent.getId(), child.getId(), new BigDecimal("10.000"));
+            createdOperationIds.add(opId);
+        }
+
+        // 验证当前已有 51 条谱系边
+        Integer initialEdges = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM batch_relation WHERE parent_batch_id IN (SELECT id FROM batch WHERE org_id = ?)",
+                Integer.class, org.getId()
+        );
+        assertThat(initialEdges).isEqualTo(51);
+
+        // 创建第 52 个操作：以 B_52 为 INPUT，以 B_1 为 OUTPUT，试图形成 52 节点大环
+        Batch bTail = batches.get(nodeCount - 1); // B_52
+        Batch bHead = batches.get(0);              // B_1
+
+        BatchOperationCreateRequest cycleReq = new BatchOperationCreateRequest(
+                "REPACK",
+                OffsetDateTime.now(ZoneOffset.UTC),
+                "51边长链成环测试",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", bTail.getId(), new BigDecimal("10.000")),
+                        new BatchOperationItemRequest("OUTPUT", bHead.getId(), new BigDecimal("10.000"))
+                )
+        );
+        Long cycleOpId = createDraftOperation(session, cycleReq);
+        createdOperationIds.add(cycleOpId);
+
+        // 提交该闭环操作 -> 应突破 50 限制，完整遍历 51 跳下游抵达 B_1 并被 CTE 精准拦截！
+        mockMvc.perform(post("/api/v1/batch-operations/{operationId}/submit", cycleOpId)
+                        .session((MockHttpSession) session)
+                        .with(csrf())
+                        .header("Idempotency-Key", "sub-cycle-51-" + UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new BatchOperationSubmitRequest(0L))))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("BATCH_RELATION_CYCLE"));
+
+        // 物理验证：操作保持 DRAFT，边依然只有原来的 51 条
+        String opStatus = jdbcTemplate.queryForObject("SELECT status FROM batch_operation WHERE id = ?", String.class, cycleOpId);
+        assertThat(opStatus).isEqualTo("DRAFT");
+
+        Integer finalEdges = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM batch_relation WHERE parent_batch_id IN (SELECT id FROM batch WHERE org_id = ?)",
+                Integer.class, org.getId()
+        );
+        assertThat(finalEdges).isEqualTo(51);
     }
 
     private Long createDraftOperation(HttpSession session, BatchOperationCreateRequest req) throws Exception {
