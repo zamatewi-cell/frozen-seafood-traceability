@@ -357,7 +357,7 @@ class BatchOperationControllerTest {
     @Test
     @DisplayName("创建草稿成功返回 201 Created 与白名单响应契约")
     void createOperation_success_responseContract() throws Exception {
-        OffsetDateTime now = OffsetDateTime.parse("2026-09-09T10:00:00Z");
+        OffsetDateTime now = OffsetDateTime.parse("2026-09-09T10:00:00.123Z");
         BatchOperationResponse response = new BatchOperationResponse(
                 100L,
                 10L,
@@ -406,6 +406,10 @@ class BatchOperationControllerTest {
                 .andExpect(jsonPath("$.data.operationType").value("MERGE"))
                 .andExpect(jsonPath("$.data.status").value("DRAFT"))
                 .andExpect(jsonPath("$.data.balanced").value(true))
+                .andExpect(jsonPath("$.data.occurredAt").value("2026-09-09T10:00:00.123Z"))
+                .andExpect(jsonPath("$.data.recordedAt").value("2026-09-09T10:00:00.123Z"))
+                .andExpect(jsonPath("$.data.createdAt").value("2026-09-09T10:00:00.123Z"))
+                .andExpect(jsonPath("$.data.updatedAt").value("2026-09-09T10:00:00.123Z"))
                 .andExpect(jsonPath("$.data.items", hasSize(2)))
                 .andExpect(jsonPath("$.data.relations", hasSize(0)))
                 // 确保白名单投影：内部安全字段绝不泄露

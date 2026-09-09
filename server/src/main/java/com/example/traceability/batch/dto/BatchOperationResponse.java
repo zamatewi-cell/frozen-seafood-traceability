@@ -22,18 +22,18 @@ public record BatchOperationResponse(
         Long orgId,
         String operationNo,
         String operationType,
-        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ssXXX", timezone = "UTC")
+        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX", timezone = "UTC")
         OffsetDateTime occurredAt,
-        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ssXXX", timezone = "UTC")
+        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX", timezone = "UTC")
         OffsetDateTime recordedAt,
         String status,
         String note,
         Boolean balanced,
         Long version,
-        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ssXXX", timezone = "UTC")
+        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX", timezone = "UTC")
         OffsetDateTime createdAt,
         Long createdBy,
-        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ssXXX", timezone = "UTC")
+        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX", timezone = "UTC")
         OffsetDateTime updatedAt,
         Long updatedBy,
         List<BatchOperationItemResponse> items,

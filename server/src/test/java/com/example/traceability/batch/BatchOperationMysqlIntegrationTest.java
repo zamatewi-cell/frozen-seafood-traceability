@@ -788,9 +788,11 @@ class BatchOperationMysqlIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(req1)))
                 .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.occurredAt").value("2026-09-09T12:00:00.123Z"))
                 .andReturn();
 
-        Long opId = objectMapper.readTree(res1.getResponse().getContentAsString()).path("data").path("id").asLong();
+        JsonNode res1Json = objectMapper.readTree(res1.getResponse().getContentAsString());
+        Long opId = res1Json.path("data").path("id").asLong();
         createdOperationIds.add(opId);
 
         // 2. 验证 items 乱序重排 (OUTPUT -> LOSS -> INPUT)，多重集合语义一致，成功重放原草稿
@@ -812,9 +814,10 @@ class BatchOperationMysqlIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(reqReordered)))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.data.id").value(opId));
+                .andExpect(jsonPath("$.data.id").value(opId))
+                .andExpect(jsonPath("$.data.occurredAt").value("2026-09-09T12:00:00.123Z"));
 
-        // 3. 验证毫秒截断一致（纳秒部分变化但毫秒相同，如 .123999999Z），成功重放原草稿
+        // 3. 验证毫秒截断一致（纳秒部分变化但毫秒相同，如 .123999999Z），同毫秒不同纳秒重放仍返回原 ID，且响应仍为精确毫秒
         OffsetDateTime sameMilliDifferentNanos = OffsetDateTime.parse("2026-09-09T12:00:00.123999999Z");
         BatchOperationCreateRequest reqNanos = new BatchOperationCreateRequest(
                 "PROCESS",
@@ -834,7 +837,30 @@ class BatchOperationMysqlIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(reqNanos)))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.data.id").value(opId));
+                .andExpect(jsonPath("$.data.id").value(opId))
+                .andExpect(jsonPath("$.data.occurredAt").value("2026-09-09T12:00:00.123Z"));
+
+        // 3.1 验证客户端直接使用响应中的毫秒格式值 2026-09-09T12:00:00.123Z 重放仍返回原 ID
+        BatchOperationCreateRequest reqExactMilli = new BatchOperationCreateRequest(
+                "PROCESS",
+                OffsetDateTime.parse("2026-09-09T12:00:00.123Z"),
+                "幂等测试备注",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", bIn.getId(), new BigDecimal("100.000")),
+                        new BatchOperationItemRequest("OUTPUT", bOut.getId(), new BigDecimal("90.000")),
+                        new BatchOperationItemRequest("LOSS", null, new BigDecimal("10.000"))
+                )
+        );
+
+        mockMvc.perform(post("/api/v1/batch-operations")
+                        .session((MockHttpSession) session)
+                        .with(csrf())
+                        .header("Idempotency-Key", createKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(reqExactMilli)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.id").value(opId))
+                .andExpect(jsonPath("$.data.occurredAt").value("2026-09-09T12:00:00.123Z"));
 
         // 4. 验证 occurredAt 相差 1ms（.124Z），判定为冲突抛出 409 IDEMPOTENCY_CONFLICT
         OffsetDateTime diffOneMilli = baseTime.truncatedTo(ChronoUnit.MILLIS).plus(1, ChronoUnit.MILLIS);
