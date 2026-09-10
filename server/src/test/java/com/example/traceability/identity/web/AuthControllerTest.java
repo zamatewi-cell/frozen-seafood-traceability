@@ -80,6 +80,12 @@ class AuthControllerTest {
     private com.example.traceability.batch.mapper.BatchRelationMapper batchRelationMapper;
 
     @MockitoBean
+    private com.example.traceability.identity.mapper.SiteMapper siteMapper;
+
+    @MockitoBean
+    private com.example.traceability.trace.mapper.TraceEventMapper traceEventMapper;
+
+    @MockitoBean
     private UserDetailsService userDetailsService;
 
     @Autowired
