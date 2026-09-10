@@ -1027,6 +1027,6 @@ WHERE id = #{id} AND batch_id = #{batchId} AND org_id = #{orgId} AND status = 'S
   4. `testRepeatableRead_SnapshotBlindSpot_And_ForUpdateCurrentRead`：真实 MySQL 默认 REPEATABLE READ 快照读盲区复现，以及通过 `FOR UPDATE` 当前锁定读穿透 Read View 盲区实现可靠读写恢复的完整实证；
   5. `testFlywayV5_PhysicalCheckConstraints_EnforcedByDatabase`：Flyway V5 全部 4 项物理 CHECK 约束（枚举类型、数据来源、事件状态、更正形状成对性）与防分叉唯一索引在真实 MySQL 8.4 底层生效拦截脏数据证据；
   6. `testAccessControl_NonOperatorAndCrossOrg_Forbidden`：端到端权限矩阵拦截（非 OPERATOR 拦截 403、平台用户拦截 403、跨组织创建/更正拦截 403），以及 **Append-only 不可变性反例：PUT 覆盖修改返回 405 Method Not Allowed、DELETE 物理删除返回 405 Method Not Allowed，数据库物理核对事件记录依然存在且核心字段、版本与状态保持不变**；
-  7. `testCorrectionWorkflow_AtomicRollback_WhenOldVersionUpdateFails`：**真实数据库事务原子性回滚实证**（通过注入临时 MySQL BEFORE UPDATE 触发器模拟新版本已插入但旧版本更新失败，验证 Spring 声明式事务完整回滚，新版本物理撤销，旧版本状态保持 SUBMITTED，并在 finally 严格清理临时触发器）；
+  7. `testCorrectionWorkflow_AtomicRollback_WhenOldVersionUpdateFails`：**真实数据库事务原子性回滚实证**（通过注入临时 CHECK 约束模拟新版本已插入但旧版本更新失败，验证 Spring 声明式事务完整回滚，新版本物理撤销，旧版本状态保持 SUBMITTED，并在 finally 严格物理移除临时约束恢复 schema）；
   8. `testEventListOrdering_IdenticalTimestamps_StrictlyOrderedByIdAsc`：至少三条事件具有完全相同 `occurred_at` 与 `recorded_at` 时，`GET /api/v1/batches/{batchId}/events` 严格按 `id ASC` 递增确定性稳定排序；
   9. `testDataSourceSimulated_And_RecordedAtAfterOccurredAt`：`SIMULATED` 数据来源真实通过 API 写入 MySQL 并原样存储与回显，解析响应时间明确断言 `recordedAt` 严格晚于历史 `occurredAt`，双时间体系严谨区分。

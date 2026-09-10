@@ -1072,26 +1072,19 @@ class TraceEventMysqlIntegrationTest {
         assertThat(initialStatus).isEqualTo("SUBMITTED");
         assertThat(initialVersion).isEqualTo(0L);
 
-        // 2. 动态创建 MySQL BEFORE UPDATE 触发器，在更新目标事件为 CORRECTED 时抛出异常，强制使旧版本状态更新失败
-        String triggerName = "trg_test_rollback_" + suffix;
-        jdbcTemplate.execute(String.format("""
-                CREATE TRIGGER %s
-                BEFORE UPDATE ON trace_event
-                FOR EACH ROW
-                BEGIN
-                    IF OLD.id = %d AND NEW.status = 'CORRECTED' THEN
-                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Simulated database update failure for rollback test';
-                    END IF;
-                END;
-                """, triggerName, baseEventId));
+        // 2. 动态创建临时 CHECK 约束，在更新目标批次事件为 CORRECTED 时触发约束失败，强制使旧版本状态更新失败
+        String chkName = "chk_test_rb_" + suffix;
+        jdbcTemplate.execute(String.format(
+                "ALTER TABLE trace_event ADD CONSTRAINT %s CHECK (batch_id != %d OR status != 'CORRECTED')",
+                chkName, batch.getId()));
 
         String failedCorrectionKey = "idem-rb-corr-fail-" + suffix;
         CorrectTraceEventRequest corrReq = new CorrectTraceEventRequest(
-                "SOURCE", occurredAt, site.getId(), "MANUAL", "尝试更正摘要", null, "测试触发器回滚"
+                "SOURCE", occurredAt, site.getId(), "MANUAL", "尝试更正摘要", null, "测试回滚原因"
         );
 
         try {
-            // 3. 发起更正请求：应用层执行流为 [insert newEvent -> update oldEvent status]，update 时被触发器拒绝
+            // 3. 发起更正请求：应用层执行流为 [insert newEvent -> update oldEvent status]，update 时触发 CHECK 约束失败
             mockMvc.perform(post("/api/v1/batches/" + batch.getId() + "/events/" + baseEventId + "/corrections")
                             .session((MockHttpSession) session)
                             .with(csrf())
@@ -1119,8 +1112,8 @@ class TraceEventMysqlIntegrationTest {
             assertThat(versionAfterRollback).isEqualTo(0L);
 
         } finally {
-            // 5. 必须物理清理临时触发器，避免污染后续测试
-            jdbcTemplate.execute("DROP TRIGGER IF EXISTS " + triggerName + ";");
+            // 5. 必须物理清理临时 CHECK 约束，恢复 schema 避免污染后续测试
+            jdbcTemplate.execute("ALTER TABLE trace_event DROP CHECK " + chkName);
         }
     }
 
