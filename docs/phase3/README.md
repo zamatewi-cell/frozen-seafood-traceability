@@ -6,6 +6,7 @@
 3. **第三部分**：组织范围批次草稿生命周期交付规范（GitHub Issue #11 “organization-scoped batch draft lifecycle”）
 4. **第四部分**：批次操作、物料平衡与谱系边交付规范（GitHub Issue #13 “batch operations, mass balance, and genealogy edges”）
 5. **第五部分**：追溯事件与更正工作流交付规范（GitHub Issue #15 “append-only trace events and correction workflow”）
+6. **第六部分**：公开追溯码与消费者端投影实现与验证规范（GitHub Issue #17，当前分支 `feat/17-public-trace-consumer` 正在实现 / 待合并验收）
 
 ---
 
@@ -1030,3 +1031,260 @@ WHERE id = #{id} AND batch_id = #{batchId} AND org_id = #{orgId} AND status = 'S
   7. `testCorrectionWorkflow_AtomicRollback_WhenOldVersionUpdateFails`：**真实数据库事务原子性回滚实证**（通过注入临时 CHECK 约束模拟新版本已插入但旧版本更新失败，验证 Spring 声明式事务完整回滚，新版本物理撤销，旧版本状态保持 SUBMITTED，并在 finally 严格物理移除临时约束恢复 schema）；
   8. `testEventListOrdering_IdenticalTimestamps_StrictlyOrderedByIdAsc`：至少三条事件具有完全相同 `occurred_at` 与 `recorded_at` 时，`GET /api/v1/batches/{batchId}/events` 严格按 `id ASC` 递增确定性稳定排序；
   9. `testDataSourceSimulated_And_RecordedAtAfterOccurredAt`：`SIMULATED` 数据来源真实通过 API 写入 MySQL 并原样存储与回显，解析响应时间明确断言 `recordedAt` 严格晚于历史 `occurredAt`，双时间体系严谨区分。
+
+---
+
+# 第六部分：公开追溯码与消费者端投影研发文档 (当前分支 `feat/17-public-trace-consumer` 正在实现 / 待合并验收)
+
+本文档记录冷冻海产品溯源系统 Phase 3（GitHub Issue #17 “feat: generate public trace codes and expose consumer trace projection”，当前分支正在实现中、待合并验收）的接口调用契约、安全设计机制、并发控制与数据库约束规范。
+
+---
+
+## 一、核心目标与安全边界
+
+1. **企业端与消费者端权限严格物理分流**：
+   - **企业端管理端点**：
+     - `POST /api/v1/batches/{batchId}/public-trace-code/activate`
+     - `POST /api/v1/batches/{batchId}/public-trace-code/disable`
+     - 强制受 Spring Security 会话认证与 CSRF 校验保护，仅限批次同组织的 `OPERATOR` 角色操作，必须携带合规的 `Idempotency-Key` 请求头（16..128 字符）。平台管理员 (`PLATFORM`) 与只读查看员 (`VIEWER`) 严格拦截（403 `ACCESS_DENIED`）。
+   - **消费者端公开查询端点**：
+     - `GET /api/public/v1/public/traces/{publicTraceId}`
+     - 唯一匿名放行的公开 GET 端点。Spring Security 精确放行 `GET /api/public/v1/public/traces/*`，同路径下的非 GET 请求落入认证与 CSRF 拦截（返回 401/403），杜绝 CSRF 绕过风险。
+2. **全链路 SQL 组织隔离与防止实体窥探**：
+   - 企业端激活与停用路径在执行行级锁时，强制显式携带 `org_id`：两条路径先通过 `selectByIdAndOrgIdForUpdate` 锁定所属批次；停用路径及激活的唯一键竞争恢复路径再通过 `selectByBatchIdAndOrgIdForUpdate` 当前读锁定公开码。严禁使用 `selectByIdIgnoreTenantForUpdate` 窥探他组织实体；
+   - 仅当本组织未命中时，通过标量查询 `selectOrgIdByIdIgnoreTenant` 获取所属组织 ID 判断是 404（不存在）还是 403 `ORG_SCOPE_DENIED`（越权），绝不将他组织完整实体加载至内存。
+3. **统一幂等表绑定与语义指纹设计**：
+   - Flyway V6 新增统一幂等记录表 `public_trace_code_idempotency`，以 `(org_id, idempotency_key)` 为物理唯一约束；
+   - **统一持久绑定规则**：每一次成功返回（包括不同 key 命中已有 ACTIVE 资源、不同 key 命中已 DISABLED 终态资源），均在同一事务内将该 key 绑定至统一幂等表；
+   - 相同 key 跨批次或跨动作调用，统一抛出 **`409 IDEMPOTENCY_KEY_REUSED`**；
+   - 并发同 key 竞争通过排他锁当前读恢复并校验语义，并发不同 key 激活同一批次通过物理唯一索引 `uk_public_trace_code_batch` 保证只生成一条码并锁定当前读恢复。
+4. **公开追溯码生成与内部指纹**：
+   - 使用 `SecureRandom` 随机生成 26 位大写 RFC 4648 Base32 编码（字符集 `^[A-Z2-7]{26}$`），天然消除易混淆字符；
+   - 内部索引存储：数据库表 `public_trace_code` 保存 `token_hash = SHA-256(public_id)` 索引列，仅作内部查询索引，对外 API 契约与序列化绝不暴露 `token_hash`；
+   - 一批一码原则：同一批次在全生命周期内有且仅有一条公开追溯码资源，由物理唯一索引 `uk_public_trace_code_batch` 刚性约束。
+5. **停用终态不可逆与不可探测性**：
+   - 公开追溯码一旦停用（`status = 'DISABLED'`），进入不可逆终态，严禁重新激活或轮换；
+   - 未知码、格式非法码（未通过 `^[A-Z2-7]{26}$` 正则直接在服务层阻断且不查 Mapper）与已停用码在消费者端表现严格一致，统一返回 `404 PUBLIC_TRACE_NOT_FOUND`（状态码、错误码、title 与 detail 完全相同），杜绝探测码的存在性。
+6. **消费者端严格白名单安全投影与敏感自由文本隔离**：
+   - 响应格式仅包含白名单安全字段：
+     - `publicTraceId`：26 位公开标识；
+     - `product`：产品公共展示信息（`name`, `category`, `specification`）；
+     - `batch`：脱敏后的批次特征（`publicBatchNo` 如 `BAT****001`、`originType`、`maskedOrigin` 如 `东海****业区`、`productionDate`）；
+     - `timeline`：仅包含当前批次所有生效中的 `SUBMITTED` 事件（已更正版本被排除），按 `occurred_at ASC, recorded_at ASC, id ASC` 严格稳定递增排序；
+     - **公开 `event` 仅为受控业务类型标准标签（如“原料采收/出塘”），严禁拼接内部自由文本 `summary` 或泄露任何机密哨兵字符串**；
+     - `temperatureSummary`：当前冷链温度结论，因 Phase 3 尚未接入 IoT 硬件与实时温度巡检，如实返回 `result: "INSUFFICIENT_DATA"`，并附带诚实说明；
+     - `batchStatus`：当前批次状态（`ACTIVE`, `FROZEN`, `RECALLED`, `CLOSED`）；
+     - `recallNotice`：若批次状态为 `RECALLED`，输出显式模拟召回声明（包含明确的“模拟召回演练”字样）；若非召回状态则为 null；
+     - `disclosure`：公开声明，严正提示本项目所包含的模拟数据与合规用途。
+   - **严格禁止词典检查**：消费者投影绝不包含内部主键 ID、真实批次号 raw `batch_no`、真实产地文本 raw `origin_text`、`token_hash`、`detailsJson` 内部扩展、`is_deleted`、以及审计字段（`created_by`, `updated_by` 等）。
+
+---
+
+## 二、接口调用契约与交互时序
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Op as 企业操作员 (OPERATOR)
+    actor Consumer as 消费者 (匿名游客)
+    participant Sec as Spring Security
+    participant Ctrl as 表现层 Controller
+    participant Svc as PublicTraceApplicationService
+    participant DB as MySQL 8.4 (InnoDB RR)
+
+    Note over Op,DB: 1. 企业端激活批次公开追溯码
+    Op->>Sec: POST /api/v1/batches/{batchId}/public-trace-code/activate (Header: Idempotency-Key, Cookie, CSRF)
+    Sec->>Ctrl: 鉴权通过 (同组织 OPERATOR)
+    Ctrl->>Svc: activatePublicTraceCode(batchId, idempotencyKey, principal)
+    Svc->>DB: SELECT * FROM public_trace_code_idempotency WHERE org_id = ? AND idempotency_key = ?
+    Svc->>DB: SELECT * FROM batch WHERE id = ? AND org_id = ? AND is_deleted = 0 FOR UPDATE
+    Svc->>DB: SELECT * FROM public_trace_code WHERE batch_id = ? AND org_id = ?
+    alt 批次尚未激活
+        Svc->>DB: INSERT INTO public_trace_code (26位 Base32, SHA-256 hash, ACTIVE)
+    else 批次已处于 ACTIVE 状态
+        Note over Svc,DB: 语义等价调用，复用已有码
+    end
+    Svc->>DB: INSERT INTO public_trace_code_idempotency (org_id, idempotency_key, action, batch_id, ...)
+    Svc-->>Op: 200 OK (PublicTraceCodeResponse: publicId, status: ACTIVE)
+
+    Note over Consumer,DB: 2. 消费者匿名查询公开追溯信息
+    Consumer->>Sec: GET /api/public/v1/public/traces/{publicTraceId}
+    Sec->>Ctrl: 匿名放行 (免认证、免 CSRF)
+    Ctrl->>Svc: getPublicTrace(publicTraceId)
+    Note over Svc: 校验正则 ^[A-Z2-7]{26}$，非法直接 404 且不查 DB
+    Svc->>DB: SELECT * FROM public_trace_code WHERE public_id = ? AND is_deleted = 0
+    alt 未找到或已停用 (status = 'DISABLED')
+        Svc-->>Consumer: 404 PUBLIC_TRACE_NOT_FOUND (结构与信息完全一致)
+    else 状态为 ACTIVE
+        Svc->>DB: 查询批次、产品与生效事件 (SUBMITTED, 按 occurred_at ASC, recorded_at ASC, id ASC)
+        Svc-->>Consumer: 200 OK (PublicTraceProjectionResponse: 白名单脱敏投影)
+    end
+
+    Note over Op,DB: 3. 企业端停用追溯码 (终态不可逆)
+    Op->>Sec: POST /api/v1/batches/{batchId}/public-trace-code/disable (Header: Idempotency-Key, Cookie, CSRF)
+    Sec->>Ctrl: 鉴权通过
+    Ctrl->>Svc: disablePublicTraceCode(batchId, idempotencyKey, principal)
+    Svc->>DB: SELECT * FROM batch WHERE id = ? AND org_id = ? FOR UPDATE
+    Svc->>DB: UPDATE public_trace_code SET status='DISABLED', disabled_at=NOW(6) WHERE id=? AND org_id=? AND status='ACTIVE'
+    Svc->>DB: INSERT INTO public_trace_code_idempotency (org_id, idempotency_key, action, batch_id, ...)
+    Svc-->>Op: 200 OK (status: DISABLED)
+```
+
+### 1. 激活批次公开追溯码 (`POST /api/v1/batches/{batchId}/public-trace-code/activate`)
+- **权限**：同组织企业操作员 (`OPERATOR`)，平台管理员与非操作员报 `403 ACCESS_DENIED`；
+- **请求头**：`Idempotency-Key: <16..128字符>`；
+- **校验规则**：
+  - 仅允许批次当前状态为 `ACTIVE` 时首次激活；处于 `DRAFT`、`FROZEN`、`RECALLED`、`CLOSED` 的批次禁止首次激活，返回 `422 BATCH_FLOW_BLOCKED`；
+  - 若已处于 `DISABLED` 终态，再次调用激活返回 `409 INVALID_STATE_TRANSITION`；
+  - 若已处于 `ACTIVE` 状态，不同 key 再次调用属于语义等价调用，返回 200 原码并在当前事务内持久绑定该 key；
+  - 同 key 跨批次或跨动作调用报 `409 IDEMPOTENCY_KEY_REUSED`。
+- **响应示例**：
+  ```json
+  {
+    "data": {
+      "id": 1,
+      "batchId": 100,
+      "publicId": "WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A",
+      "status": "ACTIVE",
+      "activatedAt": "2026-09-10T08:00:00Z",
+      "disabledAt": null,
+      "createdAt": "2026-09-10T08:00:00Z",
+      "updatedAt": "2026-09-10T08:00:00Z"
+    },
+    "meta": {
+      "requestId": "<req-id>",
+      "timestamp": "2026-09-10T08:00:00Z"
+    }
+  }
+  ```
+
+### 2. 停用批次公开追溯码 (`POST /api/v1/batches/{batchId}/public-trace-code/disable`)
+- **权限**：同组织企业操作员 (`OPERATOR`)；
+- **请求头**：`Idempotency-Key: <16..128字符>`；
+- **行为**：
+  - 将追溯码状态原子更新为 `DISABLED`，记录 `disabled_at` 和内部 `updated_by` 审计（数据库无 `disabledBy` 冗余列）；
+  - 停用为终态操作，不可逆，不可重新启用；
+  - 任何成功返回（包括针对已处于 DISABLED 终态码的调用）均持久绑定其幂等键；
+  - 事务具备严格原子性，若更新失败则完整回滚（码保持 ACTIVE、disabled_at 为空、幂等表无残留）。
+- **响应示例**：
+  ```json
+  {
+    "data": {
+      "id": 1,
+      "batchId": 100,
+      "publicId": "WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A",
+      "status": "DISABLED",
+      "activatedAt": "2026-09-10T08:00:00Z",
+      "disabledAt": "2026-09-10T09:00:00Z",
+      "createdAt": "2026-09-10T08:00:00Z",
+      "updatedAt": "2026-09-10T09:00:00Z"
+    },
+    "meta": {
+      "requestId": "<req-id>",
+      "timestamp": "2026-09-10T09:00:00Z"
+    }
+  }
+  ```
+
+### 3. 消费者公开追溯查询 (`GET /api/public/v1/public/traces/{publicTraceId}`)
+- **权限**：匿名公开，免认证免 CSRF；
+- **入参**：`publicTraceId` (26 位大写 RFC 4648 Base32 编码，匹配正则 `^[A-Z2-7]{26}$`)；
+- **格式非法、未命中或停用返回**：`404 PUBLIC_TRACE_NOT_FOUND`（对外不可探测）；
+- **命中返回示例**：
+  ```json
+  {
+    "data": {
+      "publicTraceId": "WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A",
+      "product": {
+        "name": "东海野生大黄鱼",
+        "category": "FISH",
+        "specification": "500g-600g/条"
+      },
+      "batch": {
+        "publicBatchNo": "BAT****001",
+        "originType": "DOMESTIC_CAPTURE",
+        "maskedOrigin": "东海****业区",
+        "productionDate": "2026-09-01"
+      },
+      "timeline": [
+        {
+          "event": "原料采收/出塘",
+          "occurredAt": "2026-09-01T08:00:00Z",
+          "dataSourceLabel": "教学演练与仿真模拟数据（SIMULATED）"
+        }
+      ],
+      "temperatureSummary": {
+        "result": "INSUFFICIENT_DATA",
+        "ruleNote": "当前切片尚未接入冷链实时温控采集流，冷链温度状态暂不具备判定条件，请以企业实际出厂单据为准。"
+      },
+      "batchStatus": "ACTIVE",
+      "recallNotice": null,
+      "queriedAt": "2026-09-10T09:30:00Z",
+      "disclosure": "本溯源信息仅反映供应链各节点企业申报登记的电子履历，不作为货物物理真实性或防伪验证凭证；系统相关模拟标识仅用于教学实训推演。"
+    },
+    "meta": {
+      "requestId": "<req-id>",
+      "timestamp": "2026-09-10T09:30:00Z"
+    }
+  }
+  ```
+
+---
+
+## 三、并发控制与统一幂等表设计
+
+1. **统一幂等表 `public_trace_code_idempotency`**：
+   - 字段包含 `org_id`, `idempotency_key`, `action`, `batch_id`, `public_trace_code_id`, `request_hash`, `created_at`；
+   - 物理唯一索引：`uk_ptc_idem_org_key (org_id, idempotency_key)`；
+   - 任何成功返回均在当前事务内持久绑定该 key，确保同一组织下每个 key 稳定绑定唯一的 action 与 batch；
+   - 跨批次或跨动作复用 key 抛出 **`409 IDEMPOTENCY_KEY_REUSED`**。
+2. **并发竞争与锁定当前读恢复**：
+   - 激活前先对批次执行带 `org_id` 的 `SELECT ... FOR UPDATE` 锁定读，再在该批次锁保护下以带 `org_id` 的普通查询检查已有公开码；避免不存在公开码时对唯一索引间隙加锁而放大并发死锁风险；
+   - 若并发多事务携带不同 key 激活同一批次，底层唯一约束 `uk_public_trace_code_batch` 确保仅一条成功插入，竞争失败方捕获 `DuplicateKeyException` 后通过排他锁定当前读穿透快照盲区恢复并持久绑定自身 key；
+   - 若并发多事务携带相同 key 竞争，底层统一幂等表唯一索引保证单条插入，竞争方通过 `selectByOrgIdAndKeyForUpdate` 当前锁定读安全恢复。
+
+---
+
+## 四、Flyway V6 数据库级物理约束
+
+Flyway 迁移脚本 `V6__public_trace_code_constraints.sql` 在 MySQL 8.4 LTS 物理层面施加了以下保障：
+1. **安全三步平滑迁移 `org_id`**：
+   - 先添加 nullable `org_id` 列，再通过 JOIN `batch` 表按 `batch_id` 回填存量租户归属（严禁使用 0 或猜测默认值填充），最后收紧为 `NOT NULL`（孤儿数据收紧明确报错失败）；
+2. **公开追溯码物理唯一约束与组织复合索引**：
+   - `uk_public_trace_code_batch (batch_id)`：物理级一批一码保证；
+   - `idx_trace_code_org_batch (org_id, batch_id)` 与 `idx_trace_code_org_status (org_id, status)`：组织租户隔离复合索引；
+   - 注：`public_id` 与 `token_hash` 的全局物理唯一索引由 V1 初始架构原生提供（`uk_trace_public_id` 与 `uk_trace_token_hash`），V6 绝不虚构同名或冗余索引；
+3. **物理 CHECK 约束**：
+   - `chk_public_trace_code_status`：约束 `status IN ('ACTIVE', 'DISABLED', 'RECALLED')`，与业务及 OpenAPI 契约保持完全一致；
+   - `chk_public_trace_code_disable_shape`：状态形状校验，`status = 'ACTIVE'` 时 `disabled_at` 必须为 NULL；`status = 'DISABLED'` 时 `disabled_at` 必须非 NULL；`status = 'RECALLED'` 保留可见。
+4. **新建统一幂等记录表**：
+   - `CREATE TABLE public_trace_code_idempotency`，含物理唯一索引 `uk_ptc_idem_org_key (org_id, idempotency_key)`。
+
+---
+
+## 五、测试分层策略与执行方法
+
+### 1. 默认测试套件（本地及 CI 离线门禁，无外部依赖）
+- `PublicTraceApplicationServiceTest` (21 tests)：纯领域与应用服务测试，覆盖 26 位 Base32 格式、SHA-256 哈希计算、脱敏掩码边界、非 ACTIVE 批次阻断、同批次一批一码重用、同 key 语义重放、异 key 语义冲突（409 IDEMPOTENCY_KEY_REUSED）、停用终态不可逆、未知码与停用码 404 隐藏、正则非法字符拦截且不查 DB、Mockito verify 验证企业端全链路带 org_id 锁定读且绝不调用无租户查询、消费者白名单无敏感泄露（机密哨兵字符串拦截）、模拟温度 INSUFFICIENT_DATA 诚实说明、RECALLED 模拟召回声明。
+- `PublicTraceCodeControllerTest` (8 tests)：企业端 WebMvc 切片测试，覆盖非 OPERATOR 拦截（403 ACCESS_DENIED）、跨组织越权拦截（403 ORG_SCOPE_DENIED）、Idempotency-Key 缺失与非法长度参数校验（400 BAD_REQUEST）、CSRF 防护拦截、激活与停用正常 200 响应。
+- `PublicTraceConsumerControllerTest` (4 tests)：消费者匿名端 WebMvc 切片测试，覆盖匿名免认证免 CSRF 放行、匿名 POST 请求安全拦截（401/403，防绕过 CSRF）、非法格式 publicTraceId 404 拦截、以及严格禁止词典（严禁泄露内部 ID、raw batch_no、raw origin_text、token_hash、is_deleted、detailsJson、idempotencyKey 等）。
+
+### 2. 真实 MySQL 8.4 集成测试（受 `MYSQL_IT_ENABLED=true` 环境变量控制）
+- 测试类：`PublicTraceMysqlIntegrationTest` (16 个综合核心实证用例)：
+  1. `testPublicTraceLifecycle_EndToEnd`：端到端全生命周期全流程演练。包含批次创建与提交、有效与更正事件记录、企业端激活、数据库物理 token_hash 核对、统一幂等表记录核验、消费者端匿名免 CSRF 查询、白名单输出核验、严格禁止词典检查、批次流转至 RECALLED 时如实返回召回声明、流转至 FROZEN/CLOSED 时召回声明消失、企业端停用追溯码、停用后消费者端即刻返回 404 PUBLIC_TRACE_NOT_FOUND；
+  2. `testIdempotencyCounterExample1_KeyReusedAcrossBatchesAfterActiveHit`：**P0-1 反例1**，key B 对已有 ACTIVE 码调用成功后，再用 key B 激活 batch2 必须拦截报 409 IDEMPOTENCY_KEY_REUSED；
+  3. `testIdempotencyCounterExample2_KeyReusedAcrossBatchesAfterDisabledHit`：**P0-1 反例2**，key C 对已 DISABLED 码调用停用成功后，再用 key C 停用 batch2 必须拦截报 409 IDEMPOTENCY_KEY_REUSED；
+  4. `testIdempotencyCounterExample3_ConcurrentCrossActionRace`：**P0-1 反例3**，已有 ACTIVE 码时同 key 跨动作并发竞争 (ACTIVATE 语义重放 vs DISABLE 停用)，多会话隔离，恰好一个 200 另一方必为 409 IDEMPOTENCY_KEY_REUSED，统一幂等表仅留 1 条；
+  5. `testRollbackAtomicity_OnActivationFailure`：**P0-4A 激活事务原子性回滚实证**，通过动态临时 CHECK 约束触发幂等记录插入失败，断言追溯码和幂等表均回滚为 0 条，并在 finally 恢复 schema；
+  6. `testRollbackAtomicity_OnDisableFailure`：**P0-5 停用事务原子性回滚实证**，通过动态注入临时 CHECK 约束让更新为 DISABLED 失败，验证事务完整回滚（码保持 ACTIVE、disabled_at 为空、幂等表无残留），并在 finally 完整恢复 schema；
+  7. `testConcurrentActivation_SameBatchDifferentKeys`：**P0-4B 同批次不同 key 并发激活**，多会话独立隔离，两请求均 200、publicId 完全相同、码仅 1 条、幂等表有 2 条持久绑定；
+  8. `testConcurrentActivation_SameBatchSameKey`：**P0-4C 同批次同 key 并发激活**，两请求均 200、publicId 完全相同、码仅 1 条、幂等表仅 1 条持久绑定；
+  9. `testConcurrentActivation_DifferentBatchesSameKey_TriggersDuplicateKeyAnd409`：**P0-4D 不同批次同 key 并发激活**，一成 (200) 一败 (409 IDEMPOTENCY_KEY_REUSED)，实证触发 MySQL DuplicateKeyException 后 SELECT ... FOR UPDATE 当前读恢复，成功批次有码，失败批次回滚为 0；
+  10. `testTimelineDeterministicOrder_SameTimestampOrderedByIdAsc`：**P0-5 多事件完全相同时间戳排序稳定性**，插入 3 条具有完全相同 occurred_at 与 recorded_at 的有效事件，公开 timeline 按 `occurred_at ASC, recorded_at ASC, id ASC` 严格单调递增稳定排序；
+  11. `testConfidentialSentinelStringNeverLeaked`：**P0-3 机密哨兵字符串测试**，在 summary、detailsJson、组织、场所中填入机密文本，断言消费者响应全文绝无泄漏，公开 event 仅为受控业务标签；
+  12. `testUnknownAndDisabled404ResponseIndistinguishable`：**P0-5 响应一致性对比**，对比未知码与 DISABLED 码的 404 响应结构（status、code、title、detail 完全一致），外部无法探测；
+  13. `testPlatformAdminWriteOperationRejected`：**P0-5 权限反例**，平台管理员角色 (PLATFORM) 尝试写操作被拒绝（403 ACCESS_DENIED）；
+  14. `testAnonymousPostToPublicTraceRejected`：**P0-4 安全反例**，公开路径匿名 POST 请求被拦截（401/403），不能跨方法绕过 CSRF；
+  15. `testFlywayV6_PhysicalCheckConstraints_EnforcedByDatabase`：Flyway V6 物理级约束真实数据库验证（一批一码硬件级唯一约束拦截、统一幂等表唯一索引 `uk_ptc_idem_org_key` 真实拦截、非法状态值拦截、ACTIVE 状态携带 disabled_at 违规拦截）；
+  16. `testV6_OrgIdNotNull_AndConsistentWithBatchOrgId`：**V6 升级兼容性实证**，真实 MySQL 证明追溯码 org_id 非空且与 batch.org_id 一致，元数据验证 `IS_NULLABLE = 'NO'`，孤儿数据插入物理报错。
+  - `@AfterEach` 中彻底清空 `public_trace_code_idempotency` 表与全部夹具，保证测试无污染。

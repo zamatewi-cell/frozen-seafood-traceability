@@ -2,7 +2,7 @@
 
 面向高校实训的冷冻海产品供应链追溯原型。系统以“批次、追溯事件、批次关系”为核心，记录来源、加工速冻、仓储、运输、交接、检测和销售等关键节点，支持消费者一码查询，以及企业侧的正向追踪、反向溯源和模拟召回。
 
-> 当前阶段：`Phase 3 / 最小纵向闭环研发`。已完成 Phase 1 设计评审与 Phase 2 后端工程骨架建设；已完成 Issue #7 会话认证与组织上下文（Session Auth & Organization Context），包含基于 Cookie 的安全会话、CSRF 防护、BCrypt 认证、防会话固定、白名单数据投影及动态活性复核；已完成 Issue #9 产品主数据与分阶段温控规则（Product Master Data & Versioned Temperature Rules），包含产品创建/查询/更新、乐观锁、分阶段可版本化温控基准、半开区间防重叠判定算法与不可变发布；已完成 Issue #11 组织范围批次草稿生命周期（Organization-scoped Batch Draft Lifecycle），包含基础批次创建、Idempotency-Key 幂等防重与并发竞态恢复、同组织批号排他、SQL 层组织隔离、单条 SQL 条件更新兼防并发冲突与提交激活；已完成 Issue #13 批次操作、物料平衡与谱系边（Batch Operations, Mass Balance & Genealogy Edges），包含拆分/合并/加工/分装操作草稿创建与提交、服务端 0.001kg 物料平衡复核、输入输出批次活性/唯一产出/历史累计量校验、MySQL 8.4 recursive CTE 环检测、稳定顺序行锁、两套幂等并发恢复、不可变谱系边生成及 Flyway V4 物理 CHECK 约束；已完成 Issue #15 追加式追溯事件与更正工作流（Trace Events & Correction Workflow），包含10类标准业务事件追加记录、受控 detailsJson 扩展属性校验、双时间维度输出、同组织操作员鉴权、防分叉链式更正、写路径批次排他锁防 TOCTOU、锁后当前读幂等恢复与 Flyway V5 物理约束；本阶段后续生成公开追溯码与消费者公开查询仍待推进。
+> 当前阶段：`Phase 3 / 最小纵向闭环研发`。已完成 Phase 1 设计评审与 Phase 2 后端工程骨架建设；已完成 Issue #7 会话认证与组织上下文；已完成 Issue #9 产品主数据与分阶段温控规则；已完成 Issue #11 组织范围批次草稿生命周期；已完成 Issue #13 批次操作、物料平衡与谱系边；已完成 Issue #15 追加式追溯事件与更正工作流；当前正在分支 `feat/17-public-trace-consumer` 研发并验证 Issue #17 公开追溯码与消费者公开投影（待合并：包含 26 位 Base32 安全随机编码、内部 token_hash SHA-256 哈希索引、企业端激活与终态停用、统一幂等记录表持久绑定与组织隔离、消费者匿名免认证免 CSRF 白名单安全投影、敏感自由文本隔离、温度 INSUFFICIENT_DATA 诚实声明、RECALLED 模拟召回演练声明与 Flyway V6 物理约束）。最小纵向闭环核心链路待合并验收。
 
 ## 项目边界
 
@@ -83,9 +83,9 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 - [x] 完成 Phase 3 组织范围批次草稿生命周期（Issue #11：基础批次草稿创建、Idempotency-Key 幂等防重与并发竞态恢复、同组织批号排他、SQL 层组织数据隔离、单条 SQL 条件原子更新与 ACTIVE 提交流转、Flyway V3 物理 CHECK 约束）
 - [x] 完成 Phase 3 批次操作、物料平衡与谱系边（Issue #13：批次操作草稿创建与提交、服务端物料平衡重新计算、引用批次活性/组织归属校验、输出批次唯一产出与声明量校验、输入批次累计量防超额、MySQL 8.4 recursive CTE 环检测、双幂等机制、不可变谱系边与 Flyway V4 物理约束）
 - [x] 完成 Phase 3 追加式追溯事件与更正工作流（Issue #15：10类标准事件录入、受控 detailsJson 扩展属性校验、双时间维度输出、同组织操作员鉴权、防分叉链式更正、写路径批次行锁防 TOCTOU、锁后当前读幂等恢复与 Flyway V5 物理约束）
-- [ ] 推进最小纵向闭环后续切片：生成公开追溯码 → 消费者一码公开查询
+- [ ] 正在分支 `feat/17-public-trace-consumer` 研发并验证 Phase 3 公开追溯码与消费者公开投影（Issue #17：待合并验收，包含 26位 RFC 4648 Base32 唯一编码、内部 token_hash SHA-256 哈希索引、企业端激活与终态停用、统一幂等记录表持久绑定与组织隔离、消费者匿名免认证免 CSRF 白名单安全投影、敏感自由文本隔离、温度 INSUFFICIENT_DATA 诚实声明、RECALLED 模拟召回演练声明与 Flyway V6 物理约束）
 - [ ] 完成异常、追溯、召回、测试、部署和答辩材料
 
 ## 下一步
 
-在 Issue #7 会话认证、Issue #9 产品及温控规则、Issue #11 批次生命周期、Issue #13 批次操作与谱系边、Issue #15 追溯事件与更正工作流基准确立的基础上，继续推进 Phase 3 最小纵向闭环后续切片研发，打通“生成公开追溯码 → 消费者查询”的核心业务链路。
+在 Issue #7 会话认证、Issue #9 产品及温控规则、Issue #11 批次生命周期、Issue #13 批次操作与谱系边、Issue #15 追溯事件与更正工作流的基础上，推进 Issue #17 公开追溯码与消费者投影分支合并验收，完成 Phase 3 核心纵向业务闭环，后续推进异常检测、双向图谱追溯与综合答辩材料准备。

@@ -135,4 +135,13 @@ public interface TraceEventMapper extends BaseMapper<TraceEvent> {
             @Param("updatedBy") Long updatedBy,
             @Param("updatedAt") LocalDateTime updatedAt
     );
+
+    /**
+     * 查询指定批次下所有生效中（状态为 SUBMITTED）的追溯事件列表（排除已被更正的历史事件，用于消费者公开时间线投影）。
+     *
+     * @param batchId 批次 ID
+     * @return 稳定排序的有效追溯事件列表
+     */
+    @Select("SELECT * FROM trace_event WHERE batch_id = #{batchId} AND status = 'SUBMITTED' AND is_deleted = 0 ORDER BY occurred_at ASC, recorded_at ASC, id ASC")
+    List<TraceEvent> selectEffectiveEventsByBatchId(@Param("batchId") Long batchId);
 }
