@@ -34,6 +34,25 @@ public interface BatchMapper extends BaseMapper<Batch> {
     Batch selectByIdAndOrgId(@Param("id") Long id, @Param("orgId") Long orgId);
 
     /**
+     * 根据批次 ID 和组织 ID 执行当前排他锁定读 (SELECT ... FOR UPDATE)（强制组织数据隔离）。
+     *
+     * @param id    批次 ID
+     * @param orgId 组织 ID
+     * @return 批次实体；若不存在或不属于该组织则返回 null
+     */
+    @Select("SELECT * FROM batch WHERE id = #{id} AND org_id = #{orgId} AND is_deleted = 0 FOR UPDATE")
+    Batch selectByIdAndOrgIdForUpdate(@Param("id") Long id, @Param("orgId") Long orgId);
+
+    /**
+     * 仅查询批次所属的组织 ID 标量（用于在租户批次未命中时，安全区分全局 404 RESOURCE_NOT_FOUND 与跨组织越权 403 ORG_SCOPE_DENIED，严禁读取批次实体内容）。
+     *
+     * @param id 批次 ID
+     * @return 所属组织 ID；若批次不存在或已逻辑删除则返回 null
+     */
+    @Select("SELECT org_id FROM batch WHERE id = #{id} AND is_deleted = 0")
+    Long selectOrgIdByIdIgnoreTenant(@Param("id") Long id);
+
+    /**
      * 忽略组织范围根据批次 ID 查询批次（用于安全区分 404 与跨组织 403 ORG_SCOPE_DENIED）。
      *
      * @param id 批次 ID

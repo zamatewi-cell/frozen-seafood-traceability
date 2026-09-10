@@ -340,6 +340,47 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/public-trace-code/activate:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    post:
+      tags: [Batches]
+      summary: 激活批次对外公开追溯码（仅限企业操作员）
+      operationId: activatePublicTraceCode
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200':
+          description: 公开追溯码激活成功或幂等返回已激活码
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublicTraceCodeEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/public-trace-code/disable:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    post:
+      tags: [Batches]
+      summary: 停用批次对外公开追溯码（仅限企业操作员）
+      operationId: disablePublicTraceCode
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200':
+          description: 公开追溯码停用成功或幂等返回已停用码
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublicTraceCodeEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
   /batch-operations:
     post:
       tags: [Batches]
@@ -657,7 +698,11 @@ paths:
         - name: publicTraceId
           in: path
           required: true
-          schema: {type: string, minLength: 20, maxLength: 40}
+          schema:
+            type: string
+            pattern: '^[A-Z2-7]{26}$'
+            minLength: 26
+            maxLength: 26
       responses:
         '200':
           description: 严格白名单的消费者追溯结果
@@ -1255,15 +1300,45 @@ components:
         recallNo: {type: string}
         status: {type: string, enum: [DRAFT, IN_PROGRESS, CLOSED, CANCELLED]}
         simulated: {type: boolean, const: true}
+    PublicTraceCodeEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/PublicTraceCode'}
+    PublicTraceCode:
+      type: object
+      additionalProperties: false
+      required: [id, batchId, publicId, status, activatedAt, createdAt, updatedAt]
+      properties:
+        id: {type: integer, format: int64}
+        batchId: {type: integer, format: int64}
+        publicId:
+          type: string
+          pattern: '^[A-Z2-7]{26}$'
+          minLength: 26
+          maxLength: 26
+        status: {type: string, enum: [ACTIVE, DISABLED, RECALLED]}
+        activatedAt: {type: string, format: date-time}
+        disabledAt:
+          type: [string, "null"]
+          format: date-time
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
     PublicTrace:
       type: object
       additionalProperties: false
-      required: [publicTraceId, product, batch, timeline, temperatureSummary, status, queriedAt, disclosure]
+      required: [publicTraceId, product, batch, timeline, temperatureSummary, batchStatus, queriedAt, disclosure]
       properties:
-        publicTraceId: {type: string}
+        publicTraceId:
+          type: string
+          pattern: '^[A-Z2-7]{26}$'
+          minLength: 26
+          maxLength: 26
         product:
           type: object
           additionalProperties: false
+          required: [name, category, specification]
           properties:
             name: {type: string}
             category: {type: string}
@@ -1271,16 +1346,20 @@ components:
         batch:
           type: object
           additionalProperties: false
+          required: [publicBatchNo, originType, maskedOrigin]
           properties:
             publicBatchNo: {type: string}
             originType: {type: string}
             maskedOrigin: {type: string}
-            productionDate: {type: string, format: date}
+            productionDate:
+              type: [string, "null"]
+              format: date
         timeline:
           type: array
           items:
             type: object
             additionalProperties: false
+            required: [event, occurredAt, dataSourceLabel]
             properties:
               event: {type: string}
               occurredAt: {type: string, format: date-time}
@@ -1288,11 +1367,13 @@ components:
         temperatureSummary:
           type: object
           additionalProperties: false
+          required: [result, ruleNote]
           properties:
             result: {type: string, enum: [NO_BREACH_RECORDED, BREACH_RECORDED, INSUFFICIENT_DATA]}
             ruleNote: {type: string}
-        status: {type: string, enum: [ACTIVE, DISABLED, RECALLED]}
-        recallNotice: {type: string}
+        batchStatus: {type: string, enum: [ACTIVE, FROZEN, RECALLED, CLOSED]}
+        recallNotice:
+          type: [string, "null"]
         queriedAt: {type: string, format: date-time}
         disclosure: {type: string}
 security:

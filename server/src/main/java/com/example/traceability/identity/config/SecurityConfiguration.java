@@ -123,6 +123,7 @@ public class SecurityConfiguration {
                         .requestMatchers("/actuator/health", "/actuator/health/**", "/api/v1/samples/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/auth/csrf").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/login").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/public/v1/public/traces/*").permitAll()
                         .requestMatchers("/api/v1/auth/logout", "/api/v1/me").authenticated()
                         .anyRequest().authenticated())
                 .exceptionHandling(exceptions -> exceptions

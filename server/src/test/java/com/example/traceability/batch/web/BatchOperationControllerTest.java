@@ -103,6 +103,12 @@ class BatchOperationControllerTest {
     @MockitoBean
     private com.example.traceability.trace.mapper.TraceEventMapper traceEventMapper;
 
+    @MockitoBean
+    private com.example.traceability.trace.mapper.PublicTraceCodeMapper publicTraceCodeMapper;
+
+    @MockitoBean
+    private com.example.traceability.trace.mapper.PublicTraceCodeIdempotencyMapper publicTraceCodeIdempotencyMapper;
+
     private TraceSecurityPrincipal operatorPrincipal;
     private TraceSecurityPrincipal adminPrincipal;
 
