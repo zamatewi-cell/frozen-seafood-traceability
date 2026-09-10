@@ -5,6 +5,7 @@
 2. **第二部分**：产品主数据与分阶段温控规则交付规范（GitHub Issue #9 “product master data and versioned temperature rules”）
 3. **第三部分**：组织范围批次草稿生命周期交付规范（GitHub Issue #11 “organization-scoped batch draft lifecycle”）
 4. **第四部分**：批次操作、物料平衡与谱系边交付规范（GitHub Issue #13 “batch operations, mass balance, and genealogy edges”）
+5. **第五部分**：追溯事件与更正工作流交付规范（GitHub Issue #15 “append-only trace events and correction workflow”）
 
 ---
 
@@ -857,3 +858,175 @@ flowchart TD
 ### 2. 真实 MySQL 8.4 集成测试（环境变量控制）
 - 测试类：`BatchOperationMysqlIntegrationTest`（受 `MYSQL_IT_ENABLED=true` 控制）
 - 覆盖端到端标准链路（600kg+420kg -> 480kg+520kg+20kg损耗）、物料不平衡完整回滚、多跳环路检测回滚、双并发提交幂等恢复以及 Flyway V4 物理 CHECK 约束精准拦截验证。
+
+---
+
+# 第五部分：追溯事件与更正工作流交付规范 (Trace Events & Correction Workflow)
+
+本文档记录冷冻海产品溯源系统 Phase 3（GitHub Issue #15 “feat: implement append-only trace events and correction workflow”）的接口契约、安全设计、状态流转控制、并发加锁与当前读恢复机制，以及测试分层策略。
+
+---
+
+## 一、核心目标与不可篡改设计
+
+1. **追加式记录（Append-Only）原则**：
+   - 追溯事件作为海产品供应链各环节真实发生的证据，持久化后严禁物理删除或直接原地修改；
+   - 所有发现的记录错误、参数校准或审计补充，必须通过**链式追加更正记录**的方式进行修正；
+   - 原事件被更正后，其状态原子流转为 `CORRECTED`，新记录标记为 `SUBMITTED` 并显式关联 `correctsEventId` 与 `correctionReason`；
+   - 历史旧事件保持可追溯、可审计，完整重现事件演变轨迹。
+2. **防分叉链式更正（Anti-Forking Corrections）**：
+   - 每条追溯事件在生命周期内**最多只能被更正一次**；
+   - 链式更正仅允许对当前最新生效版本（状态为 `SUBMITTED`）发起，对已被更正的事件（`CORRECTED`）再次发起更正直接拒绝（`409 EVENT_ALREADY_CORRECTED`）；
+   - 数据库底层通过 `uk_trace_event_corrects` 唯一索引对 `corrects_event_id` 提供硬件级防分叉兜底。
+3. **独立双时间维度**：
+   - `occurredAt`：业务实际发生时间（由客户端设备/操作员上报，带时区偏移）；
+   - `recordedAt`：系统接收并持久化的审计登记时间（由服务端依据 UTC 统一生成，只读属性）；
+   - 两者独立持久化并在响应中以 ISO 8601 毫秒精度 UTC 时间格式输出。
+4. **严格数据隔离与白名单投影**：
+   - 仅允许企业操作员（`OPERATOR`）写入同组织批次的事件（跨组织操作返回 `403 ORG_SCOPE_DENIED`，非操作员返回 `403 ACCESS_DENIED`，平台角色禁止写企业事件）；
+   - 响应 DTO 严格过滤 `isDeleted`、`idempotencyKey`、乐观锁等内部敏感字段。
+5. **数据来源类型与边界约束 (`DataSource`)**：
+   - `MANUAL`：企业操作员通过前端交互界面进行的人工填报；
+   - `IMPORT`：企业内部/外部系统批量或文件导入数据；
+   - `SIMULATED`：**教学演练与仿真模拟数据**（专用于高校教学实训推演、数字孪生测试与原型演练，**绝对不能描述为真实物联网数据**）；
+   - `DEVICE`：**来源类型标准化保留值**（仅作为数据模型对未来物联网扩展的规范保留，**不代表本项目当前阶段已接入真实硬件设备或真实物联网感知基础设施**）。
+
+---
+
+## 二、批次状态矩阵与校验规则
+
+追溯事件的录入与更正严格受所属批次生命周期状态控制：
+
+| 批次状态 (`Batch.status`) | 创建普通事件 (`POST .../events`) | 提交链式更正 (`POST .../corrections`) | 业务设计考量 |
+|:---|:---|:---|:---|
+| `DRAFT` (草稿) | ❌ 拒绝 (`422 BATCH_FLOW_BLOCKED`) | ❌ 拒绝 (`422 BATCH_FLOW_BLOCKED`) | 草稿批次尚未激活，不允许录入正式流通追溯数据 |
+| `ACTIVE` (激活生效) | ✅ 允许 | ✅ 允许 | 正常流通中批次，全面接受事件上报与更正 |
+| `FROZEN` (质量冻结) | ❌ 拒绝 (`422 BATCH_FLOW_BLOCKED`) | ❌ 拒绝 (`422 BATCH_FLOW_BLOCKED`) | 冻结批次处于质量排查状态，阻断一切流转写入 |
+| `RECALLED` (已召回) | ❌ 拒绝 (`422 BATCH_FLOW_BLOCKED`) | ❌ 拒绝 (`422 BATCH_FLOW_BLOCKED`) | 批次已召回，物理流转终结，禁止写入新事件与更正 |
+| `CLOSED` (已归档关闭) | ❌ 拒绝 (`422 BATCH_FLOW_BLOCKED`) | ✅ **允许** (`201 Created`) | 批次已完成生命周期归档，禁止产生新业务事件；但合规审计允许对历史记录做补充更正 |
+
+---
+
+## 三、受控扩展属性 `detailsJson` 规范
+
+为防止非结构化 JSON 滥用导致系统性能退化或存储拒绝服务，`detailsJson` 遵循以下严密约束：
+1. **单层结构**：必须为平铺单层 JSON 对象，严禁嵌套对象或数组；
+2. **属性基数**：属性数量最多不得超过 20 个；
+3. **键名格式**：键名必须符合小驼峰命名正则 `^[a-z][A-Za-z0-9]{0,63}$`；
+4. **敏感与核心键禁用**：严禁占用核心领域字段名（如 `batchId`, `orgId`, `id`, `status`, `eventType`, `occurredAt`, `recordedAt`, `version`, `isDeleted` 等）；
+5. **值类型受限**：值仅允许基本标量（字符串、数值、布尔值或 null）；字符串长度单属性不得超过 500 个字符；
+6. **存储总容量上限**：整个 `detailsJson` 序列化后的 UTF-8 字节数不得超过 8 KiB。
+
+---
+
+## 四、并发安全与当前读恢复机制
+
+### 1. 写路径批次排他锁消除 TOCTOU
+在事件录入和更正处理前，首先通过 `batchMapper.selectByIdIgnoreTenantForUpdate(batchId)` 锁定批次行。
+彻底规避“读批次为 ACTIVE -> 外部并发将批次冻结/关闭 -> 继续写入事件”的 TOCTOU 竞态漏洞。
+
+### 2. 目标事件排他锁与同 Key 唤醒当前读恢复
+在更正工作流中，两个携带相同 `Idempotency-Key` 的并发更正请求会发生行锁竞争：
+- 事务 A 先获得目标事件行锁，完成插入并将目标事件状态更新为 `CORRECTED` 后提交；
+- 事务 B 阻塞在目标事件行锁上。当事务 B 获得锁被唤醒时，若仅读取目标事件，会发现其已是 `CORRECTED` 状态；
+- 若直接进入状态判断，事务 B 会错误抛出 `409 EVENT_ALREADY_CORRECTED`；
+- **当前读恢复设计**：事务 B 在获取锁之后、检查状态之前，立即执行 `traceEventMapper.selectByOrgIdAndIdempotencyKeyForUpdate(orgId, idempotencyKey)`；
+- 此时利用 `FOR UPDATE` 当前锁定读穿透 MySQL `REPEATABLE READ` 的快照读盲区，直接读取到事务 A 已提交的更正行；
+- 若载荷一致，安全重放返回事务 A 的更正记录，完美实现并发幂等恢复。
+
+### 3. 三重安全条件 CAS 原子更新
+更新原事件状态采用高安全条件 SQL：
+```sql
+UPDATE trace_event
+SET status = 'CORRECTED', version = version + 1, updated_at = #{updatedAt}, updated_by = #{updatedBy}
+WHERE id = #{id} AND batch_id = #{batchId} AND org_id = #{orgId} AND status = 'SUBMITTED' AND is_deleted = 0
+```
+联合校验 `id`、`batchId`、`orgId` 和原状态 `SUBMITTED`，受影响行数为 0 时立即抛出 409 异常并触发事务回滚。
+
+---
+
+## 五、数据库底层约束保障 (Flyway V5)
+
+在 MySQL 8.4 LTS 环境下，Flyway V5 脚本应用了以下物理级约束：
+1. **唯一约束**：
+   - `uk_trace_event_org_idempotency` (`org_id`, `idempotency_key`)：租户级幂等防重键；
+   - `uk_trace_event_corrects` (`corrects_event_id`)：防分叉更正唯一索引；
+   - `idx_trace_event_org_batch_time` (`org_id`, `batch_id`, `occurred_at`, `recorded_at`, `id`)：高效且排序稳定的复合索引。
+2. **物理 CHECK 约束**：
+   - `chk_trace_event_type`：限制 10 种枚举值；
+   - `chk_trace_event_data_source`：限制 `MANUAL`, `IMPORT`, `SIMULATED`, `DEVICE`（注：`SIMULATED` 为教学仿真模拟数据，`DEVICE` 仅为来源类型保留值，不代表本项目已接入真实物联网设备）；
+   - `chk_trace_event_status`：限制 `SUBMITTED`, `CORRECTED`；
+   - `chk_trace_event_correction_shape`：`corrects_event_id` 与 `correction_reason` 必须同时为 NULL 或同时非 NULL；
+   - *注意*：MySQL 8.4 语法明确禁止 CHECK 约束引用 AUTO_INCREMENT 列，防自更正由应用层与自增序列天然隔离保证。
+
+---
+
+## 六、API 接口调用契约
+
+### 1. 查询批次追溯事件列表 (`GET /api/v1/batches/{batchId}/events`)
+- **权限**：同组织用户（`OPERATOR`, `MANAGER`, `VIEWER`）或全平台角色，支持 CSRF 保护下的安全 GET 请求；
+- **响应**：`200 OK`，按 `occurredAt ASC, recordedAt ASC, id ASC` 排序的完整事件数组（包含已更正的历史事件与生效事件）。
+
+### 2. 录入追溯事件 (`POST /api/v1/batches/{batchId}/events`)
+- **权限**：同组织企业操作员（`OPERATOR`，平台角色禁止录入）；
+- **请求头**：`Idempotency-Key: <16..128字符>`；
+- **入参示例**：
+  ```json
+  {
+    "eventType": "PROCESS",
+    "occurredAt": "2026-09-09T10:00:00+08:00",
+    "siteId": 12,
+    "dataSource": "MANUAL",
+    "summary": "车间去头去内脏粗加工并速冻",
+    "detailsJson": {
+      "temperature": -18.5,
+      "equipmentId": "EQ-009"
+    }
+  }
+  ```
+- **响应**：`201 Created`，返回包含独立 `occurredAt`、`recordedAt`、状态 `SUBMITTED` 的事件对象。
+
+### 3. 提交追加式更正记录 (`POST /api/v1/batches/{batchId}/events/{eventId}/corrections`)
+- **权限**：同组织企业操作员（`OPERATOR`，平台角色禁止更正）；
+- **请求头**：`Idempotency-Key: <16..128字符>`；
+- **入参示例**：
+  ```json
+  {
+    "eventType": "PROCESS",
+    "occurredAt": "2026-09-09T10:00:00+08:00",
+    "siteId": 12,
+    "dataSource": "MANUAL",
+    "summary": "车间去头去内脏粗加工并深度速冻",
+    "detailsJson": {
+      "temperature": -22.0,
+      "equipmentId": "EQ-009"
+    },
+    "correctionReason": "温度巡检传感器零点误差校准"
+  }
+  ```
+- **响应**：`201 Created`，返回新更正事件，`correctsEventId` 指向目标事件，目标事件原子更新为 `CORRECTED`。
+
+### 4. 不可篡改性与方法排他保护 (`PUT / PATCH / DELETE /api/v1/batches/{batchId}/events/{eventId}`)
+- **行为**：尝试通过 `PUT`、`PATCH` 就地修改已录入事件或尝试 `DELETE` 物理删除事件；
+- **响应**：统一返回 `405 Method Not Allowed`，并确保底层数据库数据、版本与状态完全不受影响，刚性捍卫 Append-only 不可变设计。
+
+---
+
+## 七、测试分层策略与执行方法
+
+### 1. 默认测试套件（本地及 CI 离线门禁）
+- `TraceEventApplicationServiceTest` (29 tests)：纯业务逻辑单元测试，覆盖 10 枚举白名单、受控 detailsJson 边界（基数、小驼峰正则、核心词禁用、禁止嵌套、标量类型受限、字符串长度超限、序列化体积上限）、场所归属与状态校验、DRAFT 拦截、CLOSED 批次允许更正、平台角色写入/更正拦截（403 ACCESS_DENIED）、非 OPERATOR 角色拦截、并发锁后同 key 唤醒恢复、异 key 语义冲突、捕获 DuplicateKeyException 后防分叉当前锁定读 (`selectByCorrectsEventIdForUpdate`) 诊断等；
+- `TraceEventControllerTest` (13 tests)：WebMvc 切片测试，覆盖权限矩阵拦截（非 OPERATOR 报 403、跨组织报 403、平台角色写操作与更正拦截 403）、参数校验（Header 缺少/非法长度 400、字段错误 400）、双时间输出格式与内部敏感字段白名单过滤。
+
+### 2. 真实 MySQL 8.4 集成测试（环境变量控制）
+- 测试类：`TraceEventMysqlIntegrationTest`（受 `MYSQL_IT_ENABLED=true` 控制，9 tests）；
+- 覆盖范围：
+  1. `testTraceEventLifecycle_EndToEnd_WithOrgIsolationAndIdempotency`：端到端全流程链路、DRAFT 状态阻断、停用场所/跨组织场所拦截、正常录入、同 key 幂等重放、跨组织隔离、链式更正流转、数据库物理状态核验、防分叉拦截、更正重试在状态检查前识别以及 CLOSED 归档批次合规更正；
+  2. `testConcurrentSameKeyCorrection_IdempotentRecovery`：真实高并发场景下两个事务携带相同幂等键同时更正，通过目标事件行排他锁与锁后当前读重查，只生成单条更正记录并稳定返回相同更正 ID；
+  3. `testConcurrentDifferentKeyCorrection_ConflictRejection`：真实高并发场景下两个事务携带不同幂等键同时更正，后获锁事务被目标状态已变更精准拦截（409 EVENT_ALREADY_CORRECTED），杜绝数据分叉；
+  4. `testRepeatableRead_SnapshotBlindSpot_And_ForUpdateCurrentRead`：真实 MySQL 默认 REPEATABLE READ 快照读盲区复现，以及通过 `FOR UPDATE` 当前锁定读穿透 Read View 盲区实现可靠读写恢复的完整实证；
+  5. `testFlywayV5_PhysicalCheckConstraints_EnforcedByDatabase`：Flyway V5 全部 4 项物理 CHECK 约束（枚举类型、数据来源、事件状态、更正形状成对性）与防分叉唯一索引在真实 MySQL 8.4 底层生效拦截脏数据证据；
+  6. `testAccessControl_NonOperatorAndCrossOrg_Forbidden`：端到端权限矩阵拦截（非 OPERATOR 拦截 403、平台用户拦截 403、跨组织创建/更正拦截 403），以及 **Append-only 不可变性反例：PUT 覆盖修改返回 405 Method Not Allowed、DELETE 物理删除返回 405 Method Not Allowed，数据库物理核对事件记录依然存在且核心字段、版本与状态保持不变**；
+  7. `testCorrectionWorkflow_AtomicRollback_WhenOldVersionUpdateFails`：**真实数据库事务原子性回滚实证**（通过注入临时 MySQL BEFORE UPDATE 触发器模拟新版本已插入但旧版本更新失败，验证 Spring 声明式事务完整回滚，新版本物理撤销，旧版本状态保持 SUBMITTED，并在 finally 严格清理临时触发器）；
+  8. `testEventListOrdering_IdenticalTimestamps_StrictlyOrderedByIdAsc`：至少三条事件具有完全相同 `occurred_at` 与 `recorded_at` 时，`GET /api/v1/batches/{batchId}/events` 严格按 `id ASC` 递增确定性稳定排序；
+  9. `testDataSourceSimulated_And_RecordedAtAfterOccurredAt`：`SIMULATED` 数据来源真实通过 API 写入 MySQL 并原样存储与回显，解析响应时间明确断言 `recordedAt` 严格晚于历史 `occurredAt`，双时间体系严谨区分。
