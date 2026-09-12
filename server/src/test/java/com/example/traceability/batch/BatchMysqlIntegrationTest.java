@@ -287,10 +287,15 @@ class BatchMysqlIntegrationTest {
         createdBatchIds.add(batchIdB);
 
         // 12. 列表数据隔离验证：User A 列表只能看到 Org A 的批次，绝看不到 Org B 的批次
-        mockMvc.perform(get("/api/v1/batches")
+        MvcResult listResultA = mockMvc.perform(get("/api/v1/batches")
                         .session((MockHttpSession) sessionA))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data[*].orgId").value(orgA.getId().intValue()));
+                .andReturn();
+        JsonNode listDataA = objectMapper.readTree(listResultA.getResponse().getContentAsString()).path("data");
+        assertThat(listDataA.size()).isGreaterThan(0);
+        for (JsonNode batchNode : listDataA) {
+            assertThat(batchNode.path("orgId").longValue()).isEqualTo(orgA.getId());
+        }
 
         // 13. 详情跨组织访问验证：User B 访问 Org A 的批次返回 403 ORG_SCOPE_DENIED
         mockMvc.perform(get("/api/v1/batches/" + batchIdA)
