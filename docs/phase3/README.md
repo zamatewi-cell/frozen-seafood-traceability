@@ -6,7 +6,8 @@
 3. **第三部分**：组织范围批次草稿生命周期交付规范（GitHub Issue #11 “organization-scoped batch draft lifecycle”）
 4. **第四部分**：批次操作、物料平衡与谱系边交付规范（GitHub Issue #13 “batch operations, mass balance, and genealogy edges”）
 5. **第五部分**：追溯事件与更正工作流交付规范（GitHub Issue #15 “append-only trace events and correction workflow”）
-6. **第六部分**：公开追溯码与消费者端投影实现与验证规范（GitHub Issue #17，当前分支 `feat/17-public-trace-consumer` 正在实现 / 待合并验收）
+6. **第六部分**：公开追溯码与消费者端投影实现与验证规范（GitHub Issue #17 / PR #18 已合入主分支）
+7. **第七部分**：响应式消费者追溯 Web 生产前端交付规范（GitHub Issue #19，当前分支 `feat/19-consumer-trace-web` 正在实现 / 待合并验收）
 
 ---
 
@@ -1034,9 +1035,9 @@ WHERE id = #{id} AND batch_id = #{batchId} AND org_id = #{orgId} AND status = 'S
 
 ---
 
-# 第六部分：公开追溯码与消费者端投影研发文档 (当前分支 `feat/17-public-trace-consumer` 正在实现 / 待合并验收)
+# 第六部分：公开追溯码与消费者端投影研发文档 (GitHub Issue #17 / PR #18 已合入主分支)
 
-本文档记录冷冻海产品溯源系统 Phase 3（GitHub Issue #17 “feat: generate public trace codes and expose consumer trace projection”，当前分支正在实现中、待合并验收）的接口调用契约、安全设计机制、并发控制与数据库约束规范。
+本文档记录冷冻海产品溯源系统 Phase 3（GitHub Issue #17 “feat: generate public trace codes and expose consumer trace projection”，PR #18 已合入主分支）的接口调用契约、安全设计机制、并发控制与数据库约束规范。
 
 ---
 
@@ -1288,3 +1289,74 @@ Flyway 迁移脚本 `V6__public_trace_code_constraints.sql` 在 MySQL 8.4 LTS �
   15. `testFlywayV6_PhysicalCheckConstraints_EnforcedByDatabase`：Flyway V6 物理级约束真实数据库验证（一批一码硬件级唯一约束拦截、统一幂等表唯一索引 `uk_ptc_idem_org_key` 真实拦截、非法状态值拦截、ACTIVE 状态携带 disabled_at 违规拦截）；
   16. `testV6_OrgIdNotNull_AndConsistentWithBatchOrgId`：**V6 升级兼容性实证**，真实 MySQL 证明追溯码 org_id 非空且与 batch.org_id 一致，元数据验证 `IS_NULLABLE = 'NO'`，孤儿数据插入物理报错。
   - `@AfterEach` 中彻底清空 `public_trace_code_idempotency` 表与全部夹具，保证测试无污染。
+
+
+---
+
+# 第七部分：响应式消费者追溯 Web 生产前端交付规范 (GitHub Issue #19，当前分支 `feat/19-consumer-trace-web` 研发中 / 待合并验收)
+
+本文档记录冷冻海产品溯源系统 Phase 3（GitHub Issue #19 “feat(web): bootstrap Vue 3 app and implement responsive consumer trace lookup”）的架构选型、视觉规范、安全边界、端点调用契约与自动化测试验证规范。
+
+---
+
+## 一、核心目标与边界隔离
+
+1. **全新生产应用目录 `web/`**：
+   - 依据 [ADR-003 前端技术选型决策](../adr/ADR-003-vue-toolchain.md)，生产前端采用 Vue 3.5+、TypeScript 5.7+、Vite 8.2+、Node.js 24 LTS 构建，依赖版本由 `package-lock.json` 严格锁定；
+   - 现存 `prototype/` 保持为不可变 Phase 1 原型参考基线，不转换为生产工程，不修改其代码与依赖。
+2. **严格单接口最小切片**：
+   - 消费者 Web 前端仅对接 `GET /api/public/v1/public/traces/{publicTraceId}` 唯一公开匿名端点；
+   - 坚决不引入企业管理端、登录页面、批次建档表单、事件录入向导、二维码图片生成、AntV X6 谱系拓扑、ECharts 温度图表、交接确认、温控上报、质检录入或召回管理工作流。
+3. **真实性与合规性诚实声明 (Truthfulness)**：
+   - 数据来源标签若包含 `SIMULATED`，页面醒目标识为“教学演练与仿真模拟数据”，并高亮“仿真推演”徽标；
+   - 数据来源标签若包含 `DEVICE`，页面明确展示为预留标准标识并提示“未接入真实硬件”，杜绝伪造真实 IoT 设备凭证；
+   - 温控摘要判定结果为 `INSUFFICIENT_DATA` 时，页面如实展示“暂无实时时序采集”，绝不虚构一条 -18 ℃ 合规折线图或出具任何法律合规证明。
+
+---
+
+## 二、视觉设计与响应式视口规范
+
+1. **沉稳海洋视觉基调**：
+   - 顶部主栏：深蓝 Navy (`#0f2742`)，白色品牌文字与浅天蓝标语 (`#bae6fd`)；
+   - 交互强调：海洋蓝 Ocean Blue (`#0284c7`，悬停 `#0369a1`)；
+   - 界面画布：冷灰浅底 (`#f8fafc`)；
+   - 内容卡片：高对比白底卡片 (`#ffffff`)，搭配浅灰微边框 (`#e2e8f0`)；
+   - 状态表达：双重感知（非颜色单一识别），融合矢量图标与语义文字。
+2. **响应式两级视口设计**：
+   - **移动优先紧凑层级**：针对 360px、390px、480px 等手机屏幕，卡片单列自然流式堆叠，触控按钮最小高度均满足 44px；
+   - **桌面端意图自适应**：在 ≥ 860px 视口下，采用宽度受控 (`max-width: 980px`) 居中布局，主副两列流式组合（左列展示概览、基本信息与温控履约，右列独立展示供应链时间线），彻底消除单列在宽屏下被严重拉伸失真的不良体验。
+3. **路由组织**：
+   - `/trace`：手动输入查验主页，集成 Base32 格式实时校验与清空辅助；
+   - `/trace/:publicTraceId`：直接查询路由，用于扫码或外部链接一码直达，支持自动装载与路由参数响应。
+
+---
+
+## 三、安全机制与防御体系
+
+1. **绝对白名单渲染与零 v-html**：
+   - 仅对服务端投影数据白名单（`product`, `batch`, `timeline`, `temperatureSummary`, `batchStatus`, `recallNotice`, `queriedAt`, `disclosure`）进行属性绑定；
+   - 全工程全局静态审计断言 `v-html` 使用量为 0，杜绝跨站脚本攻击 (XSS) 风险。
+2. **零前端存储与数据窥探防御**：
+   - 追溯码、用户信息与接口响应绝不持久化至 `localStorage` 或 `sessionStorage`；
+   - 对格式不合规（未满足 `^[A-Z2-7]{26}$`）、不存在码、已停用码，统一收敛为完全一致的中性“未找到该追溯码或该码已失效”提示，外界无法通过前端探测码的状态生命周期。
+3. **安全请求标识与脱敏报错**：
+   - 出现 5xx 或网络异常时，提取并展示受控安全 Request ID（供运维与支持排查），绝不展示任何后端调用栈、内部异常类名或系统拓扑。
+
+---
+
+## 四、测试分层策略与质量门禁
+
+1. **Vitest 单元与组件测试**：
+   - `validation.spec.ts` (5 tests)：覆盖 RFC 4648 Base32 大写 26 位正则、非法字符 (0, 1, 8, 9, 下划线等)、非法长度、非字符串及首尾空格自动转换；
+   - `formatters.spec.ts` (6 tests)：覆盖 ISO 时间容错、生产日期、水产大类字典、来源类型字典、批次流转状态与温控结论格式化；
+   - `client.spec.ts` (4 tests)：覆盖 `SuccessEnvelope` 解包、404 转 `NotFoundError`、RFC 9457 Problem Details 转 `ApiError`、Request ID 提取及调用方取消信号转发；
+   - `TraceView.spec.ts` (11 tests)：覆盖初始欢迎、骨架屏平滑加载、单次请求、查询时间与披露声明、ACTIVE/FROZEN/CLOSED 状态、RECALLED 显式模拟召回提示条、空时间线、中性 404、网络/服务异常脱敏及禁止字段哨兵不渲染；
+   - `security-truthfulness.spec.ts` (5 tests)：静态扫描确保零 `v-html`、零 `localStorage`/`sessionStorage` 持久化，以及 SIMULATED/DEVICE/INSUFFICIENT_DATA 真实性标识断言。
+2. **Playwright 多端浏览器自动化测试 (360px / 390px / Desktop)**：
+   - `trace-flow.spec.ts`：通过原生浏览器驱动验证手动输入跳转、一码直达直接路由、模拟召回演练告警条展示、空时间线占位、中性 404 页面及非法字符客户端直接拦截。
+   - `real-smoke.spec.ts`：仅由真实冒烟入口启用，不拦截 API；验证页面请求真实 Spring Boot 投影并渲染 MySQL 夹具。
+3. **端到端真实 Vue + Spring Boot + MySQL 8.4 隔离冒烟验证 (`npm run test:smoke`)**：
+   - 每次随机分配夹具主键与 26 位 Base32 公开码，并在写入前对相关表与唯一业务键执行无碰撞检查；
+   - 启动独立端口的 Spring Boot 服务，由 Playwright 驱动真实 Vue 页面，经 Vite `/api` 代理查询后端白名单投影；
+   - 缺少数据库、后端启动失败或 HTTP/页面断言失败都会令命令失败，不允许降级为假成功；
+   - 在 `finally` 中按精确夹具主键物理删除，并再次汇总验证相关表残留为 0。

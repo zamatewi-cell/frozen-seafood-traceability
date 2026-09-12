@@ -2,7 +2,7 @@
 
 面向高校实训的冷冻海产品供应链追溯原型。系统以“批次、追溯事件、批次关系”为核心，记录来源、加工速冻、仓储、运输、交接、检测和销售等关键节点，支持消费者一码查询，以及企业侧的正向追踪、反向溯源和模拟召回。
 
-> 当前阶段：`Phase 3 / 最小纵向闭环研发`。已完成 Phase 1 设计评审与 Phase 2 后端工程骨架建设；已完成 Issue #7 会话认证与组织上下文；已完成 Issue #9 产品主数据与分阶段温控规则；已完成 Issue #11 组织范围批次草稿生命周期；已完成 Issue #13 批次操作、物料平衡与谱系边；已完成 Issue #15 追加式追溯事件与更正工作流；当前正在分支 `feat/17-public-trace-consumer` 研发并验证 Issue #17 公开追溯码与消费者公开投影（待合并：包含 26 位 Base32 安全随机编码、内部 token_hash SHA-256 哈希索引、企业端激活与终态停用、统一幂等记录表持久绑定与组织隔离、消费者匿名免认证免 CSRF 白名单安全投影、敏感自由文本隔离、温度 INSUFFICIENT_DATA 诚实声明、RECALLED 模拟召回演练声明与 Flyway V6 物理约束）。最小纵向闭环核心链路待合并验收。
+> 当前阶段：`Phase 3 / 最小纵向闭环研发`。已完成 Phase 1 设计评审与 Phase 2 后端工程骨架建设；已完成 Issue #7 会话认证与组织上下文；已完成 Issue #9 产品主数据与分阶段温控规则；已完成 Issue #11 组织范围批次草稿生命周期；已完成 Issue #13 批次操作、物料平衡与谱系边；已完成 Issue #15 追加式追溯事件与更正工作流；已完成 Issue #17（PR #18 已合入）公开追溯码与消费者公开投影（包含 26 位 Base32 安全编码、内部 token_hash SHA-256 哈希索引、企业端激活与终态停用、统一幂等表持久绑定、消费者匿名免认证免 CSRF 白名单安全投影、敏感自由文本隔离、温度 INSUFFICIENT_DATA 诚实声明、RECALLED 模拟召回演练声明与 Flyway V6 物理约束）；当前正在分支 `feat/19-consumer-trace-web` 研发并验证 Issue #19 生产 Vue 3 移动优先消费者查询端（待合并：基于 Vue 3 + TypeScript + Vite 8 构建响应式消费者查验页，对接 FR-TRACE-002 公开接口、RFC 4648 Base32 客户端前置校验、骨架屏、中性 404、模拟召回演练显式声明、真实性诚实披露、Vitest/Playwright 全自动化验证、无 v-html、无前端持久化与独立前端 CI 流水线）。
 
 ## 项目边界
 
@@ -44,7 +44,7 @@ flowchart LR
 ```text
 .
 ├─ server/                 # Spring Boot 服务端（已建立工程骨架与 8 大业务包）
-├─ web/                    # Vue 3 Web 端（设计评审后创建）
+├─ web/                    # Vue 3 Web 端（已建立 Vue 3 + TS + Vite 8 生产工程与消费者查询页）
 ├─ database/               # 版本化迁移与演示数据
 ├─ tests/                  # 跨端验收与测试资产
 ├─ deploy/                 # 部署配置和运维说明（含 deploy/docker-compose.yml 数据库环境编排）
@@ -83,9 +83,10 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 - [x] 完成 Phase 3 组织范围批次草稿生命周期（Issue #11：基础批次草稿创建、Idempotency-Key 幂等防重与并发竞态恢复、同组织批号排他、SQL 层组织数据隔离、单条 SQL 条件原子更新与 ACTIVE 提交流转、Flyway V3 物理 CHECK 约束）
 - [x] 完成 Phase 3 批次操作、物料平衡与谱系边（Issue #13：批次操作草稿创建与提交、服务端物料平衡重新计算、引用批次活性/组织归属校验、输出批次唯一产出与声明量校验、输入批次累计量防超额、MySQL 8.4 recursive CTE 环检测、双幂等机制、不可变谱系边与 Flyway V4 物理约束）
 - [x] 完成 Phase 3 追加式追溯事件与更正工作流（Issue #15：10类标准事件录入、受控 detailsJson 扩展属性校验、双时间维度输出、同组织操作员鉴权、防分叉链式更正、写路径批次行锁防 TOCTOU、锁后当前读幂等恢复与 Flyway V5 物理约束）
-- [ ] 正在分支 `feat/17-public-trace-consumer` 研发并验证 Phase 3 公开追溯码与消费者公开投影（Issue #17：待合并验收，包含 26位 RFC 4648 Base32 唯一编码、内部 token_hash SHA-256 哈希索引、企业端激活与终态停用、统一幂等记录表持久绑定与组织隔离、消费者匿名免认证免 CSRF 白名单安全投影、敏感自由文本隔离、温度 INSUFFICIENT_DATA 诚实声明、RECALLED 模拟召回演练声明与 Flyway V6 物理约束）
+- [x] 完成 Phase 3 公开追溯码与消费者公开投影（Issue #17 / PR #18：26 位 RFC 4648 Base32 唯一编码、内部 token_hash SHA-256 哈希索引、企业端激活与终态停用、统一幂等记录表持久绑定与组织隔离、消费者匿名免认证免 CSRF 白名单安全投影、敏感自由文本隔离、温度 INSUFFICIENT_DATA 诚实声明、RECALLED 模拟召回演练声明与 Flyway V6 物理约束）
+- [ ] 正在分支 `feat/19-consumer-trace-web` 研发并验证 Phase 3 响应式消费者追溯 Web（Issue #19：Vue 3 + TypeScript + Vite 8、移动优先查询页、真实性披露、Vitest、Playwright、真实 Vue → Spring Boot → MySQL 8.4 冒烟与独立前端 CI）
 - [ ] 完成异常、追溯、召回、测试、部署和答辩材料
 
 ## 下一步
 
-在 Issue #7 会话认证、Issue #9 产品及温控规则、Issue #11 批次生命周期、Issue #13 批次操作与谱系边、Issue #15 追溯事件与更正工作流的基础上，推进 Issue #17 公开追溯码与消费者投影分支合并验收，完成 Phase 3 核心纵向业务闭环，后续推进异常检测、双向图谱追溯与综合答辩材料准备。
+在 Issue #7 会话认证、Issue #9 产品及温控规则、Issue #11 批次生命周期、Issue #13 批次操作与谱系边、Issue #15 追溯事件更正与 Issue #17 公开追溯码（PR #18 已合入）的基础上，推进 Issue #19 消费者响应式 Web 端分支合并验收，完成首个纵向业务闭环的前端查验能力；后续推进异常处置、双向图谱追溯与综合答辩材料准备。
