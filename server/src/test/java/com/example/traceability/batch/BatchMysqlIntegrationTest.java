@@ -290,7 +290,7 @@ class BatchMysqlIntegrationTest {
         mockMvc.perform(get("/api/v1/batches")
                         .session((MockHttpSession) sessionA))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data[*].orgId").value(orgA.getId().intValue()));
+                .andExpect(jsonPath("$.data[*].orgId").value(orgA.getId()));
 
         // 13. 详情跨组织访问验证：User B 访问 Org A 的批次返回 403 ORG_SCOPE_DENIED
         mockMvc.perform(get("/api/v1/batches/" + batchIdA)
