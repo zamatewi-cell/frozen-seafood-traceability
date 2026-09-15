@@ -7,7 +7,8 @@
 4. **第四部分**：批次操作、物料平衡与谱系边交付规范（GitHub Issue #13 “batch operations, mass balance, and genealogy edges”）
 5. **第五部分**：追溯事件与更正工作流交付规范（GitHub Issue #15 “append-only trace events and correction workflow”）
 6. **第六部分**：公开追溯码与消费者端投影实现与验证规范（GitHub Issue #17 / PR #18 已合入主分支）
-7. **第七部分**：响应式消费者追溯 Web 生产前端交付规范（GitHub Issue #19，当前分支 `feat/19-consumer-trace-web` 正在实现 / 待合并验收）
+7. **第七部分**：响应式消费者追溯 Web 生产前端交付规范（GitHub Issue #19 / PR #20 已合并到主分支）
+8. **第八部分**：企业间整批交接生命周期交付规范（GitHub Issue #21 “batch transfer lifecycle between organizations (FR-TRANSFER-001)”）
 
 ---
 
@@ -1360,3 +1361,133 @@ Flyway 迁移脚本 `V6__public_trace_code_constraints.sql` 在 MySQL 8.4 LTS �
    - 启动独立端口的 Spring Boot 服务，由 Playwright 驱动真实 Vue 页面，经 Vite `/api` 代理查询后端白名单投影；
    - 缺少数据库、后端启动失败或 HTTP/页面断言失败都会令命令失败，不允许降级为假成功；
    - 在 `finally` 中按精确夹具主键物理删除，并再次汇总验证相关表残留为 0。
+
+---
+
+# 第八部分：企业间整批交接生命周期交付规范 (FR-TRANSFER-001)
+
+本文档记录冷冻海产品溯源系统 Phase 3（GitHub Issue #21 “batch transfer lifecycle between organizations (FR-TRANSFER-001)”）的数据库约束、接口契约、安全隔离、状态机流转及并发控制设计。
+
+---
+
+## 一、业务背景与问题定义
+
+1. **整批交接核心定义**：
+   企业间整批交接生命周期对应真实海鲜冷链流通中的上下游企业货权转移业务（发货捕捞/加工企业发起交接凭证 -> 承运/在途流转 -> 接收冷库/分销企业实物清点确认接受或整批拒收）。
+2. **状态机全生命周期**：
+   - `DRAFT`（草稿）：发货方操作员录入，仅发货方有权查看、修改接收组织或逻辑删除；
+   - `PENDING`（在途/待确认）：发货方操作员显式提交并锁定发货业务时间，形成排他性业务预留；
+   - `ACCEPTED`（已接受）：接收方操作员或质量主管确认收货，记录实收数量与时间，批次所有权原子转移；
+   - `REJECTED`（已拒收）：接收方操作员或质量主管整批退回货物，记录拒收原因与时间，批次所有权保留在发货方。
+3. **关键设计决策与排他性约束**：
+   - **双时间独立留痕**：业务发生时间（`shipped_at`/`received_at`）与系统审计记录时间（`submitted_recorded_at`/`decision_recorded_at`）完全解耦，真实反映业务发生与系统录入时差；
+   - **所有权原子转移与数量不可篡改**：交接接受后原子转移批次持有人（`batch.org_id = receiver_org_id`），但批次数量快照（`batch.quantity`）绝不改写，实收差异仅保留在交接记录（`received_quantity` + `difference_reason`）；
+   - **同名批次冲突排他**：接收方企业若已存在相同业务批次号（`batch_no`），接受操作原子回滚并返回 `409 BATCH_NO_CONFLICT`，严禁自动改号或覆盖；
+   - **排他性业务预留**：处于 `DRAFT`/`PENDING` 状态的批次禁止重复发起其他交接，处于 `PENDING` 状态的批次禁止参与任何批次操作（`409 BATCH_TRANSFER_PENDING`）。
+
+---
+
+## 二、Flyway V7 数据库契约与约束演进
+
+本阶段新增 `V7__transfer_constraints.sql` 迁移脚本（严禁修改 V1-V6 迁移脚本）：
+
+1. **索引修复与租户作用域修正**：
+   - `DROP INDEX uk_transfer_idempotency ON transfer;`：移除 V1 原表上缺少组织作用域的过时幂等索引；
+   - `ALTER TABLE transfer MODIFY shipped_at DATETIME NULL;`：支持草稿阶段允许发货时间为空；
+   - `ALTER TABLE transfer MODIFY status VARCHAR(32) NOT NULL DEFAULT 'DRAFT';`：修正初始状态为 `DRAFT`；
+2. **新增审计追踪列与生成列排他索引**：
+   - `submitted_recorded_at` (DATETIME NULL), `submitted_by` (BIGINT NULL)；
+   - `decision_recorded_at` (DATETIME NULL), `decided_by` (BIGINT NULL)；
+   - `open_batch_id` 虚拟生成列：仅对 V7 后新建且未逻辑删除的 `DRAFT/PENDING` 记录生成 `batch_id`；
+   - `uk_transfer_open_batch` 唯一索引：物理排他阻止 V7 后同一批次产生多个未结束交接；V1-V6 历史行标记为 `is_legacy=1` 并保留原值，不因旧结构曾允许重复开放交接而阻断升级。应用层仍统计全部历史与新记录，存在任一未结束历史交接时禁止通过 API 新建；
+3. **MySQL 8.4 CHECK 物理约束**：
+   - `chk_transfer_status`：`status IN ('DRAFT', 'PENDING', 'ACCEPTED', 'REJECTED')`；
+   - `chk_transfer_quantity`：`quantity > 0`；
+   - `chk_transfer_unit`：`unit_code = 'kg'`；
+   - `chk_transfer_orgs`：`sender_org_id <> receiver_org_id`（禁止自发自收）；
+   - `chk_transfer_phase_fields`：严格限制各状态下的字段完备性（DRAFT 阶段决定字段必须全为空；PENDING 阶段发货字段必须完备；ACCEPTED 阶段实收字段完备；REJECTED 阶段拒收原因必须完备）；
+4. **稳定排序与分页复合索引**：
+   - `idx_transfer_sender_updated` (`sender_org_id`, `updated_at`, `id`)；
+   - `idx_transfer_receiver_updated` (`receiver_org_id`, `updated_at`, `id`)；
+5. **多动作独立幂等表**：
+   - 新建 `transfer_idempotency` 表，以 `(org_id, idempotency_key)` 建立物理唯一索引 `uk_transfer_idempotency_org_key`，统一覆盖 `CREATE`、`SUBMIT`、`ACCEPT`、`REJECT` 四大关键动作。
+
+---
+
+## 三、接口调用契约与时序
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Sender as 发货企业 (OPERATOR)
+    actor Receiver as 接收企业 (OPERATOR/QUALITY_MANAGER)
+    participant Sec as 安全拦截与组织隔离
+    participant Svc as TransferApplicationService
+    participant DB as MySQL 8.4 (事务锁控制)
+
+    Note over Sender,DB: 1. 创建交接凭单草稿
+    Sender->>Sec: POST /api/v1/transfers (Header: Idempotency-Key)
+    Sec->>Svc: 校验本组织 ACTIVE 批次与接收企业状态
+    Svc->>DB: 幂等预检 + 批次当前读行锁 (SELECT FOR UPDATE)
+    Svc->>DB: 快照批次数量单位，写入 DRAFT 凭单
+    Svc-->>Sender: 201 Created (Transfer 详情)
+
+    Note over Sender,DB: 2. 提交发货 (DRAFT -> PENDING)
+    Sender->>Sec: POST /api/v1/transfers/{id}/submit (Header: Idempotency-Key)
+    Sec->>Svc: 校验发货组织与期望版本号
+    Svc->>DB: 乐观锁 CAS 更新状态为 PENDING，记录发货时间与系统提交时间
+    Svc-->>Sender: 200 OK (Transfer 详情)
+
+    alt 场景 A: 接收方确认收货 (PENDING -> ACCEPTED)
+        Receiver->>Sec: POST /api/v1/transfers/{id}/accept (Header: Idempotency-Key)
+        Sec->>Svc: 校验接收组织与期望版本号
+        Svc->>DB: 顺序锁定交接记录与关联批次 (按 ID 递增防止死锁)
+        Svc->>DB: 检查接收企业同名批次冲突 (countByOrgIdAndBatchNo)
+        Svc->>DB: 校验实收数量差异说明 (差异必填 differenceReason)
+        Svc->>DB: 乐观锁 CAS 更新状态为 ACCEPTED，记录收货时间与系统决定时间
+        Svc->>DB: 原子转移批次所属企业 (updateOrgIdByIdAndVersion)
+        Svc->>DB: 追加一条且仅一条 ARRIVAL 追溯事件
+        Svc->>DB: 写入业务审计日志
+        Svc-->>Receiver: 200 OK (Transfer 详情)
+    else 场景 B: 接收方整批拒收 (PENDING -> REJECTED)
+        Receiver->>Sec: POST /api/v1/transfers/{id}/reject (Header: Idempotency-Key)
+        Sec->>Svc: 校验接收组织与期望版本号
+        Svc->>DB: 锁定交接记录 (SELECT FOR UPDATE)
+        Svc->>DB: 乐观锁 CAS 更新状态为 REJECTED，记录拒收原因与系统决定时间
+        Svc->>DB: 保持批次所属企业不变，绝不追加追溯事件
+        Svc->>DB: 写入业务审计日志
+        Svc-->>Receiver: 200 OK (Transfer 详情)
+    end
+```
+
+---
+
+## 四、安全与并发控制机制
+
+1. **组织级别数据完全隔离**：
+   - 客户端严禁向服务端传递 `senderOrgId`，服务端强制从认证主体 `TraceSecurityPrincipal` 推导发货组织；
+   - 列表查询与详情获取严格限定在 `sender_org_id = current_org_id OR receiver_org_id = current_org_id` 范围内；第三方企业试图访问均直接返回 404 或 403。
+2. **多动作统一幂等性与当前读恢复**：
+   - `Idempotency-Key` 必须满足 `^[A-Za-z0-9._:-]{16,128}$` 正则规范；
+   - 统一由 `transfer_idempotency` 表维护 `(org_id, idempotency_key)` 唯一约束；
+   - 支持同一组织在网络抖动或客户端重试时，相同业务载荷哈希幂等重放原实体；若载荷哈希或动作类型不一致，立即返回 `409 IDEMPOTENCY_CONFLICT`；
+   - 解决 MySQL `REPEATABLE READ` 隔离级别下的快照读盲区：通过 `SELECT ... FOR UPDATE` 当前锁定读穿透盲区，确保并发重放时稳定恢复。
+3. **基于版本号的乐观锁 CAS**：
+   - 修改草稿、提交、确认接受与拒收端点均强制接收客户端提交的 `expectedVersion`；
+   - 执行更新时严格校验 `WHERE id = ? AND version = ?`；若返回受影响行数为 0，立即触发 `409 VERSION_CONFLICT`。
+4. **严格白名单数据响应封套**：
+   - 对外输出响应采用 `TransferResponse`，绝不向客户端暴露 `isDeleted`、内部哈希、内部幂等键或敏感数据库字段；
+   - 所有时间字段序列化为标准 UTC ISO 8601 格式。
+
+---
+
+## 五、测试分层与质量门禁
+
+1. **单元契约测试 (`TransferApplicationServiceTest`)**：
+   - 27 个测试用例，覆盖草稿创建与批次快照、已消耗批次阻止、状态非法流转拦截、同名批次冲突回滚、数量差异原因必填、组织所有权原子转移、拒收不变更所有权与不追加追溯事件、第三方越权拦截、幂等冲突和组织谓词失败回滚。
+2. **Web 契约与权限测试 (`TransferControllerTest`)**：
+   - 18 个测试用例，覆盖未登录 401 拦截、缺少 CSRF 403 拦截、发货方创建/修改/删除/提交、接收方接受/拒收、分页边界与筛选规范化、数量精度和版本号校验、RFC 9457 Problem Details 转换。
+3. **MySQL 8.4 端到端集成测试 (`TransferMysqlIntegrationTest`)**：
+   - 16 个测试用例，受 `MYSQL_IT_ENABLED=true` 控制，覆盖真实 MySQL 环境下的多表事务一致性、物理外键与 CHECK 约束、并发决定、幂等重放、同名批次冲突回滚、批次持有人原子变更与测试数据物理清理。
+4. **V7 历史升级测试 (`TransferMigrationV7MysqlTest`)**：
+   - 1 个真实 MySQL 8.4 测试，在唯一临时 schema 中验证同批次多条 V1-V6 历史 PENDING 数据可无损升级、V7 后新记录仍受唯一约束，并在 `finally` 中物理删除临时 schema。

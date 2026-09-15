@@ -88,4 +88,41 @@ public interface PublicTraceCodeMapper extends BaseMapper<PublicTraceCode> {
             @Param("updatedAt") LocalDateTime updatedAt,
             @Param("updatedBy") Long updatedBy
     );
+
+    /**
+     * 转移批次关联的公开追溯码组织归属 (整批交接 ACCEPTED 后同步，强约束原持有组织)。
+     *
+     * @param batchId             批次 ID
+     * @param expectedSenderOrgId 预期原持有企业组织 ID (发货企业)
+     * @param receiverOrgId       接收企业组织 ID
+     * @param updatedAt           更新时间
+     * @param updatedBy           更新人 ID
+     * @return 影响行数
+     */
+    @Update("""
+            UPDATE public_trace_code
+            SET org_id = #{receiverOrgId},
+                updated_at = #{updatedAt},
+                updated_by = #{updatedBy},
+                version = version + 1
+            WHERE batch_id = #{batchId}
+              AND org_id = #{expectedSenderOrgId}
+              AND is_deleted = 0
+            """)
+    int transferOrgScopeByBatchId(
+            @Param("batchId") Long batchId,
+            @Param("expectedSenderOrgId") Long expectedSenderOrgId,
+            @Param("receiverOrgId") Long receiverOrgId,
+            @Param("updatedAt") LocalDateTime updatedAt,
+            @Param("updatedBy") Long updatedBy
+    );
+
+    /**
+     * 统计指定内部批次关联的未删除公开追溯码数量 (忽略租户范围，用于在影响行数为0时精准区分无码或组织不一致)。
+     *
+     * @param batchId 批次 ID
+     * @return 未删除追溯码数量
+     */
+    @Select("SELECT COUNT(*) FROM public_trace_code WHERE batch_id = #{batchId} AND is_deleted = 0")
+    int countByBatchIdIgnoreTenant(@Param("batchId") Long batchId);
 }

@@ -1,6 +1,5 @@
 package com.example.traceability;
 
-import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -15,7 +14,6 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * @author Seafood Traceability Team
  * @since 0.1.0
  */
-@MapperScan("com.example.traceability.**.mapper")
 @SpringBootApplication(exclude = UserDetailsServiceAutoConfiguration.class)
 public class TraceabilityApplication {
 

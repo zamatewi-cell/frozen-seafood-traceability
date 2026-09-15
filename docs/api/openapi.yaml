@@ -555,57 +555,6 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
-  /transfers/{transferId}/accept:
-    post:
-      tags: [Transfers]
-      summary: 接收方接受交接
-      operationId: acceptTransfer
-      parameters:
-        - name: transferId
-          in: path
-          required: true
-          schema: {type: integer, format: int64}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/AcceptTransferRequest'}
-      responses:
-        '200':
-          description: 交接已接受
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/TransferEnvelope'}
-        '409': {$ref: '#/components/responses/Problem'}
-  /transfers/{transferId}/reject:
-    post:
-      tags: [Transfers]
-      summary: 接收方拒绝交接
-      operationId: rejectTransfer
-      parameters:
-        - name: transferId
-          in: path
-          required: true
-          schema: {type: integer, format: int64}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [reason, occurredAt]
-              properties:
-                reason: {type: string, minLength: 2, maxLength: 500}
-                occurredAt: {type: string, format: date-time}
-      responses:
-        '200':
-          description: 交接已拒绝
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/TransferEnvelope'}
-        '409': {$ref: '#/components/responses/Problem'}
   /temperature-records:
     post:
       tags: [Quality]
@@ -685,6 +634,195 @@ paths:
                   - type: object
                     properties:
                       data: {$ref: '#/components/schemas/Recall'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /transfers:
+    get:
+      tags: [Transfers]
+      summary: 分页查询当前企业相关的交接凭证
+      operationId: listTransfers
+      parameters:
+        - name: direction
+          in: query
+          description: 流转方向 (SENT=我发送的, RECEIVED=我接收的)
+          schema:
+            type: string
+            enum: [SENT, RECEIVED]
+        - name: status
+          in: query
+          description: 交接状态过滤
+          schema:
+            $ref: '#/components/schemas/TransferStatus'
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Size'}
+      responses:
+        '200':
+          description: 交接凭证分页列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferListEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [Transfers]
+      summary: 发货企业创建交接凭证草稿
+      operationId: createTransferDraft
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransferCreateRequest'}
+      responses:
+        '201':
+          description: 交接凭证草稿创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /transfers/{transferId}:
+    parameters:
+      - name: transferId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+    get:
+      tags: [Transfers]
+      summary: 查询单个交接凭证详情
+      operationId: getTransferDetail
+      responses:
+        '200':
+          description: 交接凭证详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+    patch:
+      tags: [Transfers]
+      summary: 发货企业修改交接凭证草稿
+      operationId: patchTransferDraft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransferPatchRequest'}
+      responses:
+        '200':
+          description: 交接草稿修改成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+    delete:
+      tags: [Transfers]
+      summary: 发货企业逻辑删除交接凭证草稿
+      operationId: deleteTransferDraft
+      parameters:
+        - name: expectedVersion
+          in: query
+          required: true
+          schema: {type: integer, format: int64}
+      responses:
+        '204':
+          description: 交接凭证草稿已逻辑删除
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /transfers/{transferId}/submit:
+    parameters:
+      - name: transferId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+    post:
+      tags: [Transfers]
+      summary: 发货企业提交交接凭证（DRAFT -> PENDING）
+      operationId: submitTransfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransferSubmitRequest'}
+      responses:
+        '200':
+          description: 交接凭证提交成功并转入在途状态
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /transfers/{transferId}/accept:
+    parameters:
+      - name: transferId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+    post:
+      tags: [Transfers]
+      summary: 接收企业确认接受交接（PENDING -> ACCEPTED）
+      operationId: acceptTransfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransferAcceptRequest'}
+      responses:
+        '200':
+          description: 确认接受交接成功，批次所有权已转移
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /transfers/{transferId}/reject:
+    parameters:
+      - name: transferId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+    post:
+      tags: [Transfers]
+      summary: 接收企业拒收交接（PENDING -> REJECTED）
+      operationId: rejectTransfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransferRejectRequest'}
+      responses:
+        '200':
+          description: 拒收交接成功，批次保留在发货企业
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
   /public/traces/{publicTraceId}:
     servers:
@@ -1236,31 +1374,6 @@ components:
     DataSource:
       type: string
       enum: [MANUAL, IMPORT, SIMULATED, DEVICE]
-    AcceptTransferRequest:
-      type: object
-      required: [receivedQuantity, unitCode, occurredAt]
-      properties:
-        receivedQuantity: {type: number, minimum: 0, multipleOf: 0.001}
-        unitCode: {type: string}
-        occurredAt: {type: string, format: date-time}
-        differenceReason: {type: string, maxLength: 500}
-    Transfer:
-      type: object
-      required: [id, batchId, senderOrgId, receiverOrgId, quantity, unitCode, status]
-      properties:
-        id: {type: integer, format: int64}
-        batchId: {type: integer, format: int64}
-        senderOrgId: {type: integer, format: int64}
-        receiverOrgId: {type: integer, format: int64}
-        quantity: {type: number, multipleOf: 0.001}
-        unitCode: {type: string}
-        status: {type: string, enum: [DRAFT, PENDING, ACCEPTED, REJECTED]}
-    TransferEnvelope:
-      allOf:
-        - {$ref: '#/components/schemas/SuccessEnvelope'}
-        - type: object
-          properties:
-            data: {$ref: '#/components/schemas/Transfer'}
     CreateTemperatureRecordRequest:
       type: object
       required: [stageCode, measuredAt, temperature, unitCode, dataSource]
@@ -1376,5 +1489,103 @@ components:
           type: [string, "null"]
         queriedAt: {type: string, format: date-time}
         disclosure: {type: string}
+    TransferStatus:
+      type: string
+      enum: [DRAFT, PENDING, ACCEPTED, REJECTED]
+    Transfer:
+      type: object
+      additionalProperties: false
+      required: [id, transferNo, batchId, senderOrgId, receiverOrgId, quantity, unitCode, status, version, createdAt, updatedAt]
+      properties:
+        id: {type: integer, format: int64}
+        transferNo: {type: string}
+        batchId: {type: integer, format: int64}
+        senderOrgId: {type: integer, format: int64}
+        receiverOrgId: {type: integer, format: int64}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        unitCode: {type: string, enum: [kg]}
+        status: {$ref: '#/components/schemas/TransferStatus'}
+        shippedAt:
+          type: [string, "null"]
+          format: date-time
+        submittedRecordedAt:
+          type: [string, "null"]
+          format: date-time
+        submittedBy:
+          type: [integer, "null"]
+          format: int64
+        receivedAt:
+          type: [string, "null"]
+          format: date-time
+        decisionRecordedAt:
+          type: [string, "null"]
+          format: date-time
+        decidedBy:
+          type: [integer, "null"]
+          format: int64
+        receivedQuantity:
+          type: [number, "null"]
+          multipleOf: 0.001
+        differenceReason:
+          type: [string, "null"]
+        rejectionReason:
+          type: [string, "null"]
+        version: {type: integer, format: int64, minimum: 0}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    TransferEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Transfer'}
+    TransferListEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/Transfer'}
+    TransferCreateRequest:
+      type: object
+      required: [batchId, receiverOrgId]
+      additionalProperties: false
+      properties:
+        batchId: {type: integer, format: int64}
+        receiverOrgId: {type: integer, format: int64}
+    TransferPatchRequest:
+      type: object
+      required: [receiverOrgId, expectedVersion]
+      additionalProperties: false
+      properties:
+        receiverOrgId: {type: integer, format: int64}
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+    TransferSubmitRequest:
+      type: object
+      required: [shippedAt, expectedVersion]
+      additionalProperties: false
+      properties:
+        shippedAt: {type: string, format: date-time}
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+    TransferAcceptRequest:
+      type: object
+      required: [receivedQuantity, unitCode, occurredAt, expectedVersion]
+      additionalProperties: false
+      properties:
+        receivedQuantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        unitCode: {type: string, enum: [kg]}
+        occurredAt: {type: string, format: date-time}
+        differenceReason:
+          type: [string, "null"]
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+    TransferRejectRequest:
+      type: object
+      required: [reason, occurredAt, expectedVersion]
+      additionalProperties: false
+      properties:
+        reason: {type: string, minLength: 1, maxLength: 500}
+        occurredAt: {type: string, format: date-time}
+        expectedVersion: {type: integer, format: int64, minimum: 0}
 security:
   - sessionCookie: []

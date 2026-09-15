@@ -227,4 +227,52 @@ public interface BatchMapper extends BaseMapper<Batch> {
             @Param("offset") long offset,
             @Param("size") int size
     );
+
+    /**
+     * 根据批次 ID 排他锁定查询批次实体 (FOR UPDATE)。
+     *
+     * @param id 批次 ID
+     * @return 批次实体
+     */
+    @Select("SELECT * FROM batch WHERE id = #{id} AND is_deleted = 0 FOR UPDATE")
+    Batch selectByIdForUpdate(@Param("id") Long id);
+
+    /**
+     * 更新批次持有企业组织 ID 并递增版本号 (强制限定旧持有组织与乐观锁版本号)。
+     *
+     * @param id                  批次 ID
+     * @param expectedSenderOrgId 预期旧持有企业组织 ID (发货企业)
+     * @param newOrgId            新持有企业组织 ID (接收企业)
+     * @param expectedVersion     期望乐观锁版本号
+     * @param updatedBy           更新人 ID
+     * @return 影响行数 (1: 成功, 0: 组织谓词不匹配/版本冲突/未命中)
+     */
+    @Update("""
+            UPDATE batch
+            SET org_id = #{newOrgId},
+                updated_by = #{updatedBy},
+                version = version + 1,
+                updated_at = NOW(6)
+            WHERE id = #{id}
+              AND org_id = #{expectedSenderOrgId}
+              AND version = #{expectedVersion}
+              AND is_deleted = 0
+            """)
+    int updateOrgIdByIdAndVersion(
+            @Param("id") Long id,
+            @Param("expectedSenderOrgId") Long expectedSenderOrgId,
+            @Param("newOrgId") Long newOrgId,
+            @Param("expectedVersion") Long expectedVersion,
+            @Param("updatedBy") Long updatedBy
+    );
+
+    /**
+     * 统计指定组织内指定批次号的数量 (用于接收企业批次号排他冲突预检)。
+     *
+     * @param orgId   组织 ID
+     * @param batchNo 批次业务编码
+     * @return 存在记录数
+     */
+    @Select("SELECT COUNT(*) FROM batch WHERE org_id = #{orgId} AND batch_no = #{batchNo} AND is_deleted = 0")
+    int countByOrgIdAndBatchNo(@Param("orgId") Long orgId, @Param("batchNo") String batchNo);
 }
