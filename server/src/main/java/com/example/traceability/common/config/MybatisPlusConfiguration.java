@@ -2,6 +2,7 @@ package com.example.traceability.common.config;
 
 import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.inner.OptimisticLockerInnerInterceptor;
+import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -15,6 +16,7 @@ import org.springframework.context.annotation.Configuration;
  * @author Seafood Traceability Team
  * @since 0.1.0
  */
+@MapperScan("com.example.traceability.**.mapper")
 @Configuration(proxyBeanMethods = false)
 public class MybatisPlusConfiguration {
 

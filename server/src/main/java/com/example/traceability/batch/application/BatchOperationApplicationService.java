@@ -22,6 +22,7 @@ import com.example.traceability.batch.mapper.BatchRelationMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
+import com.example.traceability.trace.mapper.TransferMapper;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -63,17 +64,20 @@ public class BatchOperationApplicationService {
     private final BatchOperationItemMapper itemMapper;
     private final BatchRelationMapper relationMapper;
     private final BatchMapper batchMapper;
+    private final TransferMapper transferMapper;
 
     public BatchOperationApplicationService(
             BatchOperationMapper operationMapper,
             BatchOperationItemMapper itemMapper,
             BatchRelationMapper relationMapper,
-            BatchMapper batchMapper
+            BatchMapper batchMapper,
+            TransferMapper transferMapper
     ) {
-        this.operationMapper = operationMapper;
-        this.itemMapper = itemMapper;
-        this.relationMapper = relationMapper;
-        this.batchMapper = batchMapper;
+        this.operationMapper = Objects.requireNonNull(operationMapper, "operationMapper 不能为空");
+        this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper 不能为空");
+        this.relationMapper = Objects.requireNonNull(relationMapper, "relationMapper 不能为空");
+        this.batchMapper = Objects.requireNonNull(batchMapper, "batchMapper 不能为空");
+        this.transferMapper = Objects.requireNonNull(transferMapper, "transferMapper 不能为空");
     }
 
     /**
@@ -227,7 +231,21 @@ public class BatchOperationApplicationService {
             );
         }
 
-        // 6. 构造操作主表与明细并持久化
+        // 6. 对所有引用的 batchId 按升序进行数据库当前锁定读并检查是否存在在途交接(PENDING)
+        List<Long> sortedBatchIds = referencedBatchIds.stream().sorted().toList();
+        for (Long batchId : sortedBatchIds) {
+            batchMapper.selectByIdForUpdate(batchId);
+            if (transferMapper.countPendingTransfersByBatchId(batchId) > 0) {
+                throw new BusinessException(
+                        HttpStatus.CONFLICT,
+                        "BATCH_TRANSFER_PENDING",
+                        "批次在途交接冲突",
+                        "批次 ID " + batchId + " 处于在途交接确认(PENDING)中，禁止进行批次操作"
+                );
+            }
+        }
+
+        // 7. 构造操作主表与明细并持久化
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
         String operationNo = generateOperationNo(nowUtc);
 
@@ -445,6 +463,14 @@ public class BatchOperationApplicationService {
                         "BATCH_FLOW_BLOCKED",
                         "批次状态不可流转",
                         "批次 " + b.getBatchNo() + " 状态为 " + b.getStatus() + "，仅 ACTIVE 状态批次允许参与操作流转"
+                );
+            }
+            if (transferMapper.countPendingTransfersByBatchId(bid) > 0) {
+                throw new BusinessException(
+                        HttpStatus.CONFLICT,
+                        "BATCH_TRANSFER_PENDING",
+                        "批次存在在途交接",
+                        "批次 " + b.getBatchNo() + " 当前存在正在交接确认中的凭证(PENDING)，已形成排他业务预留，禁止参与批次操作流转"
                 );
             }
             lockedBatchMap.put(bid, b);

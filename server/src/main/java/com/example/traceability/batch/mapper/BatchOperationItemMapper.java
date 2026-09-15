@@ -35,6 +35,16 @@ public interface BatchOperationItemMapper extends BaseMapper<BatchOperationItem>
             "  AND op.is_deleted = 0")
     BigDecimal sumSubmittedInputQuantityByBatchId(@Param("batchId") Long batchId);
 
+    @Select("SELECT COUNT(*) " +
+            "FROM batch_operation_item i " +
+            "JOIN batch_operation op ON i.operation_id = op.id " +
+            "WHERE i.batch_id = #{batchId} " +
+            "  AND i.role = 'INPUT' " +
+            "  AND i.is_deleted = 0 " +
+            "  AND op.status = 'SUBMITTED' " +
+            "  AND op.is_deleted = 0")
+    int countSubmittedInputUsageByBatchId(@Param("batchId") Long batchId);
+
     @Insert("<script>" +
             "INSERT INTO batch_operation_item (operation_id, batch_id, role, quantity, unit_code, normalized_quantity, conversion_rule_id, version, is_deleted, created_at, created_by, updated_at, updated_by) VALUES " +
             "<foreach collection='items' item='item' separator=','>" +

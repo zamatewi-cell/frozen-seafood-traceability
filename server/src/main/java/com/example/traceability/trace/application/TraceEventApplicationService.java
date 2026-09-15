@@ -778,4 +778,72 @@ public class TraceEventApplicationService {
         }
         return Objects.equals(existingMap, requestMap);
     }
+
+    /**
+     * 接收方接受企业交接时，在同一事务内追加一条 ARRIVAL 追溯事件。
+     *
+     * @param batchId            批次 ID
+     * @param receiverOrgId      接收组织 ID
+     * @param decidedBy          接收决定操作人 ID
+     * @param receivedAt         收货业务发生时间
+     * @param decisionRecordedAt 接收决定系统记录时间
+     * @param transferId         关联交接凭证 ID
+     * @param differenceReason   数量差异原因说明（可空）
+     */
+    @Transactional
+    public void appendArrivalEvent(
+            Long batchId,
+            Long receiverOrgId,
+            Long decidedBy,
+            OffsetDateTime receivedAt,
+            OffsetDateTime decisionRecordedAt,
+            Long transferId,
+            String differenceReason
+    ) {
+        LocalDateTime occurredAtUtc = receivedAt != null
+                ? receivedAt.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime()
+                : LocalDateTime.now(ZoneOffset.UTC);
+        LocalDateTime recordedAtUtc = decisionRecordedAt != null
+                ? decisionRecordedAt.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime()
+                : LocalDateTime.now(ZoneOffset.UTC);
+
+        Map<String, Object> details = new java.util.LinkedHashMap<>();
+        details.put("transferId", transferId);
+        if (differenceReason != null && !differenceReason.isBlank()) {
+            details.put("differenceReason", differenceReason.trim());
+        }
+
+        String serializedDetails;
+        try {
+            serializedDetails = objectMapper.writeValueAsString(details);
+        } catch (Exception ex) {
+            serializedDetails = "{\"transferId\":" + transferId + "}";
+        }
+
+        String idempotencyKey = "TRANSFER_ARRIVAL_" + transferId;
+
+        TraceEvent event = new TraceEvent();
+        event.setBatchId(batchId);
+        event.setOrgId(receiverOrgId);
+        event.setSiteId(null);
+        event.setEventType(TraceEventType.ARRIVAL.name());
+        event.setOccurredAt(occurredAtUtc);
+        event.setRecordedAt(recordedAtUtc);
+        event.setOperatorId(decidedBy);
+        event.setDataSource(DataSource.MANUAL.name());
+        event.setStatus(TraceEventStatus.SUBMITTED.name());
+        event.setIdempotencyKey(idempotencyKey);
+        event.setCorrectsEventId(null);
+        event.setCorrectionReason(null);
+        event.setSummary("完成企业间整批交接并确认到货验收");
+        event.setDetailsJson(serializedDetails);
+        event.setVersion(0L);
+        event.setIsDeleted(0);
+        event.setCreatedAt(recordedAtUtc);
+        event.setCreatedBy(decidedBy);
+        event.setUpdatedAt(recordedAtUtc);
+        event.setUpdatedBy(decidedBy);
+
+        traceEventMapper.insert(event);
+    }
 }

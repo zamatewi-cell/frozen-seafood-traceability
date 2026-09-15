@@ -59,6 +59,8 @@ jobs:
       DB_NAME: seafood_trace
       DB_USERNAME: trace_user
       DB_PASSWORD: ci-app-password
+      DB_ROOT_USERNAME: root
+      DB_ROOT_PASSWORD: ci-root-password
 
     steps:
       - name: Checkout repository

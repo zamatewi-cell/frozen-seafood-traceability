@@ -20,6 +20,7 @@ import com.example.traceability.batch.mapper.BatchRelationMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
+import com.example.traceability.trace.mapper.TransferMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -63,6 +64,9 @@ class BatchOperationApplicationServiceTest {
 
     @Mock
     private BatchMapper batchMapper;
+
+    @Mock
+    private TransferMapper transferMapper;
 
     @InjectMocks
     private BatchOperationApplicationService operationService;
@@ -1267,5 +1271,113 @@ class BatchOperationApplicationServiceTest {
         assertThat(resp.version()).isEqualTo(1L);
         assertThat(resp.relations()).hasSize(4);
         verify(relationMapper).insertBatch(any());
+    }
+
+    @Test
+    @DisplayName("提交批次操作：当输入批次存在 PENDING 状态在途交接时拒绝并抛出 409 BATCH_TRANSFER_PENDING")
+    void submitOperation_whenInputBatchHasPendingTransfer_throwsConflict() {
+        BatchOperation op = new BatchOperation();
+        op.setId(100L);
+        op.setOrgId(10L);
+        op.setStatus("DRAFT");
+        op.setVersion(0L);
+        op.setOperationType("PROCESSING");
+        when(operationMapper.selectByIdIgnoreTenant(100L)).thenReturn(op);
+        when(operationMapper.selectByOrgIdAndSubmissionKey(10L, VALID_SUBMISSION_KEY)).thenReturn(null);
+        when(operationMapper.selectByIdForUpdate(100L)).thenReturn(op);
+
+        BatchOperationItem inItem = new BatchOperationItem();
+        inItem.setId(1L);
+        inItem.setOperationId(100L);
+        inItem.setBatchId(201L);
+        inItem.setRole("INPUT");
+        inItem.setQuantity(new BigDecimal("100.000"));
+        inItem.setNormalizedQuantity(new BigDecimal("100.000"));
+        inItem.setUnitCode("kg");
+
+        BatchOperationItem outItem = new BatchOperationItem();
+        outItem.setId(2L);
+        outItem.setOperationId(100L);
+        outItem.setBatchId(202L);
+        outItem.setRole("OUTPUT");
+        outItem.setQuantity(new BigDecimal("100.000"));
+        outItem.setNormalizedQuantity(new BigDecimal("100.000"));
+        outItem.setUnitCode("kg");
+
+        when(itemMapper.selectByOperationId(100L)).thenReturn(List.of(inItem, outItem));
+
+        Batch inBatch = new Batch();
+        inBatch.setId(201L);
+        inBatch.setOrgId(10L);
+        inBatch.setBatchNo("BAT-IN-001");
+        inBatch.setStatus("ACTIVE");
+        inBatch.setUnitCode("kg");
+        inBatch.setQuantity(new BigDecimal("100.000"));
+
+        Batch outBatch = new Batch();
+        outBatch.setId(202L);
+        outBatch.setOrgId(10L);
+        outBatch.setBatchNo("BAT-OUT-001");
+        outBatch.setStatus("ACTIVE");
+        outBatch.setUnitCode("kg");
+        outBatch.setQuantity(new BigDecimal("100.000"));
+
+        when(batchMapper.selectByIdIgnoreTenantForUpdate(201L)).thenReturn(inBatch);
+
+        // 模拟输入批次存在 PENDING 状态交接
+        when(transferMapper.countPendingTransfersByBatchId(201L)).thenReturn(1);
+
+        BatchOperationSubmitRequest req = new BatchOperationSubmitRequest(0L);
+
+        assertThatThrownBy(() -> operationService.submitOperation(100L, req, VALID_SUBMISSION_KEY, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(be.getCode()).isEqualTo("BATCH_TRANSFER_PENDING");
+                });
+    }
+
+    @Test
+    @DisplayName("创建批次操作草稿：当引用的批次存在在途交接确认(PENDING)时拒绝创建并抛出 409 BATCH_TRANSFER_PENDING")
+    void createDraftOperation_whenReferencedBatchInPendingTransfer_throwsConflict() {
+        Batch inBatch = new Batch();
+        inBatch.setId(201L);
+        inBatch.setOrgId(10L);
+        inBatch.setBatchNo("BAT-IN-001");
+        inBatch.setStatus("ACTIVE");
+        inBatch.setUnitCode("kg");
+        inBatch.setQuantity(new BigDecimal("100.000"));
+
+        Batch outBatch = new Batch();
+        outBatch.setId(202L);
+        outBatch.setOrgId(10L);
+        outBatch.setBatchNo("BAT-OUT-001");
+        outBatch.setStatus("ACTIVE");
+        outBatch.setUnitCode("kg");
+        outBatch.setQuantity(new BigDecimal("100.000"));
+
+        when(batchMapper.selectByIdForUpdate(201L)).thenReturn(inBatch);
+        when(transferMapper.countPendingTransfersByBatchId(201L)).thenReturn(1);
+
+        BatchOperationCreateRequest req = new BatchOperationCreateRequest(
+                "PROCESS",
+                OffsetDateTime.now(ZoneOffset.UTC),
+                "测试在途批次阻断草稿创建",
+                List.of(
+                        new BatchOperationItemRequest("INPUT", 201L, new BigDecimal("100.000")),
+                        new BatchOperationItemRequest("OUTPUT", 202L, new BigDecimal("100.000"))
+                )
+        );
+
+        assertThatThrownBy(() -> operationService.createDraftOperation(req, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(be.getCode()).isEqualTo("BATCH_TRANSFER_PENDING");
+                });
+
+        verify(operationMapper, never()).insert(any(BatchOperation.class));
     }
 }
