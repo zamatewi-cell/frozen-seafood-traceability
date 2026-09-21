@@ -1,33 +1,29 @@
 package com.example.traceability.batch.domain;
 
 /**
- * 批次生命周期状态枚举。
+ * 批次流转状态枚举。
  * <p>
- * 状态机流转：
+ * 表达水产批次在生命周期中的业务流转阶段：
  * <ul>
- *   <li>{@code DRAFT}：草稿状态（允许编辑、删除、提交）</li>
+ *   <li>{@code DRAFT}：草稿状态（允许编辑、提交）</li>
  *   <li>{@code ACTIVE}：正常生效流通状态（可记追溯事件、交接、拆合加工）</li>
- *   <li>{@code FROZEN}：质量冻结状态（停止发货、流转，待调查）</li>
- *   <li>{@code RECALLED}：召回状态（启动模拟/紧急召回）</li>
- *   <li>{@code CLOSED}：归档关闭状态</li>
+ *   <li>{@code CLOSED}：归档关闭状态（批次结束流转）</li>
  * </ul>
  * </p>
  *
  * @author Seafood Traceability Team
  * @since 0.1.0
  */
-public enum BatchStatus {
+public enum BatchFlowStatus {
     DRAFT,
     ACTIVE,
-    FROZEN,
-    RECALLED,
     CLOSED;
 
     public static boolean isValid(String code) {
         if (code == null || code.isBlank()) {
             return false;
         }
-        for (BatchStatus status : values()) {
+        for (BatchFlowStatus status : values()) {
             if (status.name().equalsIgnoreCase(code.trim())) {
                 return true;
             }
@@ -35,15 +31,15 @@ public enum BatchStatus {
         return false;
     }
 
-    public static BatchStatus fromCode(String code) {
+    public static BatchFlowStatus fromCode(String code) {
         if (code == null || code.isBlank()) {
             return null;
         }
-        for (BatchStatus status : values()) {
+        for (BatchFlowStatus status : values()) {
             if (status.name().equalsIgnoreCase(code.trim())) {
                 return status;
             }
         }
-        throw new IllegalArgumentException("未知的批次状态: " + code);
+        throw new IllegalArgumentException("未知的批次流转状态: " + code);
     }
 }

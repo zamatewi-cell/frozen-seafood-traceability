@@ -1,9 +1,11 @@
 package com.example.traceability.batch.application;
 
 import com.example.traceability.batch.domain.Batch;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.domain.BatchType;
 import com.example.traceability.batch.domain.OriginType;
+import com.example.traceability.batch.domain.TraceBatchNoGenerator;
 import com.example.traceability.batch.dto.BatchCreateRequest;
 import com.example.traceability.batch.dto.BatchPatchRequest;
 import com.example.traceability.batch.dto.BatchQueryCriteria;
@@ -31,8 +33,9 @@ import java.util.Objects;
 /**
  * 追溯批次应用服务。
  * <p>
- * 负责批次草稿创建、组织隔离分页查询、详情查看、基于单条 SQL 条件约束的草稿增量更新以及 DRAFT -> ACTIVE 提交流转。
- * 严格防范跨组织越权与并发冲突，支持客户端幂等提交。
+ * 负责批次草稿创建（服务端生成全局唯一 traceBatchNo，初始化 DRAFT+NORMAL）、组织隔离分页查询、详情查看、
+ * 基于单条 SQL 条件约束的草稿增量更新以及 DRAFT+NORMAL -> ACTIVE+NORMAL 提交流转。
+ * 严格防范跨组织越权与并发冲突，支持客户端幂等提交（同 key 语义冲突报 IDEMPOTENCY_KEY_REUSED）。
  * </p>
  *
  * @author Seafood Traceability Team
@@ -43,16 +46,23 @@ public class BatchApplicationService {
 
     private final BatchMapper batchMapper;
     private final ProductMapper productMapper;
+    private final TraceBatchNoGenerator traceBatchNoGenerator;
 
-    public BatchApplicationService(BatchMapper batchMapper, ProductMapper productMapper) {
+    public BatchApplicationService(
+            BatchMapper batchMapper,
+            ProductMapper productMapper,
+            TraceBatchNoGenerator traceBatchNoGenerator
+    ) {
         this.batchMapper = batchMapper;
         this.productMapper = productMapper;
+        this.traceBatchNoGenerator = traceBatchNoGenerator;
     }
 
     /**
      * 分页查询批次列表。
      * <p>
      * PLATFORM scope 角色可查询全平台批次；其余企业认证用户必须在 Mapper 层强制限定为 {@code principal.getOrgId()}。
+     * 支持 traceBatchNo、externalBatchNo、flowStatus、riskStatus 过滤。
      * </p>
      *
      * @param criteria  查询过滤条件
@@ -67,21 +77,33 @@ public class BatchApplicationService {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "分页大小 size 必须在 1 到 100 之间");
         }
 
-        String normalizedStatus = null;
-        if (criteria.status() != null && !criteria.status().isBlank()) {
-            String trimmed = criteria.status().trim();
-            if (!BatchStatus.isValid(trimmed)) {
-                throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "不支持的批次状态: " + criteria.status());
+        String normalizedFlowStatus = null;
+        if (criteria.flowStatus() != null && !criteria.flowStatus().isBlank()) {
+            String trimmed = criteria.flowStatus().trim();
+            if (!BatchFlowStatus.isValid(trimmed)) {
+                throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "不支持的批次流转状态: " + criteria.flowStatus());
             }
-            normalizedStatus = BatchStatus.fromCode(trimmed).name();
+            normalizedFlowStatus = BatchFlowStatus.fromCode(trimmed).name();
         }
+
+        String normalizedRiskStatus = null;
+        if (criteria.riskStatus() != null && !criteria.riskStatus().isBlank()) {
+            String trimmed = criteria.riskStatus().trim();
+            if (!BatchRiskStatus.isValid(trimmed)) {
+                throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "不支持的批次风险状态: " + criteria.riskStatus());
+            }
+            normalizedRiskStatus = BatchRiskStatus.fromCode(trimmed).name();
+        }
+
+        String cleanTraceBatchNo = (criteria.traceBatchNo() != null && !criteria.traceBatchNo().isBlank()) ? criteria.traceBatchNo().trim() : null;
+        String cleanExternalBatchNo = (criteria.externalBatchNo() != null && !criteria.externalBatchNo().isBlank()) ? criteria.externalBatchNo().trim() : null;
 
         boolean isPlatform = isPlatformScope(principal);
         Long targetOrgId = isPlatform ? null : principal.getOrgId();
 
-        long totalCount = batchMapper.countBatches(targetOrgId, normalizedStatus);
+        long totalCount = batchMapper.countBatches(targetOrgId, cleanTraceBatchNo, cleanExternalBatchNo, normalizedFlowStatus, normalizedRiskStatus);
         long offset = (long) (criteria.page() - 1) * criteria.size();
-        List<Batch> records = batchMapper.selectBatchesPage(targetOrgId, normalizedStatus, offset, criteria.size());
+        List<Batch> records = batchMapper.selectBatchesPage(targetOrgId, cleanTraceBatchNo, cleanExternalBatchNo, normalizedFlowStatus, normalizedRiskStatus, offset, criteria.size());
 
         List<BatchResponse> dtos = records.stream()
                 .map(BatchResponse::fromEntity)
@@ -123,7 +145,17 @@ public class BatchApplicationService {
      * 创建批次草稿。
      * <p>
      * 仅允许 OPERATOR 角色操作。系统管理员按 RBAC 原则默认不能代写企业业务。
-     * 强制携带 Idempotency-Key；同组织同 key 且请求语义相同时返回原批次；语义不同时返回 409 IDEMPOTENCY_CONFLICT。
+     * 强制携带 Idempotency-Key；同<b>创建组织</b>同 key 且请求语义相同时返回原批次；
+     * 语义不同时返回 409 IDEMPOTENCY_KEY_REUSED。
+     * 服务端生成全局唯一 traceBatchNo，初始化 flowStatus=DRAFT, riskStatus=NORMAL，
+     * 并把 creationOrgId 与 orgId 同时置为当前主体组织。
+     * </p>
+     * <p>
+     * 幂等作用域使用不可变的 creationOrgId 而非会随交接转移的 orgId，因此：
+     * 批次转出后原创建方重放原始创建请求仍命中原批次而不会重复建批；
+     * 接收方即便持有相同的 creation_idempotency_key 也不会与交接产生唯一键冲突。
+     * 重放返回的是该批次的当前视图，此路径仅对持有原始幂等键的创建方开放，
+     * 不改变 GET /batches/{id} 等常规查询各自独立的组织权限校验。
      * </p>
      *
      * @param req            批次创建请求
@@ -173,18 +205,21 @@ public class BatchApplicationService {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "保质期天数必须大于 0");
         }
 
+        String normalizedExternalBatchNo = normalizeExternalBatchNo(req.externalBatchNo());
         Long orgId = principal.getOrgId();
 
-        // 3. 幂等预检：检查同组织下是否已存在该幂等键
+        // 3. 幂等预检：检查同"创建组织"下是否已存在该幂等键
+        // 作用域必须是不可变的 creation_org_id：批次在 Transfer ACCEPTED 后 org_id 会变为接收方，
+        // 若仍以 org_id 为幂等域，原创建方重放原始创建请求将查不到原批次而重复建批。
         // 幂等语义重放必须在可变产品状态校验之前执行，即便产品后续变为 INACTIVE，相同载荷仍返回原批次
-        Batch existingByIdempotency = batchMapper.selectByOrgIdAndIdempotencyKey(orgId, cleanIdempotencyKey);
+        Batch existingByIdempotency = batchMapper.selectByCreationOrgIdAndIdempotencyKey(orgId, cleanIdempotencyKey);
         if (existingByIdempotency != null) {
-            if (isSameCreateSemantics(existingByIdempotency, req, normalizedBatchType, normalizedOriginType, normalizedUnitCode)) {
+            if (isSameCreateSemantics(existingByIdempotency, req, normalizedExternalBatchNo, normalizedBatchType, normalizedOriginType, normalizedUnitCode)) {
                 return BatchResponse.fromEntity(existingByIdempotency);
             }
             throw new BusinessException(
                     HttpStatus.CONFLICT,
-                    "IDEMPOTENCY_CONFLICT",
+                    "IDEMPOTENCY_KEY_REUSED",
                     "幂等提交冲突",
                     "当前幂等键已被使用且请求载荷与历史记录不一致"
             );
@@ -205,23 +240,17 @@ public class BatchApplicationService {
             );
         }
 
-        // 5. 批次号同组织唯一性检查
-        String cleanBatchNo = req.batchNo().trim();
-        Batch existingByBatchNo = batchMapper.selectByOrgIdAndBatchNo(orgId, cleanBatchNo);
-        if (existingByBatchNo != null) {
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "BATCH_NO_CONFLICT",
-                    "批次号冲突",
-                    "当前组织下已存在相同批次号: " + cleanBatchNo
-            );
-        }
+        // 5. 服务端生成全局唯一 traceBatchNo
+        String traceBatchNo = traceBatchNoGenerator.generate();
 
         // 6. 构造新批次实体并持久化
         Batch batch = new Batch();
+        // 新建时创建组织与当前责任组织相同；此后 creationOrgId 永不改变，orgId 随 Transfer ACCEPTED 转移
         batch.setOrgId(orgId);
+        batch.setCreationOrgId(orgId);
         batch.setProductId(req.productId());
-        batch.setBatchNo(cleanBatchNo);
+        batch.setTraceBatchNo(traceBatchNo);
+        batch.setExternalBatchNo(normalizedExternalBatchNo);
         batch.setBatchType(normalizedBatchType);
         batch.setQuantity(req.quantity());
         batch.setUnitCode(normalizedUnitCode);
@@ -231,7 +260,8 @@ public class BatchApplicationService {
         batch.setCaptureDate(req.captureDate());
         batch.setFreezeDate(req.freezeDate());
         batch.setShelfLifeDays(req.shelfLifeDays());
-        batch.setStatus(BatchStatus.DRAFT.name());
+        batch.setFlowStatus(BatchFlowStatus.DRAFT.name());
+        batch.setRiskStatus(BatchRiskStatus.NORMAL.name());
         batch.setCreationIdempotencyKey(cleanIdempotencyKey);
         batch.setVersion(0L);
         batch.setIsDeleted(0);
@@ -245,34 +275,24 @@ public class BatchApplicationService {
             batchMapper.insert(batch);
         } catch (DuplicateKeyException e) {
             // 并发竞态安全当前读重查（SELECT ... FOR UPDATE 打破 REPEATABLE READ 快照读限制，穿透读取最新已提交行）
-            Batch dupIdempotency = batchMapper.selectByOrgIdAndIdempotencyKeyForUpdate(orgId, cleanIdempotencyKey);
+            Batch dupIdempotency = batchMapper.selectByCreationOrgIdAndIdempotencyKeyForUpdate(orgId, cleanIdempotencyKey);
             if (dupIdempotency != null) {
-                if (isSameCreateSemantics(dupIdempotency, req, normalizedBatchType, normalizedOriginType, normalizedUnitCode)) {
+                if (isSameCreateSemantics(dupIdempotency, req, normalizedExternalBatchNo, normalizedBatchType, normalizedOriginType, normalizedUnitCode)) {
                     return BatchResponse.fromEntity(dupIdempotency);
                 }
                 throw new BusinessException(
                         HttpStatus.CONFLICT,
-                        "IDEMPOTENCY_CONFLICT",
+                        "IDEMPOTENCY_KEY_REUSED",
                         "幂等提交冲突",
                         "并发检测到相同幂等键，但请求载荷与已落库数据不一致"
                 );
             }
 
-            Batch dupBatchNo = batchMapper.selectByOrgIdAndBatchNoForUpdate(orgId, cleanBatchNo);
-            if (dupBatchNo != null) {
-                throw new BusinessException(
-                        HttpStatus.CONFLICT,
-                        "BATCH_NO_CONFLICT",
-                        "批次号冲突",
-                        "当前组织下已存在相同批次号: " + cleanBatchNo
-                );
-            }
-
             throw new BusinessException(
                     HttpStatus.CONFLICT,
-                    "BATCH_NO_CONFLICT",
-                    "批次号或幂等键冲突",
-                    "数据冲突，请检查批次号与幂等键后重试"
+                    "DATA_CONFLICT",
+                    "数据冲突",
+                    "唯一键冲突，请重试"
             );
         }
 
@@ -282,8 +302,10 @@ public class BatchApplicationService {
     /**
      * 增量更新批次草稿。
      * <p>
-     * 仅限 OPERATOR 角色更新本组织 DRAFT 状态批次。
-     * 单条 SQL 同时约束 id + org_id + status='DRAFT' + version，行数为 0 时精准区分跨组织、非草稿与版本冲突。
+     * 仅限 OPERATOR 角色更新本组织处于 DRAFT+NORMAL 状态的批次。
+     * 单条 SQL 同时约束 id + org_id + flow_status='DRAFT' + risk_status='NORMAL' + version，
+     * 行数为 0 时精准区分跨组织、非草稿正常状态与版本冲突。
+     * 绝不允许修改 traceBatchNo 与 creationOrgId。支持可选更新 externalBatchNo。
      * </p>
      *
      * @param batchId   批次 ID
@@ -314,12 +336,12 @@ public class BatchApplicationService {
             );
         }
 
-        if (!BatchStatus.DRAFT.name().equals(existing.getStatus())) {
+        if (!BatchFlowStatus.DRAFT.name().equals(existing.getFlowStatus()) || !BatchRiskStatus.NORMAL.name().equals(existing.getRiskStatus())) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
                     "INVALID_STATE_TRANSITION",
                     "非法状态流转",
-                    "仅草稿状态批次允许修改，当前状态为: " + existing.getStatus()
+                    "仅处于草稿正常状态 (DRAFT+NORMAL) 的批次允许修改，当前状态为: flow=" + existing.getFlowStatus() + ", risk=" + existing.getRiskStatus()
             );
         }
 
@@ -332,7 +354,11 @@ public class BatchApplicationService {
             );
         }
 
-        // 2. 准备待更新字段（batchNo, productId, batchType, originType, unitCode 在此切片不可变）
+        // 2. 准备待更新字段（traceBatchNo, productId, batchType, originType, unitCode 在此切片不可变）
+        if (req.externalBatchNo() != null) {
+            existing.setExternalBatchNo(normalizeExternalBatchNo(req.externalBatchNo()));
+        }
+
         if (req.quantity() != null) {
             if (req.quantity().compareTo(BigDecimal.ZERO) <= 0) {
                 throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "批次数量必须大于 0");
@@ -369,7 +395,7 @@ public class BatchApplicationService {
         existing.setUpdatedAt(LocalDateTime.now(ZoneOffset.UTC));
         existing.setUpdatedBy(principal.getUserId());
 
-        // 3. 单条 SQL 原子条件更新 (约束 id + org_id + status='DRAFT' + version)
+        // 3. 单条 SQL 原子条件更新 (约束 id + org_id + flow_status='DRAFT' + risk_status='NORMAL' + version)
         int affectedRows = batchMapper.updateDraftBatch(existing, req.version());
         if (affectedRows == 0) {
             // 并发更新失败，使用当前锁定读 (SELECT ... FOR UPDATE) 读取最新已提交行精确分类，打破 REPEATABLE READ 快照读盲区
@@ -380,8 +406,13 @@ public class BatchApplicationService {
             if (!Objects.equals(latest.getOrgId(), principal.getOrgId())) {
                 throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权", "无权修改其他组织的批次数据");
             }
-            if (!BatchStatus.DRAFT.name().equals(latest.getStatus())) {
-                throw new BusinessException(HttpStatus.CONFLICT, "INVALID_STATE_TRANSITION", "非法状态流转", "批次状态已变更，当前状态为: " + latest.getStatus());
+            if (!BatchFlowStatus.DRAFT.name().equals(latest.getFlowStatus()) || !BatchRiskStatus.NORMAL.name().equals(latest.getRiskStatus())) {
+                throw new BusinessException(
+                        HttpStatus.CONFLICT,
+                        "INVALID_STATE_TRANSITION",
+                        "非法状态流转",
+                        "批次状态已变更，当前状态为: flow=" + latest.getFlowStatus() + ", risk=" + latest.getRiskStatus()
+                );
             }
             throw new BusinessException(
                     HttpStatus.CONFLICT,
@@ -396,10 +427,10 @@ public class BatchApplicationService {
     }
 
     /**
-     * 提交批次草稿（DRAFT -> ACTIVE）。
+     * 提交批次草稿（DRAFT+NORMAL -> ACTIVE+NORMAL）。
      * <p>
      * 仅限 OPERATOR 角色操作。关联产品必须处于 ACTIVE 状态。
-     * 单条 SQL 同时约束 id + org_id + status='DRAFT' + version，原子递增版本号。
+     * 单条 SQL 同时约束 id + org_id + flow_status='DRAFT' + risk_status='NORMAL' + version，原子递增版本号。
      * </p>
      *
      * @param batchId   批次 ID
@@ -430,12 +461,12 @@ public class BatchApplicationService {
             );
         }
 
-        if (!BatchStatus.DRAFT.name().equals(existing.getStatus())) {
+        if (!BatchFlowStatus.DRAFT.name().equals(existing.getFlowStatus()) || !BatchRiskStatus.NORMAL.name().equals(existing.getRiskStatus())) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
                     "INVALID_STATE_TRANSITION",
                     "非法状态流转",
-                    "仅草稿状态批次允许提交激活，当前状态为: " + existing.getStatus()
+                    "仅处于草稿正常状态 (DRAFT+NORMAL) 的批次允许提交激活，当前状态为: flow=" + existing.getFlowStatus() + ", risk=" + existing.getRiskStatus()
             );
         }
 
@@ -449,7 +480,6 @@ public class BatchApplicationService {
         }
 
         // 2. 关联海产品主数据存在性与 ACTIVE 状态检查
-        // 采用排他行锁 SELECT ... FOR UPDATE 消除 TOCTOU 竞态，确保在 batch 激活提交事务完成前产品不能并发停用
         Product product = productMapper.selectByIdForUpdate(existing.getProductId());
         if (product == null) {
             throw new ResourceNotFoundException("未找到 ID 为 " + existing.getProductId() + " 的关联海产品");
@@ -463,11 +493,10 @@ public class BatchApplicationService {
             );
         }
 
-        // 3. 单条 SQL 原子状态流转与版本递增 (id + org_id + status='DRAFT' + version)
+        // 3. 单条 SQL 原子状态流转与版本递增 (id + org_id + flow_status='DRAFT' + risk_status='NORMAL' + version)
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
         int affectedRows = batchMapper.submitDraftBatch(batchId, principal.getOrgId(), req.version(), nowUtc, principal.getUserId());
         if (affectedRows == 0) {
-            // 并发提交流转失败，使用当前锁定读 (SELECT ... FOR UPDATE) 读取最新已提交行精确分类，打破 REPEATABLE READ 快照读盲区
             Batch latest = batchMapper.selectByIdIgnoreTenantForUpdate(batchId);
             if (latest == null) {
                 throw new ResourceNotFoundException("未找到 ID 为 " + batchId + " 的批次");
@@ -475,12 +504,12 @@ public class BatchApplicationService {
             if (!Objects.equals(latest.getOrgId(), principal.getOrgId())) {
                 throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权", "无权提交其他组织的批次");
             }
-            if (!BatchStatus.DRAFT.name().equals(latest.getStatus())) {
+            if (!BatchFlowStatus.DRAFT.name().equals(latest.getFlowStatus()) || !BatchRiskStatus.NORMAL.name().equals(latest.getRiskStatus())) {
                 throw new BusinessException(
                         HttpStatus.CONFLICT,
                         "INVALID_STATE_TRANSITION",
                         "非法状态流转",
-                        "批次状态已变更，当前状态为: " + latest.getStatus()
+                        "批次状态已变更，当前状态为: flow=" + latest.getFlowStatus() + ", risk=" + latest.getRiskStatus()
                 );
             }
             throw new BusinessException(
@@ -510,14 +539,22 @@ public class BatchApplicationService {
         return principal != null && principal.getScopes() != null && principal.getScopes().contains("PLATFORM");
     }
 
+    private String normalizeExternalBatchNo(String rawExternal) {
+        if (rawExternal == null || rawExternal.isBlank()) {
+            return null;
+        }
+        return rawExternal.trim();
+    }
+
     private boolean isSameCreateSemantics(
             Batch b,
             BatchCreateRequest req,
+            String normalizedExternal,
             String normalizedBatchType,
             String normalizedOriginType,
             String normalizedUnitCode
     ) {
-        return Objects.equals(b.getBatchNo(), req.batchNo().trim())
+        return Objects.equals(b.getExternalBatchNo(), normalizedExternal)
                 && Objects.equals(b.getProductId(), req.productId())
                 && Objects.equals(b.getBatchType(), normalizedBatchType)
                 && b.getQuantity().compareTo(req.quantity()) == 0

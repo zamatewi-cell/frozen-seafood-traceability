@@ -12,8 +12,9 @@ import java.time.LocalDate;
 /**
  * 批次草稿增量更新请求 DTO。
  * <p>
- * 仅允许修改草稿状态批次的可变字段（数量、产地描述、生产/捕捞/速冻日期和保质期天数）。
+ * 仅允许修改草稿正常状态批次的可变字段（数量、外部业务批次号、产地描述、生产/捕捞/速冻日期和保质期天数）。
  * 必须携带乐观锁版本号 {@code version} 进行条件更新。
+ * 绝不允许修改 traceBatchNo。
  * </p>
  *
  * @author Seafood Traceability Team
@@ -27,6 +28,9 @@ public record BatchPatchRequest(
         @DecimalMin(value = "0.000", inclusive = false, message = "批次数量必须大于 0")
         @Digits(integer = 15, fraction = 3, message = "批次数量整数最多 15 位且小数最多 3 位")
         BigDecimal quantity,
+
+        @Size(max = 64, message = "外部业务批次号长度不能超过 64")
+        String externalBatchNo,
 
         @Size(max = 255, message = "产地来源描述长度不能超过 255")
         String originText,

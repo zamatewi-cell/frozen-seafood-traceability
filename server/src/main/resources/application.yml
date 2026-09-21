@@ -59,6 +59,15 @@ spring:
       datetime:
         write-dates-as-timestamps: false
 
+# 追溯批次号相关配置
+trace:
+  batch-no:
+    # V8 历史 trace_batch_no 回填摘要密钥 (pepper)。
+    # 仅由环境变量 TRACE_BATCH_NO_HISTORY_PEPPER 注入，绝不在此提供公开默认值；
+    # 缺失或空白时 Flyway 回调会立即失败，禁止回退到可离线枚举的公开算法。
+    # 注意：同一套历史数据必须始终使用同一个 pepper，否则历史 trace_batch_no 将不可复现。
+    history-pepper: ${TRACE_BATCH_NO_HISTORY_PEPPER:}
+
 # MyBatis-Plus 持久层框架配置
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml

@@ -1,7 +1,8 @@
 package com.example.traceability.trace.application;
 
 import com.example.traceability.batch.domain.Batch;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
@@ -97,14 +98,20 @@ class TraceEventApplicationServiceTest {
         );
     }
 
-    private Batch createBatch(Long id, Long orgId, String status) {
+    private Batch createBatch(Long id, Long orgId, String flowStatus, String riskStatus) {
         Batch b = new Batch();
         b.setId(id);
         b.setOrgId(orgId);
-        b.setBatchNo("BATCH-" + id);
-        b.setStatus(status);
+        b.setTraceBatchNo("TB-" + id);
+        b.setExternalBatchNo("BATCH-" + id);
+        b.setFlowStatus(flowStatus);
+        b.setRiskStatus(riskStatus);
         b.setIsDeleted(0);
         return b;
+    }
+
+    private Batch createBatch(Long id, Long orgId, String flowStatus) {
+        return createBatch(id, orgId, flowStatus, BatchRiskStatus.NORMAL.name());
     }
 
     private Site createSite(Long id, Long orgId, String status) {
@@ -123,7 +130,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("合法创建普通事件成功：独立保存双时间、白名单输出、状态为 SUBMITTED")
         void createEvent_Success() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
@@ -164,7 +171,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("SIMULATED 数据源正常往返")
         void createEvent_SimulatedDataSource() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
@@ -183,7 +190,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("批次状态矩阵：DRAFT 批次禁止创建普通事件 (422 BATCH_FLOW_BLOCKED)")
         void createEvent_DraftBatch_Blocked() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.DRAFT.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.DRAFT.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
@@ -202,8 +209,12 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("批次状态矩阵：FROZEN/RECALLED/CLOSED 批次均禁止创建普通事件 (422 BATCH_FLOW_BLOCKED)")
         void createEvent_FrozenRecalledClosedBatch_Blocked() {
-            for (BatchStatus status : List.of(BatchStatus.FROZEN, BatchStatus.RECALLED, BatchStatus.CLOSED)) {
-                Batch batch = createBatch(1000L, 10L, status.name());
+            List<Batch> blockedBatches = List.of(
+                    createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.FROZEN.name()),
+                    createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.RECALLED.name()),
+                    createBatch(1000L, 10L, BatchFlowStatus.CLOSED.name(), BatchRiskStatus.NORMAL.name())
+            );
+            for (Batch batch : blockedBatches) {
                 when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
                 CreateTraceEventRequest req = new CreateTraceEventRequest(
@@ -223,7 +234,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("跨组织创建追溯事件被拒绝 (403 ORG_SCOPE_DENIED)")
         void createEvent_CrossOrg_Denied() {
-            Batch batch = createBatch(1000L, 20L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 20L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
@@ -348,7 +359,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("MySQL REPEATABLE READ 并发 DuplicateKeyException 当前读恢复成功")
         void createEvent_DuplicateKey_CurrentReadRecovery() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             // 首次快照读为 null
@@ -392,7 +403,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("合法更正成功：新记录插入、指向原事件、旧记录状态原子流转为 CORRECTED")
         void correctEvent_Success() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             TraceEvent target = new TraceEvent();
@@ -427,7 +438,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("批次状态矩阵：CLOSED 批次允许更正")
         void correctEvent_ClosedBatch_Allowed() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.CLOSED.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.CLOSED.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             TraceEvent target = new TraceEvent();
@@ -444,6 +455,25 @@ class TraceEventApplicationServiceTest {
 
             TraceEventResponse resp = eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1);
             assertThat(resp.correctsEventId()).isEqualTo(500L);
+        }
+
+        @Test
+        @DisplayName("批次状态矩阵：riskStatus 非 NORMAL 批次禁止更正 (422 BATCH_FLOW_BLOCKED)")
+        void correctEvent_RiskStatusNotNormal_Blocked() {
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.FROZEN.name());
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
+
+            CorrectTraceEventRequest req = new CorrectTraceEventRequest(
+                    "PROCESS", OCCURRED_AT, null, "MANUAL", "冻结批次更正", null, "补充说明"
+            );
+
+            assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> {
+                        BusinessException be = (BusinessException) e;
+                        assertThat(be.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+                        assertThat(be.getCode()).isEqualTo("BATCH_FLOW_BLOCKED");
+                    });
         }
 
         @Test
@@ -485,7 +515,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("链式更正防分叉：对已是 CORRECTED 状态的旧版本再次发起更正，拒绝并返回 409 EVENT_ALREADY_CORRECTED")
         void correctEvent_TargetAlreadyCorrected_Rejected() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             TraceEvent oldEvent = new TraceEvent();
@@ -511,7 +541,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("并发更正竞争防分叉：旧版本状态并发流转导致受影响行数为 0 时抛出 409 异常并触发回滚")
         void correctEvent_ConcurrentConflict_ThrowsConflict() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             TraceEvent target = new TraceEvent();
@@ -540,7 +570,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("唯一索引防分叉冲突：插入时触发 uk_trace_event_corrects 冲突，使用 selectByCorrectsEventIdForUpdate 当前读诊断并返回 409")
         void correctEvent_DuplicateKeyException_ForkDetected_UsesForUpdateCurrentRead() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             TraceEvent target = new TraceEvent();
@@ -583,7 +613,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("并发锁后当前读幂等恢复：同 key 并发更正唤醒后，target 已是 CORRECTED，但当前读成功恢复原更正记录")
         void correctEvent_ConcurrentSameKeyWakeup_IdempotentRecovered() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             // 初始快照未查到，但获取排他锁后唤醒时，target 已被前一事务改为 CORRECTED
@@ -628,7 +658,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("并发锁后当前读语义冲突：同 key 并发更正唤醒后当前读发现内容冲突，抛出 409 IDEMPOTENCY_KEY_CONFLICT")
         void correctEvent_ConcurrentSameKeyWakeup_SemanticConflict_ThrowsConflict() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             TraceEvent target = new TraceEvent();
@@ -811,7 +841,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("site 不存在返回 404 RESOURCE_NOT_FOUND")
         void site_NotFound() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
             when(siteMapper.selectByIdIgnoreTenant(999L)).thenReturn(null);
 
@@ -826,7 +856,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("site 属于其他组织返回 403 ORG_SCOPE_DENIED")
         void site_CrossOrg() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
             Site otherSite = createSite(888L, 20L, "ACTIVE");
             when(siteMapper.selectByIdIgnoreTenant(888L)).thenReturn(otherSite);
@@ -843,7 +873,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("site 处于停用状态返回 422 SITE_NOT_ACTIVE")
         void site_NotActive() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
             Site inactiveSite = createSite(888L, 10L, "INACTIVE");
             when(siteMapper.selectByIdIgnoreTenant(888L)).thenReturn(inactiveSite);
@@ -865,7 +895,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("本组织操作员查询返回稳定排序事件列表且包含已更正事件")
         void listEvents_Success() {
-            Batch batch = createBatch(1000L, 10L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenant(1000L)).thenReturn(batch);
 
             TraceEvent e1 = new TraceEvent();
@@ -901,7 +931,7 @@ class TraceEventApplicationServiceTest {
         @Test
         @DisplayName("跨组织查询事件列表被拒绝 (403 ORG_SCOPE_DENIED)")
         void listEvents_CrossOrg_Denied() {
-            Batch batch = createBatch(1000L, 20L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(1000L, 20L, BatchFlowStatus.ACTIVE.name());
             when(batchMapper.selectByIdIgnoreTenant(1000L)).thenReturn(batch);
 
             assertThatThrownBy(() -> eventService.listEvents(1000L, operatorOrg1))

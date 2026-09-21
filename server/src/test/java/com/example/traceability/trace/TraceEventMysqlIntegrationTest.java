@@ -1,6 +1,8 @@
 package com.example.traceability.trace;
 
 import com.example.traceability.batch.domain.Batch;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.dto.BatchCreateRequest;
 import com.example.traceability.batch.dto.BatchSubmitRequest;
 import com.example.traceability.batch.mapper.BatchMapper;
@@ -209,9 +211,9 @@ class TraceEventMysqlIntegrationTest {
         HttpSession sessionB = loginAndGetSession(userB.getUsername(), rawPassword);
 
         // 6. 创建批次 A (DRAFT)
-        String batchNo = "BATCH-EVT-" + suffix;
+        String externalBatchNo = "BATCH-EVT-" + suffix;
         BatchCreateRequest batchReq = new BatchCreateRequest(
-                batchNo, product.getId(), "SOURCE",
+                externalBatchNo, product.getId(), "SOURCE",
                 new BigDecimal("100.000"), "kg", "DOMESTIC_CAPTURE", "东海捕捞区",
                 LocalDate.now(), null, null, 180
         );
@@ -243,14 +245,16 @@ class TraceEventMysqlIntegrationTest {
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("BATCH_FLOW_BLOCKED"));
 
-        // 8. 提交批次 A (DRAFT -> ACTIVE)
+        // 8. 提交批次 A (DRAFT+NORMAL -> ACTIVE+NORMAL)；旧单维 status 字段已被双状态取代，不得再出现
         mockMvc.perform(post("/api/v1/batches/" + batchIdA + "/submit")
                         .session((MockHttpSession) sessionA)
                         .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(new BatchSubmitRequest(0L))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.status").value("ACTIVE"));
+                .andExpect(jsonPath("$.data.flowStatus").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.riskStatus").value("NORMAL"))
+                .andExpect(jsonPath("$.data.status").doesNotExist());
 
         // 9. 关联停用场所创建事件 -> 422 SITE_NOT_ACTIVE
         CreateTraceEventRequest reqInactiveSite = new CreateTraceEventRequest(
@@ -394,8 +398,8 @@ class TraceEventMysqlIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.data.id").value(eventId2));
 
-        // 21. 批次状态矩阵：CLOSED 批次禁止创建新事件，但允许合规发起链式更正
-        jdbcTemplate.update("UPDATE batch SET status = 'CLOSED' WHERE id = ?", batchIdA);
+        // 21. 批次状态矩阵：CLOSED + NORMAL 批次禁止创建新事件，但允许合规发起链式更正
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'CLOSED', risk_status = 'NORMAL' WHERE id = ?", batchIdA);
 
         CreateTraceEventRequest closedNewReq = new CreateTraceEventRequest(
                 "PROCESS", occurredAt, siteA.getId(), "MANUAL", "归档批次追加事件", null
@@ -445,14 +449,17 @@ class TraceEventMysqlIntegrationTest {
         // 创建并激活批次
         Batch batch = new Batch();
         batch.setOrgId(org.getId());
+        batch.setCreationOrgId(org.getId());
         batch.setProductId(product.getId());
-        batch.setBatchNo("BATCH-CONC-C-" + suffix);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo("BATCH-CONC-C-" + suffix);
         batch.setBatchType("SOURCE");
         batch.setQuantity(new BigDecimal("50.000"));
         batch.setUnitCode("kg");
         batch.setOriginType("DOMESTIC_CAPTURE");
         batch.setOriginText("并发原产地");
-        batch.setStatus("ACTIVE");
+        batch.setFlowStatus("ACTIVE");
+        batch.setRiskStatus("NORMAL");
         batch.setCreationIdempotencyKey("idem-batch-c-" + suffix);
         batch.setVersion(1L);
         batch.setIsDeleted(0);
@@ -555,14 +562,17 @@ class TraceEventMysqlIntegrationTest {
         // 创建并激活批次
         Batch batch = new Batch();
         batch.setOrgId(org.getId());
+        batch.setCreationOrgId(org.getId());
         batch.setProductId(product.getId());
-        batch.setBatchNo("BATCH-CONC-D-" + suffix);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo("BATCH-CONC-D-" + suffix);
         batch.setBatchType("SOURCE");
         batch.setQuantity(new BigDecimal("60.000"));
         batch.setUnitCode("kg");
         batch.setOriginType("DOMESTIC_CAPTURE");
         batch.setOriginText("并发竞争原产地");
-        batch.setStatus("ACTIVE");
+        batch.setFlowStatus("ACTIVE");
+        batch.setRiskStatus("NORMAL");
         batch.setCreationIdempotencyKey("idem-batch-d-" + suffix);
         batch.setVersion(1L);
         batch.setIsDeleted(0);
@@ -662,14 +672,17 @@ class TraceEventMysqlIntegrationTest {
 
         Batch batch = new Batch();
         batch.setOrgId(org.getId());
+        batch.setCreationOrgId(org.getId());
         batch.setProductId(product.getId());
-        batch.setBatchNo("BATCH-RR-E-" + suffix);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo("BATCH-RR-E-" + suffix);
         batch.setBatchType("SOURCE");
         batch.setQuantity(new BigDecimal("10.000"));
         batch.setUnitCode("kg");
         batch.setOriginType("DOMESTIC_CAPTURE");
         batch.setOriginText("产地说明");
-        batch.setStatus("ACTIVE");
+        batch.setFlowStatus("ACTIVE");
+        batch.setRiskStatus("NORMAL");
         batch.setCreationIdempotencyKey("idem-batch-rr-" + suffix);
         batch.setVersion(0L);
         batch.setIsDeleted(0);
@@ -784,14 +797,17 @@ class TraceEventMysqlIntegrationTest {
 
         Batch batch = new Batch();
         batch.setOrgId(org.getId());
+        batch.setCreationOrgId(org.getId());
         batch.setProductId(product.getId());
-        batch.setBatchNo("BATCH-CHK-E-" + suffix);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo("BATCH-CHK-E-" + suffix);
         batch.setBatchType("SOURCE");
         batch.setQuantity(new BigDecimal("10.000"));
         batch.setUnitCode("kg");
         batch.setOriginType("DOMESTIC_CAPTURE");
         batch.setOriginText("约束产地");
-        batch.setStatus("ACTIVE");
+        batch.setFlowStatus("ACTIVE");
+        batch.setRiskStatus("NORMAL");
         batch.setCreationIdempotencyKey("idem-batch-chk-" + suffix);
         batch.setVersion(0L);
         batch.setIsDeleted(0);
@@ -905,14 +921,17 @@ class TraceEventMysqlIntegrationTest {
         // 创建组织 A 的 ACTIVE 批次
         Batch batchA = new Batch();
         batchA.setOrgId(orgA.getId());
+        batchA.setCreationOrgId(orgA.getId());
         batchA.setProductId(product.getId());
-        batchA.setBatchNo("BATCH-AUTH-A-" + suffix);
+        batchA.setTraceBatchNo("TRC" + suffix + "001");
+        batchA.setExternalBatchNo("BATCH-AUTH-A-" + suffix);
         batchA.setBatchType("SOURCE");
         batchA.setQuantity(new BigDecimal("20.000"));
         batchA.setUnitCode("kg");
         batchA.setOriginType("DOMESTIC_CAPTURE");
         batchA.setOriginText("舟山海域");
-        batchA.setStatus("ACTIVE");
+        batchA.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        batchA.setRiskStatus(BatchRiskStatus.NORMAL.name());
         batchA.setCreationIdempotencyKey("idem-batch-auth-" + suffix);
         batchA.setVersion(0L);
         batchA.setIsDeleted(0);
@@ -1031,14 +1050,17 @@ class TraceEventMysqlIntegrationTest {
 
         Batch batch = new Batch();
         batch.setOrgId(org.getId());
+        batch.setCreationOrgId(org.getId());
         batch.setProductId(product.getId());
-        batch.setBatchNo("BATCH-RB-" + suffix);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo("BATCH-RB-" + suffix);
         batch.setBatchType("SOURCE");
         batch.setQuantity(new BigDecimal("15.000"));
         batch.setUnitCode("kg");
         batch.setOriginType("DOMESTIC_CAPTURE");
         batch.setOriginText("东海海域");
-        batch.setStatus("ACTIVE");
+        batch.setFlowStatus("ACTIVE");
+        batch.setRiskStatus("NORMAL");
         batch.setCreationIdempotencyKey("idem-batch-rb-" + suffix);
         batch.setVersion(0L);
         batch.setIsDeleted(0);
@@ -1132,14 +1154,17 @@ class TraceEventMysqlIntegrationTest {
 
         Batch batch = new Batch();
         batch.setOrgId(org.getId());
+        batch.setCreationOrgId(org.getId());
         batch.setProductId(product.getId());
-        batch.setBatchNo("BATCH-ORD-" + suffix);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo("BATCH-ORD-" + suffix);
         batch.setBatchType("SOURCE");
         batch.setQuantity(new BigDecimal("30.000"));
         batch.setUnitCode("kg");
         batch.setOriginType("DOMESTIC_CAPTURE");
         batch.setOriginText("排序产地");
-        batch.setStatus("ACTIVE");
+        batch.setFlowStatus("ACTIVE");
+        batch.setRiskStatus("NORMAL");
         batch.setCreationIdempotencyKey("idem-batch-ord-" + suffix);
         batch.setVersion(0L);
         batch.setIsDeleted(0);
@@ -1212,14 +1237,17 @@ class TraceEventMysqlIntegrationTest {
 
         Batch batch = new Batch();
         batch.setOrgId(org.getId());
+        batch.setCreationOrgId(org.getId());
         batch.setProductId(product.getId());
-        batch.setBatchNo("BATCH-SIM-" + suffix);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo("BATCH-SIM-" + suffix);
         batch.setBatchType("SOURCE");
         batch.setQuantity(new BigDecimal("50.000"));
         batch.setUnitCode("kg");
         batch.setOriginType("DOMESTIC_CAPTURE");
         batch.setOriginText("模拟海域");
-        batch.setStatus("ACTIVE");
+        batch.setFlowStatus("ACTIVE");
+        batch.setRiskStatus("NORMAL");
         batch.setCreationIdempotencyKey("idem-batch-sim-" + suffix);
         batch.setVersion(0L);
         batch.setIsDeleted(0);

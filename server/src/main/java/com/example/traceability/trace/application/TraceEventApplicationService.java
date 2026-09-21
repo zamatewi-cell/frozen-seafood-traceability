@@ -1,7 +1,8 @@
 package com.example.traceability.trace.application;
 
 import com.example.traceability.batch.domain.Batch;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
@@ -180,12 +181,13 @@ public class TraceEventApplicationService {
                     "无权向其他组织的批次记录追溯事件"
             );
         }
-        if (!BatchStatus.ACTIVE.name().equals(batch.getStatus())) {
+        if (!BatchFlowStatus.ACTIVE.name().equals(batch.getFlowStatus())
+                || !BatchRiskStatus.NORMAL.name().equals(batch.getRiskStatus())) {
             throw new BusinessException(
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "BATCH_FLOW_BLOCKED",
                     "批次状态不允许当前操作",
-                    "批次当前状态为 " + batch.getStatus() + "，仅 ACTIVE 状态批次允许创建追溯事件"
+                    "批次当前流转或风险状态不允许创建追溯事件 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")，仅 ACTIVE 且 NORMAL 状态批次允许创建追溯事件"
             );
         }
 
@@ -305,12 +307,15 @@ public class TraceEventApplicationService {
                     "无权在其他组织的批次下更正追溯事件"
             );
         }
-        if (!BatchStatus.ACTIVE.name().equals(batch.getStatus()) && !BatchStatus.CLOSED.name().equals(batch.getStatus())) {
+        boolean flowAllowed = BatchFlowStatus.ACTIVE.name().equals(batch.getFlowStatus())
+                || BatchFlowStatus.CLOSED.name().equals(batch.getFlowStatus());
+        boolean riskAllowed = BatchRiskStatus.NORMAL.name().equals(batch.getRiskStatus());
+        if (!flowAllowed || !riskAllowed) {
             throw new BusinessException(
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "BATCH_FLOW_BLOCKED",
                     "批次状态不允许更正",
-                    "批次当前状态为 " + batch.getStatus() + "，仅 ACTIVE 与 CLOSED 状态批次允许追加更正"
+                    "批次当前状态不允许追加更正 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")，仅 ACTIVE/CLOSED 且 NORMAL 状态批次允许追加更正"
             );
         }
 

@@ -1,7 +1,8 @@
 package com.example.traceability.trace.application;
 
 import com.example.traceability.batch.domain.Batch;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
@@ -167,13 +168,14 @@ public class PublicTraceApplicationService {
             return PublicTraceCodeResponse.fromEntity(existingCode);
         }
 
-        // 4. 仅 ACTIVE 批次允许首次激活
-        if (!BatchStatus.ACTIVE.name().equals(batch.getStatus())) {
+        // 4. 仅 ACTIVE 且 NORMAL 批次允许首次激活
+        if (!BatchFlowStatus.ACTIVE.name().equals(batch.getFlowStatus())
+                || !BatchRiskStatus.NORMAL.name().equals(batch.getRiskStatus())) {
             throw new BusinessException(
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "BATCH_FLOW_BLOCKED",
                     "批次状态不允许当前操作",
-                    "批次当前状态为 " + batch.getStatus() + "，仅 ACTIVE 状态批次允许激活公开追溯码"
+                    "批次当前流转或风险状态不允许激活公开追溯码 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")"
             );
         }
 
@@ -367,7 +369,7 @@ public class PublicTraceApplicationService {
 
         PublicTraceProjectionResponse.BatchProjection batchProj =
                 new PublicTraceProjectionResponse.BatchProjection(
-                        TraceDataMasker.maskBatchNo(batch.getBatchNo()),
+                        TraceDataMasker.maskBatchNo(batch.getExternalBatchNo()),
                         batch.getOriginType(),
                         TraceDataMasker.maskOriginText(batch.getOriginText()),
                         batch.getProductionDate() != null ? batch.getProductionDate().toString() : null
@@ -385,8 +387,9 @@ public class PublicTraceApplicationService {
                         TEMPERATURE_INSUFFICIENT_NOTE
                 );
 
-        String batchStatus = batch.getStatus();
-        String recallNotice = BatchStatus.RECALLED.name().equals(batchStatus) ? SIMULATED_RECALL_NOTICE : null;
+        String flowStatus = batch.getFlowStatus();
+        String riskStatus = batch.getRiskStatus();
+        String recallNotice = BatchRiskStatus.RECALLED.name().equals(riskStatus) ? SIMULATED_RECALL_NOTICE : null;
         String queriedAt = Instant.now().toString();
 
         return new PublicTraceProjectionResponse(
@@ -395,7 +398,8 @@ public class PublicTraceApplicationService {
                 batchProj,
                 timeline,
                 tempSummary,
-                batchStatus,
+                flowStatus,
+                riskStatus,
                 recallNotice,
                 queriedAt,
                 PUBLIC_DISCLOSURE_STATEMENT

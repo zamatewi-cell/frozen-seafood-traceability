@@ -2,7 +2,8 @@ package com.example.traceability.trace.application;
 
 import com.example.traceability.audit.application.AuditApplicationService;
 import com.example.traceability.batch.domain.Batch;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.batch.mapper.BatchOperationItemMapper;
 import com.example.traceability.common.exception.BusinessException;
@@ -52,7 +53,7 @@ import java.util.regex.Pattern;
  *   <li>创建交接草稿：批次快照锁定，排他活跃校验，防已消耗批次流转，uk_transfer_open_batch 冲突安全捕获；</li>
  *   <li>修改与逻辑删除草稿：严格限制发送方与 DRAFT 阶段；</li>
  *   <li>发送方提交：双时间双主体记录，形成批次 PENDING 业务预留，锁定后当前读幂等恢复，校验批次归属人防篡改与 INPUT 消耗拦截；</li>
- *   <li>接收方接受：实收计量单位匹配与正数量校验，差异强制说明，批次号冲突排他，原子转移批次及公开追溯码归属企业，追加 ARRIVAL 追溯事件；</li>
+ *   <li>接收方接受：实收计量单位匹配与正数量校验，差异强制说明，原子转移批次及公开追溯码归属企业，追加 ARRIVAL 追溯事件；</li>
  *   <li>接收方拒收：保存拒收原因，不转移批次，不写追溯事件；</li>
  *   <li>多动作统一幂等：基于 SHA-256 规范化语义哈希（消除 BigDecimal 尾随零歧义），结合行级锁后当前读消除快照盲区；</li>
  *   <li>SQL 跨租户数据隔离防越权与审计 JSON 安全序列化。</li>
@@ -172,12 +173,13 @@ public class TransferApplicationService {
                     "仅能对当前所属企业持有的批次发起交接"
             );
         }
-        if (!BatchStatus.ACTIVE.name().equals(batch.getStatus())) {
+        if (!BatchFlowStatus.ACTIVE.name().equals(batch.getFlowStatus())
+                || !BatchRiskStatus.NORMAL.name().equals(batch.getRiskStatus())) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
                     "BATCH_NOT_ACTIVE",
                     "批次状态不可交接",
-                    "当前批次状态为 " + batch.getStatus() + "，仅 ACTIVE 状态批次允许发起交接"
+                    "当前批次流转或风险状态不可交接 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")，仅 ACTIVE 且 NORMAL 状态批次允许发起交接"
             );
         }
 
@@ -541,13 +543,13 @@ public class TransferApplicationService {
                     "批次所属组织与交接发货方不一致，禁止提交交接"
             );
         }
-        if ("FROZEN".equalsIgnoreCase(batch.getStatus()) || "RECALLED".equalsIgnoreCase(batch.getStatus())
-                || "CLOSED".equalsIgnoreCase(batch.getStatus()) || "DRAFT".equalsIgnoreCase(batch.getStatus())) {
+        if (!BatchFlowStatus.ACTIVE.name().equals(batch.getFlowStatus())
+                || !BatchRiskStatus.NORMAL.name().equals(batch.getRiskStatus())) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
                     "BATCH_FLOW_BLOCKED",
                     "批次状态不可交接",
-                    "批次当前状态为 " + batch.getStatus() + "，禁止提交交接"
+                    "批次当前状态不可交接 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")，仅 ACTIVE 且 NORMAL 状态批次允许提交交接"
             );
         }
         if (batchOperationItemMapper.countSubmittedInputUsageByBatchId(batch.getId()) > 0) {
@@ -732,23 +734,13 @@ public class TransferApplicationService {
                     "批次当前持有方与交接发货方不一致，禁止接受交接"
             );
         }
-        if ("FROZEN".equalsIgnoreCase(batch.getStatus()) || "RECALLED".equalsIgnoreCase(batch.getStatus())
-                || "CLOSED".equalsIgnoreCase(batch.getStatus()) || "DRAFT".equalsIgnoreCase(batch.getStatus())) {
+        if (!BatchFlowStatus.ACTIVE.name().equals(batch.getFlowStatus())
+                || !BatchRiskStatus.NORMAL.name().equals(batch.getRiskStatus())) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
                     "BATCH_FLOW_BLOCKED",
                     "批次状态不可流转",
-                    "关联批次状态为 " + batch.getStatus() + "，已被质量冻结或召回，禁止接受交接"
-            );
-        }
-
-        // 8. 接收组织同名批次号冲突排他检查
-        if (batchMapper.countByOrgIdAndBatchNo(receiverOrgId, batch.getBatchNo()) > 0) {
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "BATCH_NO_CONFLICT",
-                    "批次编码冲突",
-                    "接收企业已存在相同业务批次号 " + batch.getBatchNo() + "，不得自动改号，交接已被拒绝"
+                    "关联批次流转或风险状态不可流转 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")，已被质量冻结或召回，禁止接受交接"
             );
         }
 
@@ -801,7 +793,7 @@ public class TransferApplicationService {
             );
         }
 
-        // 11. 原子转移批次持有组织 (带 updated_by 与乐观锁，强制限定旧持有组织 expectedSenderOrgId，捕获 uk_batch_org_no 冲突)
+        // 11. 原子转移批次持有组织 (带 updated_by 与乐观锁，强制限定旧持有组织 expectedSenderOrgId)
         try {
             int updatedBatch = batchMapper.updateOrgIdByIdAndVersion(
                     batch.getId(),
@@ -821,9 +813,9 @@ public class TransferApplicationService {
         } catch (DuplicateKeyException e) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
-                    "BATCH_NO_CONFLICT",
-                    "批次编码冲突",
-                    "接收企业已存在相同业务批次号 " + batch.getBatchNo()
+                    "BATCH_CONCURRENT_CONFLICT",
+                    "批次并发冲突",
+                    "批次持有企业更新时发生并发冲突"
             );
         }
 

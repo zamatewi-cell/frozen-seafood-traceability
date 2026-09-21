@@ -79,7 +79,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   <li>场景 C：负向校验（非持有者不可发起、非目标接收方不可决断、终态不可重复决断）；</li>
  *   <li>场景 D：并发与幂等（同 key 重试返回同结果、不同语义 409、触发 uk_transfer_open_batch 唯一约束转换为 409 不报错 500）；</li>
  *   <li>场景 E：批次操作互斥（在途 PENDING 批次被批次操作引用为 INPUT 时被拒绝 409 BATCH_TRANSFER_PENDING）；</li>
- *   <li>同名批次号冲突防御：接收方存在同名批次时拒绝接受并回滚。</li>
+ *   <li>场景 F：批次双状态矩阵（仅 flowStatus=ACTIVE 且 riskStatus=NORMAL 可交接）；</li>
+ *   <li>同名 externalBatchNo 回归：接收方已存在相同外部批号时 ACCEPT 依然成功，
+ *       traceBatchNo 与 externalBatchNo 均保持不变，仅责任组织转移（业务契约 v1.1 §3.2）。</li>
  * </ul>
  * 测试结束后执行严格容错物理清理，保证不留任何脏数据残留。
  * </p>
@@ -259,10 +261,37 @@ class TransferMysqlIntegrationTest {
         }
     }
 
-    private Long createAndSubmitActiveBatch(MockHttpSession session, String batchNo, BigDecimal quantity) throws Exception {
-        String idemCreate = "idem-bat-c-" + UUID.randomUUID().toString().replace("-", "");
+    /**
+     * 创建并提交一个 ACTIVE + NORMAL 批次。
+     * <p>
+     * {@code externalBatchNo} 为企业可选外部业务批号（可重复、不承担身份），
+     * traceBatchNo 一律由服务端生成，客户端不得指定。
+     * </p>
+     */
+    private Long createAndSubmitActiveBatch(MockHttpSession session, String externalBatchNo, BigDecimal quantity) throws Exception {
+        return createAndSubmitActiveBatch(
+                session,
+                externalBatchNo,
+                quantity,
+                "idem-bat-c-" + UUID.randomUUID().toString().replace("-", "")
+        );
+    }
+
+    /**
+     * 创建并提交一个 ACTIVE + NORMAL 批次，允许显式指定创建幂等键。
+     * <p>
+     * 用于验证创建幂等域为不可变的 creationOrgId：不同组织可以合法持有完全相同的
+     * creation_idempotency_key，且不会因此阻断 Transfer ACCEPT。
+     * </p>
+     */
+    private Long createAndSubmitActiveBatch(
+            MockHttpSession session,
+            String externalBatchNo,
+            BigDecimal quantity,
+            String idemCreate
+    ) throws Exception {
         BatchCreateRequest createReq = new BatchCreateRequest(
-                batchNo, testProduct.getId(), "SOURCE",
+                externalBatchNo, testProduct.getId(), "SOURCE",
                 quantity, "kg", "DOMESTIC_CAPTURE", "舟山渔场",
                 LocalDate.now(), null, null, 180
         );
@@ -297,8 +326,8 @@ class TransferMysqlIntegrationTest {
     @DisplayName("场景 A：跨企业整批交接成功流转（批次所有权转移、公开追溯码归属同步变更、双时间留痕、追溯事件与审计日志）")
     void scenarioA_crossEnterpriseTransfer_accept_fullLifecycle() throws Exception {
         BigDecimal qty = new BigDecimal("500.000");
-        String batchNo = "BAT-SCENARIO-A-" + UUID.randomUUID().toString().substring(0, 6);
-        Long batchId = createAndSubmitActiveBatch(senderSession, batchNo, qty);
+        String externalBatchNo = "BAT-SCENARIO-A-" + UUID.randomUUID().toString().substring(0, 6);
+        Long batchId = createAndSubmitActiveBatch(senderSession, externalBatchNo, qty);
 
         // 1. 发货方为批次激活公开追溯码
         String activateKey = "idem-act-" + UUID.randomUUID().toString().replace("-", "");
@@ -422,8 +451,8 @@ class TransferMysqlIntegrationTest {
     @DisplayName("场景 B：交接拒收流转（批次所有权不转移、公开追溯码归属不变更、不追加追溯事件）")
     void scenarioB_crossEnterpriseTransfer_reject_preservesOwnershipAndNoEvent() throws Exception {
         BigDecimal qty = new BigDecimal("200.000");
-        String batchNo = "BAT-SCENARIO-B-" + UUID.randomUUID().toString().substring(0, 6);
-        Long batchId = createAndSubmitActiveBatch(senderSession, batchNo, qty);
+        String externalBatchNo = "BAT-SCENARIO-B-" + UUID.randomUUID().toString().substring(0, 6);
+        Long batchId = createAndSubmitActiveBatch(senderSession, externalBatchNo, qty);
 
         // 1. 发货方激活公开追溯码
         String activateKey = "idem-act-" + UUID.randomUUID().toString().replace("-", "");
@@ -725,13 +754,149 @@ class TransferMysqlIntegrationTest {
     }
 
     @Test
-    @DisplayName("接收方同名批次冲突拦截：接收方已存在相同批次号时拒绝接受并回滚")
-    void acceptTransfer_batchNoConflict_rollsBack() throws Exception {
-        String sameBatchNo = "BAT-CONFLICT-" + UUID.randomUUID().toString().substring(0, 6);
-        Long senderBatchId = createAndSubmitActiveBatch(senderSession, sameBatchNo, new BigDecimal("300.000"));
+    @DisplayName("创建幂等域与责任组织解耦：双方持有相同 creation_idempotency_key 时 ACCEPT 仍成功，creation_org_id 不随交接漂移，转出后重放创建请求不重复建批")
+    void acceptTransfer_sameCreationIdempotencyKeyAtBothSides_succeedsAndKeepsCreationOrgStable() throws Exception {
+        // 发货方与接收方刻意使用完全相同的创建幂等键。
+        // 旧模型 UNIQUE(org_id, creation_idempotency_key) 会在 ACCEPT 改写 org_id 时永久唯一键冲突；
+        // 新模型以不可变 creation_org_id 为幂等域，双方各自独立，交接不受影响。
+        String sharedCreationKey = "idem-shared-creation-" + UUID.randomUUID().toString().replace("-", "");
 
-        // 在接收方企业预先创建同名批次
-        createAndSubmitActiveBatch(receiverSession, sameBatchNo, new BigDecimal("100.000"));
+        Long senderBatchId = createAndSubmitActiveBatch(
+                senderSession, "EXT-SHARED-KEY-S", new BigDecimal("300.000"), sharedCreationKey);
+        Long receiverOwnBatchId = createAndSubmitActiveBatch(
+                receiverSession, "EXT-SHARED-KEY-R", new BigDecimal("100.000"), sharedCreationKey);
+
+        // 前置事实：两个不同组织的批次持有同一个 creation_idempotency_key
+        assertThat(readCreationOrgId(senderBatchId)).isEqualTo(senderOrg.getId());
+        assertThat(readCreationOrgId(receiverOwnBatchId)).isEqualTo(receiverOrg.getId());
+        assertThat(readCreationIdempotencyKey(senderBatchId)).isEqualTo(sharedCreationKey);
+        assertThat(readCreationIdempotencyKey(receiverOwnBatchId)).isEqualTo(sharedCreationKey);
+
+        // 新建批次的 creation_org_id 与 org_id 初始一致
+        Batch senderBatchBefore = batchMapper.selectById(senderBatchId);
+        assertThat(senderBatchBefore.getCreationOrgId()).isEqualTo(senderBatchBefore.getOrgId());
+
+        // 创建并提交交接
+        MvcResult res = mockMvc.perform(post("/api/v1/transfers")
+                        .session(senderSession)
+                        .with(csrf())
+                        .header("Idempotency-Key", "idem-create-" + UUID.randomUUID().toString().replace("-", ""))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new TransferCreateRequest(senderBatchId, receiverOrg.getId()))))
+                .andExpect(status().isCreated())
+                .andReturn();
+        Long transferId = objectMapper.readTree(res.getResponse().getContentAsString()).get("data").get("id").asLong();
+        createdTransferIds.add(transferId);
+
+        mockMvc.perform(post("/api/v1/transfers/" + transferId + "/submit")
+                        .session(senderSession)
+                        .with(csrf())
+                        .header("Idempotency-Key", "idem-submit-" + UUID.randomUUID().toString().replace("-", ""))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new TransferSubmitRequest(OffsetDateTime.now(ZoneOffset.UTC), 0L))))
+                .andExpect(status().isOk());
+
+        // 关键回归：接收方已持有相同 creation_idempotency_key，ACCEPT 依然成功
+        mockMvc.perform(post("/api/v1/transfers/" + transferId + "/accept")
+                        .session(receiverSession)
+                        .with(csrf())
+                        .header("Idempotency-Key", "idem-accept-" + UUID.randomUUID().toString().replace("-", ""))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new TransferAcceptRequest(
+                                new BigDecimal("300.000"), "kg", OffsetDateTime.now(ZoneOffset.UTC), null, 1L))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("ACCEPTED"));
+
+        // 责任组织转移，但创建组织是不可变事实，绝不漂移
+        Batch senderBatchAfter = batchMapper.selectById(senderBatchId);
+        assertThat(senderBatchAfter.getOrgId()).isEqualTo(receiverOrg.getId());
+        assertThat(senderBatchAfter.getCreationOrgId()).isEqualTo(senderOrg.getId());
+        assertThat(readCreationOrgId(senderBatchId)).isEqualTo(senderOrg.getId());
+
+        // 批次已转出后，原创建方重放原始创建请求：命中原批次，绝不产生第二条批次
+        int batchCountBeforeReplay = countBatchesByCreationKey(senderOrg.getId(), sharedCreationKey);
+        assertThat(batchCountBeforeReplay).isEqualTo(1);
+
+        BatchCreateRequest replayReq = new BatchCreateRequest(
+                "EXT-SHARED-KEY-S", testProduct.getId(), "SOURCE",
+                new BigDecimal("300.000"), "kg", "DOMESTIC_CAPTURE", "舟山渔场",
+                LocalDate.now(), null, null, 180
+        );
+        mockMvc.perform(post("/api/v1/batches")
+                        .session(senderSession)
+                        .with(csrf())
+                        .header("Idempotency-Key", sharedCreationKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(replayReq)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.id").value(senderBatchId))
+                // 如实返回该批次当前责任组织（已转移给接收方）
+                .andExpect(jsonPath("$.data.orgId").value(receiverOrg.getId()))
+                // creationOrgId 是服务端技术字段，绝不出现在对外响应中
+                .andExpect(jsonPath("$.data.creationOrgId").doesNotExist());
+
+        assertThat(countBatchesByCreationKey(senderOrg.getId(), sharedCreationKey))
+                .as("转出后重放创建请求绝不能新增第二条批次")
+                .isEqualTo(1);
+
+        // 同 key 不同载荷仍然是 409 IDEMPOTENCY_KEY_REUSED
+        BatchCreateRequest differentPayload = new BatchCreateRequest(
+                "EXT-SHARED-KEY-S", testProduct.getId(), "SOURCE",
+                new BigDecimal("999.000"), "kg", "DOMESTIC_CAPTURE", "舟山渔场",
+                LocalDate.now(), null, null, 180
+        );
+        mockMvc.perform(post("/api/v1/batches")
+                        .session(senderSession)
+                        .with(csrf())
+                        .header("Idempotency-Key", sharedCreationKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(differentPayload)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
+
+        assertThat(countBatchesByCreationKey(senderOrg.getId(), sharedCreationKey)).isEqualTo(1);
+
+        // 接收方自己的同名幂等键批次完全不受影响
+        Batch receiverOwnAfter = batchMapper.selectById(receiverOwnBatchId);
+        assertThat(receiverOwnAfter.getOrgId()).isEqualTo(receiverOrg.getId());
+        assertThat(receiverOwnAfter.getCreationOrgId()).isEqualTo(receiverOrg.getId());
+    }
+
+    private Long readCreationOrgId(Long batchId) {
+        return jdbcTemplate.queryForObject("SELECT creation_org_id FROM batch WHERE id = ?", Long.class, batchId);
+    }
+
+    private String readCreationIdempotencyKey(Long batchId) {
+        return jdbcTemplate.queryForObject("SELECT creation_idempotency_key FROM batch WHERE id = ?", String.class, batchId);
+    }
+
+    private int countBatchesByCreationKey(Long creationOrgId, String creationIdempotencyKey) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM batch WHERE creation_org_id = ? AND creation_idempotency_key = ? AND is_deleted = 0",
+                Integer.class, creationOrgId, creationIdempotencyKey
+        );
+        return count == null ? 0 : count;
+    }
+
+    @Test
+    @DisplayName("接收方同名外部批号不再阻断交接：externalBatchNo 可重复，ACCEPT 成功且 traceBatchNo 稳定不变")
+    void acceptTransfer_sameExternalBatchNoAtReceiver_succeeds() throws Exception {
+        // 业务契约 v1.1 §3.2：externalBatchNo 是企业可选的外部原始批号，可重复，
+        // 不作为 Batch 身份，也不参与 Transfer 接收冲突判断；Batch 身份由服务端生成的 traceBatchNo 承担。
+        String sameExternalBatchNo = "BAT-DUP-EXT-" + UUID.randomUUID().toString().substring(0, 6);
+        Long senderBatchId = createAndSubmitActiveBatch(senderSession, sameExternalBatchNo, new BigDecimal("300.000"));
+
+        // 在接收方企业预先创建持有相同 externalBatchNo 的批次（历史上会触发 BATCH_NO_CONFLICT）
+        Long receiverExistingBatchId = createAndSubmitActiveBatch(receiverSession, sameExternalBatchNo, new BigDecimal("100.000"));
+
+        Batch senderBatchBefore = batchMapper.selectById(senderBatchId);
+        String traceBatchNoBefore = senderBatchBefore.getTraceBatchNo();
+        Batch receiverBatchBefore = batchMapper.selectById(receiverExistingBatchId);
+
+        // 两个批次的外部批号相同，但服务端生成的 traceBatchNo 必须彼此不同且全局唯一
+        assertThat(senderBatchBefore.getExternalBatchNo()).isEqualTo(sameExternalBatchNo);
+        assertThat(receiverBatchBefore.getExternalBatchNo()).isEqualTo(sameExternalBatchNo);
+        assertThat(traceBatchNoBefore).isNotEqualTo(receiverBatchBefore.getTraceBatchNo());
 
         // 发送方创建并提交交接
         String createKey = "idem-create-" + UUID.randomUUID().toString().replace("-", "");
@@ -755,7 +920,7 @@ class TransferMysqlIntegrationTest {
                         .content(objectMapper.writeValueAsString(new TransferSubmitRequest(OffsetDateTime.now(ZoneOffset.UTC), 0L))))
                 .andExpect(status().isOk());
 
-        // 接收方尝试接受，应触发 409 BATCH_NO_CONFLICT
+        // 接收方接受：即使本企业已存在同名 externalBatchNo，也必须成功进入 ACCEPTED
         TransferAcceptRequest acceptReq = new TransferAcceptRequest(
                 new BigDecimal("300.000"), "kg", OffsetDateTime.now(ZoneOffset.UTC), null, 1L
         );
@@ -765,14 +930,31 @@ class TransferMysqlIntegrationTest {
                         .header("Idempotency-Key", "idem-accept-" + UUID.randomUUID().toString().replace("-", ""))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(acceptReq)))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.code").value("BATCH_NO_CONFLICT"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("ACCEPTED"));
 
-        // 确认数据库状态未被篡改，交接凭单仍保持 PENDING，批次归属未变
+        // 交接进入 ACCEPTED 终态
         Transfer t = transferMapper.selectById(transferId);
-        assertThat(t.getStatus()).isEqualTo(TransferStatus.PENDING);
-        Batch b = batchMapper.selectById(senderBatchId);
-        assertThat(b.getOrgId()).isEqualTo(senderOrg.getId());
+        assertThat(t.getStatus()).isEqualTo(TransferStatus.ACCEPTED);
+
+        // 责任组织转移至接收方；批次身份（traceBatchNo）与企业外部批号均保持不变
+        Batch senderBatchAfter = batchMapper.selectById(senderBatchId);
+        assertThat(senderBatchAfter.getOrgId()).isEqualTo(receiverOrg.getId());
+        assertThat(senderBatchAfter.getTraceBatchNo()).isEqualTo(traceBatchNoBefore);
+        assertThat(senderBatchAfter.getExternalBatchNo()).isEqualTo(sameExternalBatchNo);
+
+        // 交接不复制批次：接收方原有同名外部批号批次完全不受影响
+        Batch receiverBatchAfter = batchMapper.selectById(receiverExistingBatchId);
+        assertThat(receiverBatchAfter.getOrgId()).isEqualTo(receiverOrg.getId());
+        assertThat(receiverBatchAfter.getTraceBatchNo()).isEqualTo(receiverBatchBefore.getTraceBatchNo());
+        assertThat(receiverBatchAfter.getExternalBatchNo()).isEqualTo(sameExternalBatchNo);
+
+        // 同一 externalBatchNo 在库中确实存在两条不同身份的批次记录
+        int duplicateExternalCount = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM batch WHERE external_batch_no = ? AND is_deleted = 0",
+                Integer.class, sameExternalBatchNo
+        );
+        assertThat(duplicateExternalCount).isEqualTo(2);
     }
 
     private Long createAndSubmitProcessOperation(MockHttpSession session, Long inputBatchId, Long outputBatchId, BigDecimal quantity) throws Exception {
@@ -809,7 +991,7 @@ class TransferMysqlIntegrationTest {
     }
 
     @Test
-    @DisplayName("场景 F：批次状态矩阵（DRAFT/FROZEN/RECALLED/CLOSED 禁止提交；PENDING 期间冻结召回禁止接受但允许拒收）")
+    @DisplayName("场景 F：批次双状态矩阵（仅 ACTIVE+NORMAL 可提交；FROZEN/RECALLED/CLOSED/DRAFT 组合禁止提交；PENDING 期间冻结召回禁止接受但允许拒收）")
     void scenarioF_batchStatusMatrix_blocksSubmissionAndAcceptance() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         Long batchId = createAndSubmitActiveBatch(senderSession, "BAT-F1-" + suffix, new BigDecimal("400.000"));
@@ -827,8 +1009,8 @@ class TransferMysqlIntegrationTest {
         Long transferId = objectMapper.readTree(cRes.getResponse().getContentAsString()).get("data").get("id").asLong();
         createdTransferIds.add(transferId);
 
-        // 1. 模拟将批次变更为 FROZEN，提交被拦截 409 BATCH_FLOW_BLOCKED
-        jdbcTemplate.update("UPDATE batch SET status = 'FROZEN' WHERE id = ?", batchId);
+        // 1. 模拟将批次变更为 ACTIVE + FROZEN（质量冻结），提交被拦截 409 BATCH_FLOW_BLOCKED
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'ACTIVE', risk_status = 'FROZEN' WHERE id = ?", batchId);
         mockMvc.perform(post("/api/v1/transfers/" + transferId + "/submit")
                         .session(senderSession)
                         .with(csrf())
@@ -838,8 +1020,8 @@ class TransferMysqlIntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("BATCH_FLOW_BLOCKED"));
 
-        // 2. 模拟将批次变更为 RECALLED，提交被拦截 409 BATCH_FLOW_BLOCKED
-        jdbcTemplate.update("UPDATE batch SET status = 'RECALLED' WHERE id = ?", batchId);
+        // 2. 模拟将批次变更为 ACTIVE + RECALLED（按 V8 历史映射基线：召回只改风险维度），提交被拦截 409 BATCH_FLOW_BLOCKED
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'ACTIVE', risk_status = 'RECALLED' WHERE id = ?", batchId);
         mockMvc.perform(post("/api/v1/transfers/" + transferId + "/submit")
                         .session(senderSession)
                         .with(csrf())
@@ -849,8 +1031,8 @@ class TransferMysqlIntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("BATCH_FLOW_BLOCKED"));
 
-        // 3. 模拟将批次变更为 CLOSED，提交被拦截 409 BATCH_FLOW_BLOCKED
-        jdbcTemplate.update("UPDATE batch SET status = 'CLOSED' WHERE id = ?", batchId);
+        // 3. 模拟将批次变更为 CLOSED + NORMAL（正常流转结束），提交被拦截 409 BATCH_FLOW_BLOCKED
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'CLOSED', risk_status = 'NORMAL' WHERE id = ?", batchId);
         mockMvc.perform(post("/api/v1/transfers/" + transferId + "/submit")
                         .session(senderSession)
                         .with(csrf())
@@ -860,8 +1042,8 @@ class TransferMysqlIntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("BATCH_FLOW_BLOCKED"));
 
-        // 4. 模拟将批次回退为 DRAFT，提交被拦截 409 BATCH_FLOW_BLOCKED
-        jdbcTemplate.update("UPDATE batch SET status = 'DRAFT' WHERE id = ?", batchId);
+        // 4. 模拟将批次回退为 DRAFT + NORMAL，提交被拦截 409 BATCH_FLOW_BLOCKED
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'DRAFT', risk_status = 'NORMAL' WHERE id = ?", batchId);
         mockMvc.perform(post("/api/v1/transfers/" + transferId + "/submit")
                         .session(senderSession)
                         .with(csrf())
@@ -871,8 +1053,8 @@ class TransferMysqlIntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("BATCH_FLOW_BLOCKED"));
 
-        // 5. 恢复为 ACTIVE 并正常提交进入 PENDING 状态
-        jdbcTemplate.update("UPDATE batch SET status = 'ACTIVE' WHERE id = ?", batchId);
+        // 5. 恢复为 ACTIVE + NORMAL（唯一可正常流转组合）并正常提交进入 PENDING 状态
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'ACTIVE', risk_status = 'NORMAL' WHERE id = ?", batchId);
         mockMvc.perform(post("/api/v1/transfers/" + transferId + "/submit")
                         .session(senderSession)
                         .with(csrf())
@@ -881,8 +1063,8 @@ class TransferMysqlIntegrationTest {
                         .content(objectMapper.writeValueAsString(new TransferSubmitRequest(OffsetDateTime.now(ZoneOffset.UTC), 0L))))
                 .andExpect(status().isOk());
 
-        // 6. 在途 PENDING 期间批次被质量冻结 (FROZEN)：接收方尝试 accept 拦截抛 409 BATCH_FLOW_BLOCKED
-        jdbcTemplate.update("UPDATE batch SET status = 'FROZEN' WHERE id = ?", batchId);
+        // 6. 在途 PENDING 期间批次被质量冻结 (ACTIVE + FROZEN)：接收方尝试 accept 拦截抛 409 BATCH_FLOW_BLOCKED
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'ACTIVE', risk_status = 'FROZEN' WHERE id = ?", batchId);
         mockMvc.perform(post("/api/v1/transfers/" + transferId + "/accept")
                         .session(receiverSession)
                         .with(csrf())
@@ -926,8 +1108,8 @@ class TransferMysqlIntegrationTest {
                         .content(objectMapper.writeValueAsString(new TransferSubmitRequest(OffsetDateTime.now(ZoneOffset.UTC), 0L))))
                 .andExpect(status().isOk());
 
-        // PENDING 后批次变为 RECALLED
-        jdbcTemplate.update("UPDATE batch SET status = 'RECALLED' WHERE id = ?", batchId2);
+        // PENDING 后批次进入召回风险状态 (ACTIVE + RECALLED)
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'ACTIVE', risk_status = 'RECALLED' WHERE id = ?", batchId2);
 
         // accept 必须 409 BATCH_FLOW_BLOCKED
         mockMvc.perform(post("/api/v1/transfers/" + transferId2 + "/accept")

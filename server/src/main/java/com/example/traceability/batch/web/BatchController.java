@@ -30,7 +30,7 @@ import java.util.List;
 /**
  * 追溯批次生命周期控制器。
  * <p>
- * 提供批次分页查询、详情查看、草稿创建、草稿增量更新以及草稿提交激活等接口。
+ * 提供批次分页查询（支持双编号与双状态过滤）、详情查看、草稿创建、草稿增量更新以及草稿提交激活等接口。
  * 读操作需已认证用户，写操作严格限定为 OPERATOR 角色并校验 CSRF。
  * </p>
  *
@@ -51,20 +51,26 @@ public class BatchController {
     /**
      * 分页查询批次列表。
      *
-     * @param status    批次状态代码（可选）
-     * @param page      页码（从 1 开始，默认 1）
-     * @param size      分页大小（默认 20，范围 1~100）
-     * @param principal 当前认证主体
+     * @param traceBatchNo    服务端追溯批次号（可选）
+     * @param externalBatchNo 外部业务批次号（可选）
+     * @param flowStatus      批次流转状态代码（可选）
+     * @param riskStatus      批次风险状态代码（可选）
+     * @param page            页码（从 1 开始，默认 1）
+     * @param size            分页大小（默认 20，范围 1~100）
+     * @param principal       当前认证主体
      * @return 批次列表分页封套
      */
     @GetMapping
     public SuccessEnvelope<List<BatchResponse>> listBatches(
-            @RequestParam(required = false) String status,
-            @RequestParam(defaultValue = "1") @Min(value = 1, message = "页码 page 最小值为 1") int page,
-            @RequestParam(defaultValue = "20") @Min(value = 1, message = "分页大小 size 最小值为 1") @Max(value = 100, message = "分页大小 size 最大值为 100") int size,
+            @RequestParam(name = "traceBatchNo", required = false) String traceBatchNo,
+            @RequestParam(name = "externalBatchNo", required = false) String externalBatchNo,
+            @RequestParam(name = "flowStatus", required = false) String flowStatus,
+            @RequestParam(name = "riskStatus", required = false) String riskStatus,
+            @RequestParam(name = "page", defaultValue = "1") @Min(value = 1, message = "页码 page 最小值为 1") int page,
+            @RequestParam(name = "size", defaultValue = "20") @Min(value = 1, message = "分页大小 size 最小值为 1") @Max(value = 100, message = "分页大小 size 最大值为 100") int size,
             @AuthenticationPrincipal TraceSecurityPrincipal principal
     ) {
-        BatchQueryCriteria criteria = new BatchQueryCriteria(status, page, size);
+        BatchQueryCriteria criteria = new BatchQueryCriteria(traceBatchNo, externalBatchNo, flowStatus, riskStatus, page, size);
         return batchService.listBatches(criteria, principal);
     }
 
@@ -77,7 +83,7 @@ public class BatchController {
      */
     @GetMapping("/{batchId}")
     public SuccessEnvelope<BatchResponse> getBatch(
-            @PathVariable Long batchId,
+            @PathVariable("batchId") Long batchId,
             @AuthenticationPrincipal TraceSecurityPrincipal principal
     ) {
         return SuccessEnvelope.of(batchService.getBatchById(batchId, principal));
@@ -111,7 +117,7 @@ public class BatchController {
      */
     @PatchMapping("/{batchId}")
     public SuccessEnvelope<BatchResponse> patchBatch(
-            @PathVariable Long batchId,
+            @PathVariable("batchId") Long batchId,
             @Valid @RequestBody BatchPatchRequest request,
             @AuthenticationPrincipal TraceSecurityPrincipal principal
     ) {
@@ -128,7 +134,7 @@ public class BatchController {
      */
     @PostMapping("/{batchId}/submit")
     public SuccessEnvelope<BatchResponse> submitBatch(
-            @PathVariable Long batchId,
+            @PathVariable("batchId") Long batchId,
             @Valid @RequestBody BatchSubmitRequest request,
             @AuthenticationPrincipal TraceSecurityPrincipal principal
     ) {

@@ -1,7 +1,8 @@
 package com.example.traceability.trace.application;
 
 import com.example.traceability.batch.domain.Batch;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
@@ -170,7 +171,7 @@ class PublicTraceApplicationServiceTest {
             Long batchId = 1000L;
             String key = "idem-activate-123456";
 
-            Batch batch = createBatch(batchId, 201L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name());
             when(idempotencyMapper.selectByOrgIdAndKey(201L, key)).thenReturn(null);
             when(batchMapper.selectByIdAndOrgIdForUpdate(batchId, 201L)).thenReturn(batch);
             when(publicTraceCodeMapper.selectByBatchIdAndOrgId(batchId, 201L)).thenReturn(null);
@@ -334,7 +335,7 @@ class PublicTraceApplicationServiceTest {
             Long batchId = 1000L;
             String key = "idem-activate-new-key1";
 
-            Batch batch = createBatch(batchId, 201L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name());
             PublicTraceCode existingCode = createCode(1L, batchId, 201L, "EXISTINGPUB12345678901234", "ACTIVE");
 
             when(idempotencyMapper.selectByOrgIdAndKey(201L, key)).thenReturn(null);
@@ -355,7 +356,7 @@ class PublicTraceApplicationServiceTest {
             Long batchId = 1000L;
             String key = "idem-activate-new-key1";
 
-            Batch batch = createBatch(batchId, 201L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name());
             PublicTraceCode disabledCode = createCode(1L, batchId, 201L, "EXISTINGPUB12345678901234", "DISABLED");
 
             when(idempotencyMapper.selectByOrgIdAndKey(201L, key)).thenReturn(null);
@@ -374,7 +375,7 @@ class PublicTraceApplicationServiceTest {
             Long batchId = 1000L;
             String key = "idem-activate-123456";
 
-            Batch batch = createBatch(batchId, 201L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name());
             when(idempotencyMapper.selectByOrgIdAndKey(201L, key)).thenReturn(null);
             when(batchMapper.selectByIdAndOrgIdForUpdate(batchId, 201L)).thenReturn(batch);
             when(publicTraceCodeMapper.selectByBatchIdAndOrgId(batchId, 201L)).thenReturn(null);
@@ -407,7 +408,7 @@ class PublicTraceApplicationServiceTest {
             Long batchId = 1000L;
             String key = "idem-disable-123456";
 
-            Batch batch = createBatch(batchId, 201L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name());
             PublicTraceCode code = createCode(1L, batchId, 201L, "PUB1234567890123456789012", "ACTIVE");
 
             when(idempotencyMapper.selectByOrgIdAndKey(201L, key)).thenReturn(null);
@@ -453,7 +454,7 @@ class PublicTraceApplicationServiceTest {
             Long batchId = 1000L;
             String key = "idem-disable-new-key";
 
-            Batch batch = createBatch(batchId, 201L, BatchStatus.ACTIVE.name());
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name());
             PublicTraceCode disabledCode = createCode(1L, batchId, 201L, DISABLED_TEST_PUBLIC_ID, "DISABLED");
 
             when(idempotencyMapper.selectByOrgIdAndKey(201L, key)).thenReturn(null);
@@ -540,8 +541,8 @@ class PublicTraceApplicationServiceTest {
             String secretSentinel = "CONFIDENTIAL_SENTINEL_SUMMARY_SECRET_987654321";
 
             PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
-            Batch batch = createBatch(batchId, 201L, BatchStatus.ACTIVE.name());
-            batch.setBatchNo("BATCH-20260908-001");
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name());
+            batch.setExternalBatchNo("BATCH-20260908-001");
             batch.setOriginText("东海舟山渔场3号捕捞作业区");
             batch.setProductionDate(LocalDate.of(2026, 9, 1));
 
@@ -573,7 +574,8 @@ class PublicTraceApplicationServiceTest {
             assertThat(resp.product().name()).isEqualTo("舟山大黄鱼");
             assertThat(resp.batch().publicBatchNo()).isEqualTo("BAT****001");
             assertThat(resp.batch().maskedOrigin()).isEqualTo("东海****业区");
-            assertThat(resp.batchStatus()).isEqualTo("ACTIVE");
+            assertThat(resp.flowStatus()).isEqualTo("ACTIVE");
+            assertThat(resp.riskStatus()).isEqualTo("NORMAL");
             assertThat(resp.recallNotice()).isNull();
             assertThat(resp.temperatureSummary().result()).isEqualTo("INSUFFICIENT_DATA");
             assertThat(resp.timeline()).hasSize(1);
@@ -609,13 +611,13 @@ class PublicTraceApplicationServiceTest {
         }
 
         @Test
-        @DisplayName("批次处于 RECALLED 状态时如实返回 200 并携带模拟召回声明")
+        @DisplayName("批次处于 RECALLED 风险状态时如实返回 200 并携带模拟召回声明")
         void testRecalledBatchNotice() {
             String publicId = VALID_TEST_PUBLIC_ID;
             Long batchId = 1000L;
 
             PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
-            Batch batch = createBatch(batchId, 201L, BatchStatus.RECALLED.name());
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.RECALLED.name());
 
             when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
             when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
@@ -623,21 +625,89 @@ class PublicTraceApplicationServiceTest {
             when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of());
 
             PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
-            assertThat(resp.batchStatus()).isEqualTo("RECALLED");
+            assertThat(resp.flowStatus()).isEqualTo("ACTIVE");
+            assertThat(resp.riskStatus()).isEqualTo("RECALLED");
             assertThat(resp.recallNotice()).contains("模拟召回演练");
+        }
+
+        @Test
+        @DisplayName("批次处于 CLOSED 状态时已有公开码继续可查询，无召回声明")
+        void testClosedBatchQueryable() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            Long batchId = 1000L;
+
+            PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.CLOSED.name(), BatchRiskStatus.NORMAL.name());
+
+            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
+            when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
+            when(productMapper.selectById(anyLong())).thenReturn(null);
+            when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of());
+
+            PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
+            assertThat(resp.flowStatus()).isEqualTo("CLOSED");
+            assertThat(resp.riskStatus()).isEqualTo("NORMAL");
+            assertThat(resp.recallNotice()).isNull();
+        }
+
+        @Test
+        @DisplayName("批次处于 FROZEN 状态时已有公开码可查询且召回声明为 null")
+        void testFrozenBatchNoticeNull() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            Long batchId = 1000L;
+
+            PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.FROZEN.name());
+
+            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
+            when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
+            when(productMapper.selectById(anyLong())).thenReturn(null);
+            when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of());
+
+            PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
+            assertThat(resp.flowStatus()).isEqualTo("ACTIVE");
+            assertThat(resp.riskStatus()).isEqualTo("FROZEN");
+            assertThat(resp.recallNotice()).isNull();
+        }
+
+        @Test
+        @DisplayName("externalBatchNo 为空时返回脱敏占位 ****，绝不回退暴露 traceBatchNo")
+        void testExternalBatchNoNullMasking() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            Long batchId = 1000L;
+
+            PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.NORMAL.name());
+            batch.setTraceBatchNo("TB-SECRET-TRACE-BATCH-999");
+            batch.setExternalBatchNo(null);
+
+            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
+            when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
+            when(productMapper.selectById(anyLong())).thenReturn(null);
+            when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of());
+
+            PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
+            assertThat(resp.batch().publicBatchNo()).isEqualTo("****");
+            assertThat(resp.batch().publicBatchNo()).doesNotContain("TB-SECRET-TRACE-BATCH-999");
         }
     }
 
-    private Batch createBatch(Long batchId, Long orgId, String status) {
+    private Batch createBatch(Long batchId, Long orgId, String flowStatus, String riskStatus) {
         Batch batch = new Batch();
         batch.setId(batchId);
         batch.setOrgId(orgId);
         batch.setProductId(10L);
-        batch.setBatchNo("BATCH-TEST-001");
+        batch.setTraceBatchNo("TB-" + batchId);
+        batch.setExternalBatchNo("BATCH-TEST-001");
         batch.setBatchType("SOURCE");
-        batch.setStatus(status);
+        batch.setFlowStatus(flowStatus);
+        batch.setRiskStatus(riskStatus);
         batch.setIsDeleted(0);
         return batch;
+    }
+
+    private Batch createBatch(Long batchId, Long orgId, String flowStatus) {
+        return createBatch(batchId, orgId, flowStatus, BatchRiskStatus.NORMAL.name());
     }
 
     private PublicTraceCode createCode(
