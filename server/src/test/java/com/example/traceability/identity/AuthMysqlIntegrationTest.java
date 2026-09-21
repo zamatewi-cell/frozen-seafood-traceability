@@ -311,6 +311,53 @@ class AuthMysqlIntegrationTest {
         assertThat(session.isInvalid()).isTrue();
     }
 
+    @Test
+    @DisplayName("真实 MySQL: 组织目录读取仅返回本组织白名单摘要，读取其他组织返回 403 ORG_SCOPE_DENIED")
+    void organizationDirectoryReadIsScopedToOwnOrganization() throws Exception {
+        String rawPassword = generateRandomPassword();
+        TestFixture fixture = createTestFixture(rawPassword, "ACTIVE", "ACTIVE");
+
+        String otherSuffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        Organization otherOrg = new Organization();
+        otherOrg.setOrgNo("IT_ORG_OTHER_" + otherSuffix);
+        otherOrg.setName("集成测试其他企业_" + otherSuffix);
+        otherOrg.setOrgType("RETAILER");
+        otherOrg.setCreditCode("IT_CREDIT_" + otherSuffix);
+        otherOrg.setStatus("ACTIVE");
+        otherOrg.setIsDeleted(0);
+        otherOrg.setCreatedAt(LocalDateTime.now());
+        otherOrg.setUpdatedAt(LocalDateTime.now());
+        organizationMapper.insert(otherOrg);
+        createdOrgIds.add(otherOrg.getId());
+
+        MvcResult loginResult = mockMvc.perform(post("/api/v1/auth/login")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new LoginRequest(fixture.user().getUsername(), rawPassword))))
+                .andExpect(status().isOk())
+                .andReturn();
+        MockHttpSession session = (MockHttpSession) loginResult.getRequest().getSession(false);
+
+        mockMvc.perform(get("/api/v1/organizations/" + fixture.org().getId()).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.id").value(fixture.org().getId()))
+                .andExpect(jsonPath("$.data.orgNo").value(fixture.org().getOrgNo()))
+                .andExpect(jsonPath("$.data.name").value(fixture.org().getName()))
+                .andExpect(jsonPath("$.data.orgType").value("PROCESSOR"))
+                .andExpect(jsonPath("$.data.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.creditCode").doesNotExist())
+                .andExpect(jsonPath("$.data.version").doesNotExist());
+
+        mockMvc.perform(get("/api/v1/organizations/" + otherOrg.getId()).session(session))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ORG_SCOPE_DENIED"))
+                .andExpect(jsonPath("$.data").doesNotExist());
+
+        mockMvc.perform(get("/api/v1/organizations/" + fixture.org().getId()))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("AUTH_REQUIRED"));
+    }
+
     private TestFixture createTestFixture(String rawPassword, String userStatus, String orgStatus) {
         String randomSuffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
 

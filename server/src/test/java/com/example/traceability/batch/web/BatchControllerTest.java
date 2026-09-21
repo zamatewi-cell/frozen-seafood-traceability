@@ -342,6 +342,56 @@ class BatchControllerTest {
     }
 
     @Test
+    @DisplayName("创建批次草稿 - 客户端夹带 traceBatchNo/creationOrgId/orgId/flowStatus 不会被绑定，响应仍为服务端生成值")
+    void createBatch_ClientSuppliedServerFieldsAreNotBound() throws Exception {
+        OffsetDateTime nowUtc = OffsetDateTime.of(2026, 9, 8, 8, 0, 0, 0, ZoneOffset.UTC);
+        BatchResponse response = new BatchResponse(
+                100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), "kg",
+                "DOMESTIC_CAPTURE", "来源说明", null, null, null, null,
+                "DRAFT", "NORMAL", 0L, nowUtc, 101L, nowUtc, 101L
+        );
+        org.mockito.ArgumentCaptor<BatchCreateRequest> captor = org.mockito.ArgumentCaptor.forClass(BatchCreateRequest.class);
+        when(batchService.createDraftBatch(captor.capture(), eq(VALID_IDEMPOTENCY_KEY), any(TraceSecurityPrincipal.class)))
+                .thenReturn(response);
+
+        String body = """
+                {
+                    "traceBatchNo": "TB-CLIENTCHOSENVALUE0000000",
+                    "creationOrgId": 999,
+                    "orgId": 999,
+                    "flowStatus": "ACTIVE",
+                    "riskStatus": "FROZEN",
+                    "externalBatchNo": "EXT-001",
+                    "productId": 500,
+                    "batchType": "SOURCE",
+                    "quantity": 100.000,
+                    "unitCode": "kg",
+                    "originType": "DOMESTIC_CAPTURE",
+                    "originText": "来源说明"
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/batches")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.traceBatchNo").value("TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                .andExpect(jsonPath("$.data.orgId").value(10))
+                .andExpect(jsonPath("$.data.creationOrgId").doesNotExist());
+
+        // BatchCreateRequest 结构上不声明任何服务端字段，只保留企业可填写的 externalBatchNo
+        org.assertj.core.api.Assertions.assertThat(captor.getValue().externalBatchNo()).isEqualTo("EXT-001");
+        org.assertj.core.api.Assertions.assertThat(
+                java.util.Arrays.stream(BatchCreateRequest.class.getRecordComponents())
+                        .map(java.lang.reflect.RecordComponent::getName)
+                        .toList())
+                .doesNotContain("traceBatchNo", "creationOrgId", "orgId", "flowStatus", "riskStatus", "version");
+    }
+
+    @Test
     @DisplayName("创建批次草稿校验失败 - 缺少必填项或数量小数位超限返回 400 INVALID_REQUEST")
     void createBatch_ValidationFailure() throws Exception {
         // 缺少 productId 与 batchType

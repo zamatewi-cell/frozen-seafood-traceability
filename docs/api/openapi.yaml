@@ -1,8 +1,28 @@
 openapi: 3.1.0
 info:
   title: 冷冻海产品溯源系统 API
-  version: 0.1.0-draft
-  description: 教学演练原型接口，不代表真实物联网、防伪或第三方认证能力。
+  version: 0.2.0-phase0
+  description: |
+    教学演练原型接口，不代表真实物联网、防伪或第三方认证能力。
+
+    本文档仅描述当前仓库中已真实实现的接口（Phase 0 基线），业务语义以
+    `docs/BUSINESS_CONTRACT_V1.1.md` 为准。Shipment、Sale、温度记录、告警、冻结、召回、
+    检验报告及企业端谱系图等尚未实现的能力不在本文档中声明。
+
+    ## 会话与 CSRF
+
+    - 企业端使用服务端 Session：`POST /auth/login` 成功后下发 HttpOnly、SameSite=Lax 的
+      `TRACESESSION` Cookie，登录时轮换 Session ID 以防会话固定。
+    - 除 GET 外的所有 `/api/v1` 请求（包括 `login` 与 `logout`）都必须携带请求头
+      `X-CSRF-TOKEN`，其值来自 `GET /auth/csrf`。CSRF 凭据保存在服务端 Session 中，
+      缺失或错误时返回 403 `ACCESS_DENIED`。
+    - `logout` 会使 Session 失效；之后任何写请求都必须重新获取 CSRF 凭据。
+    - 已登录会话在每次请求时复核用户、组织和角色活性；任一失效时 Session 被作废并返回 401 `AUTH_REQUIRED`。
+    - 未登录访问受保护接口返回 401 `AUTH_REQUIRED`（`application/problem+json`）。
+
+    ## 序列化约定
+
+    服务端 JSON 采用 `non_null` 序列化：值为 null 的可选字段在响应中**被省略**，而不是输出 `null`。
   license:
     name: Proprietary teaching project
     identifier: LicenseRef-Proprietary
@@ -18,10 +38,10 @@ tags:
     description: 追溯事件与谱系查询
   - name: Transfers
     description: 企业交接确认
-  - name: Quality
-    description: 温控、告警、冻结与模拟召回
+  - name: Organizations
+    description: 企业端最小只读组织目录
   - name: Products
-    description: 平台级产品主数据管理
+    description: 平台级产品主数据管理（企业用户只读）
   - name: TemperatureRules
     description: 分阶段版本化温控基准规则
   - name: Public
@@ -31,6 +51,7 @@ paths:
     get:
       tags: [Auth]
       summary: 获取会话绑定的 CSRF 凭据
+      description: 匿名可访问。若尚无 Session 会创建一个匿名 Session 并在其中保存 CSRF 凭据；后续写请求须把 `token` 放入 `headerName` 指定的请求头。
       operationId: getCsrfToken
       security: []
       responses:
@@ -51,8 +72,14 @@ paths:
     post:
       tags: [Auth]
       summary: 登录并建立服务端会话
+      description: |
+        需要携带 `X-CSRF-TOKEN`。成功后轮换 Session ID 并返回当前用户白名单信息。
+        用户名或密码错误、账户或组织不可用统一返回 401 `AUTH_CREDENTIALS_INVALID`；
+        缺失 CSRF 凭据返回 403 `ACCESS_DENIED`；请求体校验失败返回 400 `INVALID_REQUEST`。
       operationId: login
       security: []
+      parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
       requestBody:
         required: true
         content:
@@ -67,7 +94,10 @@ paths:
     post:
       tags: [Auth]
       summary: 注销当前会话
+      description: 需要已登录并携带 `X-CSRF-TOKEN`；成功后 Session 失效，返回 204 无响应体。
       operationId: logout
+      parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
       responses:
         '204': {description: 会话已注销}
         '401': {$ref: '#/components/responses/Problem'}
@@ -76,6 +106,7 @@ paths:
     get:
       tags: [Auth]
       summary: 获取当前用户与数据范围
+      description: 用于前端刷新页面后恢复会话。未登录或会话失效时返回 401 `AUTH_REQUIRED`。
       operationId: getCurrentUser
       responses:
         '200':
@@ -89,10 +120,42 @@ paths:
                     properties:
                       data: {$ref: '#/components/schemas/CurrentUser'}
         '401': {$ref: '#/components/responses/Problem'}
+  /organizations/{orgId}:
+    parameters:
+      - name: orgId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+    get:
+      tags: [Organizations]
+      summary: 读取组织白名单摘要（最小只读目录）
+      description: |
+        权限规则：
+        - 企业用户（非 PLATFORM 作用域）只能读取本组织（`orgId` 等于当前登录组织）；
+          读取其他组织一律返回 403 `ORG_SCOPE_DENIED`，且不区分目标组织是否存在；
+        - PLATFORM 作用域可读取任意组织；目标不存在或已逻辑删除返回 404 `RESOURCE_NOT_FOUND`；
+        - 只返回 `id/orgNo/name/orgType/status`，绝不返回统一社会信用代码、版本号、审计人等字段；
+        - 不提供组织列表、创建、修改或删除能力。
+      operationId: getOrganization
+      responses:
+        '200':
+          description: 组织白名单摘要
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/OrganizationSummary'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
   /products:
     get:
       tags: [Products]
       summary: 分页多条件查询产品主数据列表
+      description: 任意已登录用户可读；产品为平台级主数据，不按组织隔离。
       operationId: listProducts
       parameters:
         - {$ref: '#/components/parameters/Page'}
@@ -148,6 +211,7 @@ paths:
     get:
       tags: [Products]
       summary: 查询指定海产品详情
+      description: 任意已登录用户可读；企业端批次列表与详情用它展示产品名称和规格。
       operationId: getProduct
       responses:
         '200':
@@ -241,13 +305,31 @@ paths:
     get:
       tags: [Batches]
       summary: 按权限范围分页查询批次
+      description: |
+        数据范围：企业用户只能看到**当前责任组织**（`orgId`）为本组织的批次；
+        PLATFORM 作用域可查询全平台批次。创建组织（服务端内部 `creationOrgId`）不参与列表可见性判断。
+        结果按 `id` 倒序分页；`meta.page` 返回分页元数据。
+        非法的 `flowStatus` / `riskStatus` 取值返回 400 `INVALID_REQUEST`。
       operationId: listBatches
       parameters:
         - {$ref: '#/components/parameters/Page'}
         - {$ref: '#/components/parameters/Size'}
-        - name: status
+        - name: traceBatchNo
           in: query
-          schema: {$ref: '#/components/schemas/BatchStatus'}
+          description: 按服务端追溯批次号精确过滤
+          schema: {type: string}
+        - name: externalBatchNo
+          in: query
+          description: 按企业外部批号精确过滤（外部批号可重复，可能命中多条）
+          schema: {type: string}
+        - name: flowStatus
+          in: query
+          description: 按流转状态过滤
+          schema: {$ref: '#/components/schemas/BatchFlowStatus'}
+        - name: riskStatus
+          in: query
+          description: 按风险状态过滤
+          schema: {$ref: '#/components/schemas/BatchRiskStatus'}
       responses:
         '200':
           description: 批次分页结果
@@ -260,6 +342,11 @@ paths:
     post:
       tags: [Batches]
       summary: 创建批次草稿（仅限企业操作员）
+      description: |
+        仅 OPERATOR 角色可调用。服务端生成全局唯一 `traceBatchNo`，客户端**不能**指定或覆盖；
+        请求体中夹带的 `traceBatchNo`、`orgId`、`creationOrgId`、`flowStatus`、`riskStatus` 等服务端字段会被忽略。
+        新批次为 `DRAFT` + `NORMAL`，`orgId`（当前责任组织）与内部 `creationOrgId`（创建组织）均为当前登录组织。
+        `Idempotency-Key` 的作用域是不可变的创建组织；同 key 同载荷重放返回原批次，同 key 不同载荷返回 409 `IDEMPOTENCY_KEY_REUSED`。
       operationId: createBatch
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -286,6 +373,7 @@ paths:
     get:
       tags: [Batches]
       summary: 获取批次详情
+      description: 企业用户只能读取当前责任组织为本组织的批次，否则 403 `ORG_SCOPE_DENIED`；不存在返回 404 `RESOURCE_NOT_FOUND`。
       operationId: getBatch
       responses:
         '200':
@@ -299,6 +387,7 @@ paths:
     patch:
       tags: [Batches]
       summary: 更新批次草稿（仅限企业操作员）
+      description: 仅允许当前责任组织更新 `DRAFT` + `NORMAL` 批次的可变字段；`traceBatchNo` 不可修改。
       operationId: updateDraftBatch
       requestBody:
         required: true
@@ -322,6 +411,7 @@ paths:
     post:
       tags: [Batches]
       summary: 提交激活批次草稿（仅限企业操作员）
+      description: '`DRAFT` + `NORMAL` → `ACTIVE` + `NORMAL`；关联产品必须为 ACTIVE。'
       operationId: submitBatch
       requestBody:
         required: true
@@ -442,31 +532,6 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
-  /batches/{batchId}/genealogy:
-    get:
-      tags: [Trace]
-      summary: 正向、反向或双向查询批次谱系
-      operationId: getBatchGenealogy
-      parameters:
-        - {$ref: '#/components/parameters/BatchId'}
-        - name: direction
-          in: query
-          schema: {type: string, enum: [UPSTREAM, DOWNSTREAM, BOTH], default: BOTH}
-        - name: maxDepth
-          in: query
-          schema: {type: integer, minimum: 1, maximum: 50, default: 12}
-      responses:
-        '200':
-          description: 权限裁剪后的谱系图
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - {$ref: '#/components/schemas/SuccessEnvelope'}
-                  - type: object
-                    properties:
-                      data: {$ref: '#/components/schemas/Genealogy'}
-        '403': {$ref: '#/components/responses/Problem'}
   /batches/{batchId}/events:
     get:
       tags: [Trace]
@@ -554,86 +619,6 @@ paths:
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
-        '422': {$ref: '#/components/responses/Problem'}
-  /temperature-records:
-    post:
-      tags: [Quality]
-      summary: 录入温度并按适用规则判定
-      operationId: createTemperatureRecord
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/CreateTemperatureRecordRequest'}
-      responses:
-        '201':
-          description: 温度记录及判定结果
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - {$ref: '#/components/schemas/SuccessEnvelope'}
-                  - type: object
-                    properties:
-                      data: {$ref: '#/components/schemas/TemperatureRecord'}
-        '422': {$ref: '#/components/responses/Problem'}
-  /alerts/{alertId}/acknowledge:
-    post:
-      tags: [Quality]
-      summary: 质量管理员确认告警
-      operationId: acknowledgeAlert
-      parameters:
-        - name: alertId
-          in: path
-          required: true
-          schema: {type: integer, format: int64}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      responses:
-        '200': {description: 告警已确认}
-        '409': {$ref: '#/components/responses/Problem'}
-  /batches/{batchId}/freeze:
-    post:
-      tags: [Quality]
-      summary: 冻结批次并阻止后续流转
-      operationId: freezeBatch
-      parameters:
-        - {$ref: '#/components/parameters/BatchId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [reason]
-              properties:
-                reason: {type: string, minLength: 2, maxLength: 500}
-      responses:
-        '200': {description: 批次已冻结}
-        '409': {$ref: '#/components/responses/Problem'}
-  /recalls:
-    post:
-      tags: [Quality]
-      summary: 创建模拟召回草稿
-      operationId: createRecall
-      parameters:
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/CreateRecallRequest'}
-      responses:
-        '201':
-          description: 模拟召回草稿
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - {$ref: '#/components/schemas/SuccessEnvelope'}
-                  - type: object
-                    properties:
-                      data: {$ref: '#/components/schemas/Recall'}
         '422': {$ref: '#/components/responses/Problem'}
   /transfers:
     get:
@@ -830,6 +815,9 @@ paths:
     get:
       tags: [Public]
       summary: 查询消费者公开追溯投影
+      description: |
+        匿名可访问，不需要 Session 或 CSRF。格式非法、不存在与已停用的公开码统一返回 404 `PUBLIC_TRACE_NOT_FOUND`。
+        当前投影只包含目标 Batch 自身的有效事件，尚未聚合祖先谱系。
       operationId: getPublicTrace
       security: []
       parameters:
@@ -853,7 +841,6 @@ paths:
                     properties:
                       data: {$ref: '#/components/schemas/PublicTrace'}
         '404': {$ref: '#/components/responses/Problem'}
-        '429': {$ref: '#/components/responses/Problem'}
 components:
   securitySchemes:
     sessionCookie:
@@ -879,6 +866,12 @@ components:
       in: header
       required: true
       schema: {type: string, minLength: 16, maxLength: 128}
+    CsrfHeader:
+      name: X-CSRF-TOKEN
+      in: header
+      required: true
+      description: 来自 `GET /auth/csrf` 的会话绑定 CSRF 凭据。所有非 GET 的 `/api/v1` 请求都必须携带。
+      schema: {type: string}
   responses:
     Problem:
       description: 标准问题详情
@@ -973,6 +966,17 @@ components:
         orgType: {type: string}
         roles: {type: array, items: {type: string}}
         scopes: {type: array, items: {type: string}}
+    OrganizationSummary:
+      type: object
+      additionalProperties: false
+      required: [id, orgNo, name, orgType, status]
+      description: 组织白名单摘要，不包含统一社会信用代码等敏感字段。
+      properties:
+        id: {type: integer, format: int64}
+        orgNo: {type: string}
+        name: {type: string}
+        orgType: {type: string, description: 组织类型代码，例如 SOURCE / PROCESSOR / RETAILER / PLATFORM}
+        status: {type: string, description: 组织状态代码}
     ProductStatus:
       type: string
       enum: [DRAFT, ACTIVE, INACTIVE]
@@ -1138,21 +1142,35 @@ components:
       type: string
       enum: [DOMESTIC_CAPTURE, DOMESTIC_FARMED, IMPORT]
       description: 水产品来源类型 (DOMESTIC_CAPTURE 国内捕捞, DOMESTIC_FARMED 国内养殖, IMPORT 进口)
-    BatchStatus:
+    BatchFlowStatus:
       type: string
-      enum: [DRAFT, ACTIVE, FROZEN, RECALLED, CLOSED]
-      description: 批次生命周期状态 (DRAFT 草稿, ACTIVE 生效流转, FROZEN 冻结, RECALLED 召回, CLOSED 关闭)
+      enum: [DRAFT, ACTIVE, CLOSED]
+      description: 批次流转状态 (DRAFT 草稿, ACTIVE 可流转, CLOSED 正常流转已结束)；状态机 DRAFT → ACTIVE → CLOSED
+    BatchRiskStatus:
+      type: string
+      enum: [NORMAL, FROZEN, RECALLED]
+      description: 批次风险状态 (NORMAL 正常, FROZEN 冻结待调查, RECALLED 已进入模拟召回)；与流转状态正交，禁止 DRAFT+FROZEN 与 DRAFT+RECALLED
     Batch:
       type: object
       additionalProperties: false
-      required: [id, orgId, productId, batchNo, batchType, quantity, unitCode, originType, originText, status, version]
+      description: |
+        追溯批次白名单投影。正常业务写操作的共同前提是 `flowStatus=ACTIVE` 且 `riskStatus=NORMAL`。
+        服务端另保存不可变的创建组织 `creationOrgId`（仅用于创建幂等作用域与审计），它不随 Transfer 改变、
+        不对客户端开放写入，也**不**出现在本响应中。
+      required: [id, orgId, productId, traceBatchNo, batchType, quantity, unitCode, originType, originText, flowStatus, riskStatus, version]
       properties:
         id: {type: integer, format: int64}
-        orgId: {type: integer, format: int64}
+        orgId: {type: integer, format: int64, description: 当前责任组织 ID；只有 Transfer ACCEPTED 才会转移给接收方}
         productId: {type: integer, format: int64}
-        batchNo: {type: string, minLength: 1, maxLength: 64}
+        traceBatchNo:
+          type: string
+          readOnly: true
+          maxLength: 128
+          description: 服务端生成的全局唯一追溯批次号，创建后不可修改，跨企业稳定。新建批次格式为 `TB-` + 26 位 Base32；V8 迁移的历史批次为 `TB-H-` + 64 位十六进制
+          example: TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ
+        externalBatchNo: {type: string, maxLength: 64, description: 企业可选的外部批号，可重复，不作为批次身份；未填写时字段省略}
         batchType: {$ref: '#/components/schemas/BatchType'}
-        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次初始/声明数量，可用量派生}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次声明数量（剩余量由业务记录派生，本接口不返回）}
         unitCode: {type: string, example: kg}
         originType: {$ref: '#/components/schemas/OriginType'}
         originText: {type: string, maxLength: 255}
@@ -1160,7 +1178,8 @@ components:
         captureDate: {type: string, format: date}
         freezeDate: {type: string, format: date}
         shelfLifeDays: {type: integer, minimum: 1}
-        status: {$ref: '#/components/schemas/BatchStatus'}
+        flowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
+        riskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
         version: {type: integer, format: int64, minimum: 0}
         createdAt: {type: string, format: date-time}
         createdBy: {type: integer, format: int64}
@@ -1168,13 +1187,14 @@ components:
         updatedBy: {type: integer, format: int64}
     CreateBatchRequest:
       type: object
-      required: [batchNo, productId, batchType, quantity, unitCode, originType, originText]
+      description: 不包含 `traceBatchNo`、`orgId`、`creationOrgId`、`flowStatus`、`riskStatus`；这些字段由服务端决定，客户端夹带时被忽略。
+      required: [productId, batchType, quantity, unitCode, originType, originText]
       properties:
-        batchNo: {type: string, minLength: 1, maxLength: 64}
+        externalBatchNo: {type: string, maxLength: 64, description: 可选企业外部批号，可重复；空白视为未填写}
         productId: {type: integer, format: int64}
         batchType: {$ref: '#/components/schemas/BatchType'}
-        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次初始/声明数量}
-        unitCode: {type: string, example: kg}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次声明数量}
+        unitCode: {type: string, enum: [kg], example: kg}
         originType: {$ref: '#/components/schemas/OriginType'}
         originText: {type: string, maxLength: 255}
         productionDate: {type: string, format: date}
@@ -1183,10 +1203,12 @@ components:
         shelfLifeDays: {type: integer, minimum: 1}
     UpdateBatchRequest:
       type: object
+      description: 只更新提供的字段；`traceBatchNo` 与状态字段不可通过本接口修改。
       required: [version]
       properties:
         version: {type: integer, format: int64, minimum: 0}
-        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 修正后的批次初始/声明数量}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 修正后的批次声明数量}
+        externalBatchNo: {type: string, maxLength: 64, description: 企业外部批号；传空白字符串表示清除}
         originText: {type: string, maxLength: 255}
         productionDate: {type: string, format: date}
         captureDate: {type: string, format: date}
@@ -1276,25 +1298,6 @@ components:
         updatedBy: {type: integer, format: int64, description: 最后更新人用户ID}
         items: {type: array, items: {$ref: '#/components/schemas/BatchOperationItem'}}
         relations: {type: array, items: {$ref: '#/components/schemas/BatchOperationRelation'}}
-    Genealogy:
-      type: object
-      required: [rootBatchId, nodes, edges, truncated]
-      properties:
-        rootBatchId: {type: integer, format: int64}
-        nodes: {type: array, items: {$ref: '#/components/schemas/Batch'}}
-        edges:
-          type: array
-          items:
-            type: object
-            required: [operationId, parentBatchId, childBatchId, relationType]
-            properties:
-              operationId: {type: integer, format: int64}
-              parentBatchId: {type: integer, format: int64}
-              childBatchId: {type: integer, format: int64}
-              relationType: {type: string}
-        truncated: {type: boolean}
-        visitedNodes: {type: integer}
-        maxDepthReached: {type: integer}
     TraceEventType:
       type: string
       enum:
@@ -1374,45 +1377,6 @@ components:
     DataSource:
       type: string
       enum: [MANUAL, IMPORT, SIMULATED, DEVICE]
-    CreateTemperatureRecordRequest:
-      type: object
-      required: [stageCode, measuredAt, temperature, unitCode, dataSource]
-      properties:
-        batchId: {type: integer, format: int64}
-        shipmentId: {type: integer, format: int64}
-        stageCode: {type: string}
-        measuredAt: {type: string, format: date-time}
-        temperature: {type: number, multipleOf: 0.01}
-        unitCode: {type: string, const: CELSIUS}
-        dataSource: {$ref: '#/components/schemas/DataSource'}
-        deviceNo: {type: string, maxLength: 64}
-    TemperatureRecord:
-      allOf:
-        - {$ref: '#/components/schemas/CreateTemperatureRecordRequest'}
-        - type: object
-          required: [id, recordedAt, ruleStageId, evaluation]
-          properties:
-            id: {type: integer, format: int64}
-            recordedAt: {type: string, format: date-time}
-            ruleStageId: {type: integer, format: int64}
-            evaluation: {type: string, enum: [NORMAL, HIGH, LOW, MISSING_CONTEXT]}
-    CreateRecallRequest:
-      type: object
-      required: [rootBatchId, reason, severity, affectedBatchIds]
-      properties:
-        rootBatchId: {type: integer, format: int64}
-        reason: {type: string, minLength: 2, maxLength: 1000}
-        severity: {type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL]}
-        affectedBatchIds: {type: array, minItems: 1, uniqueItems: true, items: {type: integer, format: int64}}
-        notificationSummary: {type: string, maxLength: 1000}
-    Recall:
-      type: object
-      required: [id, recallNo, status, simulated]
-      properties:
-        id: {type: integer, format: int64}
-        recallNo: {type: string}
-        status: {type: string, enum: [DRAFT, IN_PROGRESS, CLOSED, CANCELLED]}
-        simulated: {type: boolean, const: true}
     PublicTraceCodeEnvelope:
       allOf:
         - {$ref: '#/components/schemas/SuccessEnvelope'}
@@ -1441,7 +1405,7 @@ components:
     PublicTrace:
       type: object
       additionalProperties: false
-      required: [publicTraceId, product, batch, timeline, temperatureSummary, batchStatus, queriedAt, disclosure]
+      required: [publicTraceId, product, batch, timeline, temperatureSummary, flowStatus, riskStatus, queriedAt, disclosure]
       properties:
         publicTraceId:
           type: string
@@ -1461,12 +1425,10 @@ components:
           additionalProperties: false
           required: [publicBatchNo, originType, maskedOrigin]
           properties:
-            publicBatchNo: {type: string}
+            publicBatchNo: {type: string, description: 掩码后的企业外部批号；未填写外部批号时为 `****`。不暴露 traceBatchNo 或内部 ID}
             originType: {type: string}
             maskedOrigin: {type: string}
-            productionDate:
-              type: [string, "null"]
-              format: date
+            productionDate: {type: string, format: date, description: 未填写时字段省略}
         timeline:
           type: array
           items:
@@ -1484,9 +1446,14 @@ components:
           properties:
             result: {type: string, enum: [NO_BREACH_RECORDED, BREACH_RECORDED, INSUFFICIENT_DATA]}
             ruleNote: {type: string}
-        batchStatus: {type: string, enum: [ACTIVE, FROZEN, RECALLED, CLOSED]}
+        flowStatus:
+          allOf:
+            - {$ref: '#/components/schemas/BatchFlowStatus'}
+          description: 批次流转状态。公开码只能在 ACTIVE+NORMAL 时激活，因此实际为 ACTIVE 或 CLOSED；CLOSED 后已激活码继续可查询
+        riskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
         recallNotice:
-          type: [string, "null"]
+          type: string
+          description: 仅当 riskStatus=RECALLED 时出现的模拟召回提示；其他情况字段省略
         queriedAt: {type: string, format: date-time}
         disclosure: {type: string}
     TransferStatus:
