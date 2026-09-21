@@ -6,8 +6,8 @@ import type { PagedResult, PageMeta, ProblemDetails, SuccessEnvelope } from '@/t
  *
  * - 统一拼接 API 根路径，并始终携带 Cookie（服务端 Session）；
  * - 统一 JSON 序列化与 SuccessEnvelope 解包，分页请求返回 meta.page；
- * - 非 GET 的 /api/v1 请求自动附带会话绑定的 CSRF 凭据（来自 GET /api/v1/auth/csrf），
- *   凭据失效（403）时刷新并重试一次；
+ * - 非 GET 的 /api/v1 请求自动附带会话绑定的 CSRF 凭据（来自 GET /api/v1/auth/csrf）；
+ *   写请求返回 403 时不自动重发，只丢弃缓存凭据，下一次写请求会重新获取；
  * - 401 统一回调已注册的未认证处理器（清理会话并回到登录页）；
  * - 解析 RFC 9457 Problem Details、网络错误与超时；
  * - 不在任何浏览器持久化存储中保存凭据或业务数据。
@@ -189,10 +189,9 @@ async function request(endpoint: string, options: RequestOptions): Promise<RawRe
     const token = await loadCsrfToken(options.signal)
     result = await send(normalizedEndpoint, options, { [token.headerName]: token.token })
     if (result.status === 403) {
-      // 会话轮换或失效后旧凭据不再有效：刷新一次 CSRF 凭据后重试
+      // 后端对 CSRF 失效与权限不足统一返回 403 ACCESS_DENIED，无法区分：
+      // 绝不自动重发写请求，只丢弃可能过期的凭据，由用户显式重试时重新获取
       clearCsrfToken()
-      const fresh = await loadCsrfToken(options.signal)
-      result = await send(normalizedEndpoint, options, { [fresh.headerName]: fresh.token })
     }
   } else {
     result = await send(normalizedEndpoint, options, {})

@@ -49,24 +49,29 @@ describe('enterprise API client', () => {
     expect(calls[2].headers['X-CSRF-TOKEN']).toBe('csrf-token-1')
   })
 
-  it('refreshes a rejected CSRF token once and retries the write request', async () => {
+  it('never resends a write request rejected with 403 and fetches a fresh token for the next write', async () => {
     let tokenVersion = 0
-    let attempts = 0
+    const writes: string[] = []
     const { calls } = installFakeFetch({
       'GET /api/v1/auth/csrf': () => {
         tokenVersion += 1
         return { status: 200, body: envelope({ headerName: 'X-CSRF-TOKEN', parameterName: '_csrf', token: `token-${tokenVersion}` }) }
       },
-      'POST /api/v1/auth/logout': (call) => {
-        attempts += 1
-        return call.headers['X-CSRF-TOKEN'] === 'token-2' ? { status: 204 } : problem(403, 'ACCESS_DENIED')
+      'POST /api/v1/batches': (call) => {
+        writes.push(call.headers['X-CSRF-TOKEN'])
+        return problem(403, 'ACCESS_DENIED', '当前操作需要企业操作员角色 (OPERATOR)')
       }
     })
 
-    await apiRequest('/api/v1/auth/logout', { method: 'POST' })
+    await expect(apiRequest('/api/v1/batches', { method: 'POST', body: { productId: 1 } }))
+      .rejects.toMatchObject({ status: 403, code: 'ACCESS_DENIED' })
+    // 权限类 403 只发送一次，不被当作 CSRF 失效重发
+    expect(writes).toEqual(['token-1'])
+    expect(calls.filter((c) => c.path === '/api/v1/auth/csrf')).toHaveLength(1)
 
-    expect(attempts).toBe(2)
-    expect(calls.filter((c) => c.path === '/api/v1/auth/csrf')).toHaveLength(2)
+    // 下一次写请求重新获取凭据（兼容凭据确实过期的情况，由用户显式重试）
+    await expect(apiRequest('/api/v1/batches', { method: 'POST', body: { productId: 1 } })).rejects.toBeInstanceOf(ApiError)
+    expect(writes).toEqual(['token-1', 'token-2'])
   })
 
   it('reports 401 to the registered handler and forgets the CSRF token', async () => {

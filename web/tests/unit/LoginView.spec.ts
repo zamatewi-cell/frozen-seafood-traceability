@@ -80,4 +80,36 @@ describe('LoginView and EnterpriseLayout', () => {
     expect(calls.filter((c) => c.method === 'POST').map((c) => c.headers['X-CSRF-TOKEN'])).toEqual(['csrf-token-1', 'csrf-token-1'])
     wrapper.unmount()
   })
+
+  it('stays on the page with an error when logout fails and succeeds on retry', async () => {
+    let logoutAvailable = false
+    let loggedIn = true
+    const { calls } = installFakeFetch({
+      ...CSRF_ROUTE,
+      'GET /api/v1/me': () => (loggedIn ? { status: 200, body: envelope(sampleUser) } : problem(401, 'AUTH_REQUIRED')),
+      'POST /api/v1/auth/logout': () => {
+        if (!logoutAvailable) return problem(502, 'BAD_GATEWAY')
+        loggedIn = false
+        return { status: 204 }
+      }
+    })
+    const { router, wrapper } = await mountAt('/app')
+
+    await wrapper.find('.logout-button').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/app')
+    expect(wrapper.find('[data-testid="logout-error"]').text()).toContain('退出登录失败')
+    expect(useSession().isAuthenticated.value).toBe(true)
+    expect(wrapper.find('[data-testid="workbench-session"]').exists()).toBe(true)
+
+    logoutAvailable = true
+    await wrapper.find('.logout-button').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(useSession().user.value).toBeNull()
+    expect(calls.filter((c) => c.path === '/api/v1/auth/logout')).toHaveLength(2)
+    wrapper.unmount()
+  })
 })

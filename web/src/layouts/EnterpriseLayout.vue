@@ -7,18 +7,22 @@ import { logout, useSession } from '@/stores/session'
 const router = useRouter()
 const { user } = useSession()
 const loggingOut = ref(false)
+const logoutError = ref('')
 
 async function handleLogout() {
   if (loggingOut.value) return
   loggingOut.value = true
+  logoutError.value = ''
   try {
     await logout()
   } catch {
-    // 服务端注销未确认（如网络中断）时，本地会话已由 logout() 清理，仍然离开企业区域
+    // 服务端未确认注销：会话可能仍然有效，留在当前页面并允许重试
+    logoutError.value = '退出登录失败，服务端会话可能仍然有效，请检查网络后重试。'
+    return
   } finally {
     loggingOut.value = false
-    await router.replace('/login')
   }
+  await router.replace('/login')
 }
 </script>
 
@@ -47,6 +51,8 @@ async function handleLogout() {
         </div>
       </div>
     </header>
+
+    <p v-if="logoutError" class="logout-error" role="alert" data-testid="logout-error">{{ logoutError }}</p>
 
     <main class="enterprise-main" role="main">
       <RouterView />
@@ -132,6 +138,17 @@ async function handleLogout() {
 .logout-button:hover:not(:disabled) {
   background-color: rgba(56, 189, 248, 0.16);
 }
+.logout-error {
+  width: calc(100% - 40px);
+  max-width: 1160px;
+  margin: 12px auto 0;
+  padding: 10px 12px;
+  color: var(--color-danger-text);
+  background-color: var(--color-danger-bg);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
 .enterprise-main {
   flex: 1;
   width: 100%;
@@ -141,7 +158,18 @@ async function handleLogout() {
 }
 @media (max-width: 640px) {
   .enterprise-header-inner { padding: 10px 14px; gap: 10px; }
-  .enterprise-main { padding: 12px 10px; }
+  .logout-error {
+  width: calc(100% - 40px);
+  max-width: 1160px;
+  margin: 12px auto 0;
+  padding: 10px 12px;
+  color: var(--color-danger-text);
+  background-color: var(--color-danger-bg);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.enterprise-main { padding: 12px 10px; }
   .user-text { text-align: left; }
 }
 </style>

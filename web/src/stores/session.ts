@@ -68,15 +68,18 @@ export async function login(username: string, password: string): Promise<Current
   return user
 }
 
+/**
+ * 注销服务端会话。
+ * 只有服务端确认注销成功，或明确返回 401（会话本已失效）时才清理本地会话；
+ * 网络错误、403、5xx 等无法确认服务端 Session 已失效的情况保留本地状态并抛出，由界面提示并允许重试。
+ */
 export async function logout(): Promise<void> {
   try {
     await authApi.logout()
   } catch (err: unknown) {
-    // 会话已在服务端失效（401）时，本地同样视为已登出
     if (!(err instanceof ApiError && err.status === 401)) throw err
-  } finally {
-    clearSession()
   }
+  clearSession()
 }
 
 export function useSession() {

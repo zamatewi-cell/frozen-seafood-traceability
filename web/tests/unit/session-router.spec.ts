@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeEach } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createAppRouter } from '@/router'
@@ -133,6 +133,38 @@ describe('enterprise session and route guards', () => {
     expect(router.currentRoute.value.query.redirect).toBe('/app/batches')
     const writes = calls.filter((c) => c.method === 'POST')
     expect(writes.every((c) => c.headers['X-CSRF-TOKEN'] === 'csrf-token-1')).toBe(true)
+  })
+
+  it('keeps the local session when logout cannot be confirmed (network error or 5xx)', async () => {
+    serverWithSession(true)
+    const router = createGuardedRouter()
+    await router.push('/app/batches')
+    expect(useSession().isAuthenticated.value).toBe(true)
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/api/v1/auth/csrf')) {
+        return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), json: async () => envelope({ headerName: 'X-CSRF-TOKEN', parameterName: '_csrf', token: 'csrf-token-1' }) } as Response
+      }
+      throw new TypeError('Failed to fetch')
+    }) as unknown as typeof fetch
+    await expect(logout()).rejects.toMatchObject({ status: 0, code: 'NETWORK_ERROR' })
+    expect(useSession().isAuthenticated.value).toBe(true)
+    expect(useSession().user.value?.username).toBe('processor_op')
+
+    installFakeFetch({ ...CSRF_ROUTE, 'POST /api/v1/auth/logout': () => problem(503, 'SERVICE_UNAVAILABLE') })
+    await expect(logout()).rejects.toMatchObject({ status: 503 })
+    expect(useSession().isAuthenticated.value).toBe(true)
+  })
+
+  it('clears the local session when the server reports the session already expired (401)', async () => {
+    serverWithSession(true)
+    const router = createGuardedRouter()
+    await router.push('/app')
+
+    installFakeFetch({ ...CSRF_ROUTE, 'POST /api/v1/auth/logout': () => problem(401, 'AUTH_REQUIRED') })
+    await logout()
+    expect(useSession().isAuthenticated.value).toBe(false)
+    expect(useSession().user.value).toBeNull()
   })
 
   it('protects the production /app route table and keeps /trace anonymous', async () => {

@@ -47,7 +47,8 @@
 - 登录、登出与会话恢复直接调用后端 `POST /api/v1/auth/login`、`POST /api/v1/auth/logout`、`GET /api/v1/me`；
   会话凭据只存在于服务端 Session 的 HttpOnly Cookie（`TRACESESSION`）中，前端仅在内存中保存当前用户信息。
 - 所有非 GET 的 `/api/v1` 请求由 `src/api/client.ts` 自动附带 `GET /api/v1/auth/csrf` 返回的 `X-CSRF-TOKEN`，
-  凭据被拒绝（403）时刷新一次后重试；登出后丢弃旧凭据。
+  写请求返回 403 时不会自动重发（后端对 CSRF 失效与权限不足使用同一错误码），只丢弃缓存凭据，下一次写请求重新获取；登出后丢弃旧凭据。
+- 登出只有在服务端返回成功或明确返回 401 时才清理本地会话；网络错误或 5xx 时保留在当前页面并提示重试。
 - 任一企业接口返回 401 时清理前端会话并回到登录页。
 - 产品与组织名称通过最小只读目录 `GET /api/v1/products/{id}`、`GET /api/v1/organizations/{id}` 获取。
 
