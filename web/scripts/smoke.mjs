@@ -1,12 +1,13 @@
 /**
- * Phase 0 真实浏览器冒烟：真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue。
+ * Phase 0 + Phase A / Slice 1 真实浏览器冒烟：真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue。
  *
  * 1. 在 MySQL 8.4 容器中新建隔离 schema（seafood_trace_phase0_demo_<随机后缀>），绝不触碰 seafood_trace；
  * 2. 以进程级随机 pepper 启动 Spring Boot（Flyway 在空 schema 上执行 V1~V8）；
- * 3. 通过 SQL 准备基础资料（组织、角色、账号、产品），通过真实 HTTP API（CSRF + Session）创建与提交批次、激活公开码；
+ * 3. 通过 SQL 准备基础资料（两个来源组织、角色、账号、产品），通过真实 HTTP API（CSRF + Session）创建与提交来源批次、激活公开码；
  *    Phase 0 没有冻结 / 召回 / 关闭接口，FROZEN、RECALLED、CLOSED 状态在隔离 schema 中直接写入以验证展示与筛选；
- * 4. Playwright 在不使用任何拦截或替身的情况下走完整企业端与消费者路径；
- * 5. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
+ * 4. Playwright 在不使用任何拦截或替身的情况下走完整企业端与消费者路径，并在浏览器中真实新建、激活来源批次 SRC-2026-001；
+ * 5. 浏览器结束后直接查询 MySQL，确认 SRC-2026-001 为 ACTIVE/NORMAL 且恰好一条 SOURCE 事件；
+ * 6. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
  *
  * 密码、pepper、Cookie 与 CSRF 凭据只在进程环境与内存中传递，从不打印。
  */
@@ -189,18 +190,18 @@ function seedMasterData(suffix, passwordA, passwordB) {
   mysql(`
     START TRANSACTION;
     INSERT INTO organization (org_no, name, org_type, credit_code, status)
-      VALUES ('P0_PROC_${suffix}', 'Phase0冒烟加工企业_${suffix}', 'PROCESSOR', 'SMOKE-CREDIT-${suffix}', 'ACTIVE');
+      VALUES ('P0_SRC_A_${suffix}', '冒烟来源捕捞企业_${suffix}', 'SOURCE', 'SMOKE-CREDIT-${suffix}', 'ACTIVE');
     SET @orgA = LAST_INSERT_ID();
     INSERT INTO organization (org_no, name, org_type, credit_code, status)
-      VALUES ('P0_RETAIL_${suffix}', 'Phase0冒烟零售企业_${suffix}', 'RETAILER', 'SMOKE-CREDIT-B-${suffix}', 'ACTIVE');
+      VALUES ('P0_SRC_B_${suffix}', '冒烟来源养殖企业_${suffix}', 'SOURCE', 'SMOKE-CREDIT-B-${suffix}', 'ACTIVE');
     SET @orgB = LAST_INSERT_ID();
     INSERT INTO role (role_code, name, scope_type, status) VALUES ('OPERATOR', '企业操作员', 'ORG_ONLY', 'ACTIVE');
     SET @role = LAST_INSERT_ID();
     INSERT INTO app_user (org_id, username, display_name, password_hash, status)
-      VALUES (@orgA, 'p0_proc_${suffix}', 'Phase0冒烟操作员', ${sqlText(springPbkdf2(passwordA))}, 'ACTIVE');
+      VALUES (@orgA, 'p0_src_a_${suffix}', '冒烟来源操作员', ${sqlText(springPbkdf2(passwordA))}, 'ACTIVE');
     INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
     INSERT INTO app_user (org_id, username, display_name, password_hash, status)
-      VALUES (@orgB, 'p0_retail_${suffix}', 'Phase0冒烟零售操作员', ${sqlText(springPbkdf2(passwordB))}, 'ACTIVE');
+      VALUES (@orgB, 'p0_src_b_${suffix}', '冒烟第二来源操作员', ${sqlText(springPbkdf2(passwordB))}, 'ACTIVE');
     INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
     INSERT INTO product (product_code, public_name, category, specification, source_type, base_unit_code, status)
       VALUES ('P0-YELLOW-${suffix}', 'Phase0冒烟冷冻大黄鱼', 'FISH', '500g/条', 'DOMESTIC_CAPTURE', 'kg', 'ACTIVE');
@@ -209,8 +210,8 @@ function seedMasterData(suffix, passwordA, passwordB) {
     COMMIT;
   `, { database: schema })
   const ids = mysql(`SELECT
-      (SELECT id FROM organization WHERE org_no = 'P0_PROC_${suffix}'),
-      (SELECT id FROM organization WHERE org_no = 'P0_RETAIL_${suffix}'),
+      (SELECT id FROM organization WHERE org_no = 'P0_SRC_A_${suffix}'),
+      (SELECT id FROM organization WHERE org_no = 'P0_SRC_B_${suffix}'),
       (SELECT id FROM product WHERE product_code = 'P0-YELLOW-${suffix}'),
       (SELECT id FROM product WHERE product_code = 'P0-SHRIMP-${suffix}');`, { database: schema }).split('\t').map(Number)
   return { orgA: ids[0], orgB: ids[1], productFish: ids[2], productShrimp: ids[3] }
@@ -224,8 +225,9 @@ async function createBatch(session, request, submit) {
 
 async function seedBusinessData(suffix, master, passwordA, passwordB) {
   const sessionA = new ApiSession()
-  await sessionA.login(`p0_proc_${suffix}`, passwordA)
-  const base = { batchType: 'SOURCE', unitCode: 'kg', originType: 'DOMESTIC_CAPTURE', originText: '东海舟山渔场（冒烟夹具）' }
+  await sessionA.login(`p0_src_a_${suffix}`, passwordA)
+  // 来源批次创建请求不携带 batchType 等服务端字段（服务端固定 SOURCE / DRAFT / NORMAL）
+  const base = { unitCode: 'kg', originType: 'DOMESTIC_CAPTURE', originText: '东海舟山渔场（冒烟夹具）' }
 
   const active = await createBatch(sessionA, { ...base, productId: master.productFish, externalBatchNo: 'P0-EXT-001', quantity: 1000, productionDate: '2026-09-01', captureDate: '2026-08-30', shelfLifeDays: 365 }, true)
   const draft = await createBatch(sessionA, { ...base, productId: master.productFish, externalBatchNo: 'P0-EXT-001', quantity: 250.5 }, false)
@@ -235,7 +237,7 @@ async function seedBusinessData(suffix, master, passwordA, passwordB) {
   const publicCode = await sessionA.write('POST', `/api/v1/batches/${active.id}/public-trace-code/activate`, undefined, { 'Idempotency-Key': randomUUID() })
 
   const sessionB = new ApiSession()
-  await sessionB.login(`p0_retail_${suffix}`, passwordB)
+  await sessionB.login(`p0_src_b_${suffix}`, passwordB)
   const foreign = await createBatch(sessionB, { ...base, productId: master.productFish, externalBatchNo: 'P0-EXT-001', quantity: 77 }, true)
 
   // Phase 0 没有冻结 / 召回 / 关闭业务接口：仅在隔离 schema 中直接写入以验证展示与筛选
@@ -251,6 +253,22 @@ async function seedBusinessData(suffix, master, passwordA, passwordB) {
 function databaseEvidence(orgA) {
   return mysql(`SELECT id, trace_batch_no, IFNULL(external_batch_no, '-'), flow_status, risk_status, org_id = ${orgA}
     FROM batch ORDER BY id;`, { database: schema })
+}
+
+/** 浏览器新建的 SRC-2026-001：恰好一条批次，ACTIVE/NORMAL，属于登录组织，且恰好一条有效 SOURCE 事件。 */
+function verifyBrowserCreatedSourceBatch(orgA) {
+  const rows = mysql(`SELECT b.trace_batch_no, b.batch_type, b.flow_status, b.risk_status, b.org_id = ${orgA}, b.creation_org_id = ${orgA},
+      b.unit_code, b.quantity,
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.event_type = 'SOURCE' AND e.status = 'SUBMITTED'),
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.idempotency_key = CONCAT('SYS:SOURCE:BATCH:', b.id))
+    FROM batch b WHERE b.external_batch_no = 'SRC-2026-001';`, { database: schema })
+  const lines = rows ? rows.split('\n') : []
+  if (lines.length !== 1) throw new Error(`期望恰好 1 条 SRC-2026-001 批次，实际 ${lines.length}`)
+  const [traceBatchNo, batchType, flow, risk, ownedByA, createdByA, unit, quantity, sourceCount, serverKeyCount] = lines[0].split('\t')
+  const ok = /^TB-[0-9A-Z]{26}$/.test(traceBatchNo) && batchType === 'SOURCE' && flow === 'ACTIVE' && risk === 'NORMAL'
+    && ownedByA === '1' && createdByA === '1' && unit === 'kg' && Number(quantity) === 1000 && sourceCount === '1' && serverKeyCount === '1'
+  if (!ok) throw new Error(`SRC-2026-001 数据库事实不符合预期: ${lines[0]}`)
+  console.log(`[smoke] MySQL 确认浏览器新建来源批次: ${traceBatchNo} SOURCE ACTIVE/NORMAL 1000 kg，SOURCE 事件 ${sourceCount} 条（服务端幂等身份 ${serverKeyCount} 条）`)
 }
 
 function runBrowserSmoke(env) {
@@ -293,7 +311,7 @@ try {
   console.log(databaseEvidence(master.orgA).split('\n').map((line) => `  ${line}`).join('\n'))
 
   const expected = {
-    orgName: `Phase0冒烟加工企业_${suffix}`,
+    orgName: `冒烟来源捕捞企业_${suffix}`,
     fishName: 'Phase0冒烟冷冻大黄鱼',
     active: fixture.active.traceBatchNo,
     activeId: fixture.active.id,
@@ -305,11 +323,12 @@ try {
     publicTraceId: fixture.publicTraceId
   }
   runBrowserSmoke({
-    SMOKE_USERNAME: `p0_proc_${suffix}`,
+    SMOKE_USERNAME: `p0_src_a_${suffix}`,
     SMOKE_PASSWORD: passwordA,
     SMOKE_EXPECTED: JSON.stringify(expected)
   })
-  console.log('[smoke] 真实 Vue → Vite proxy → Spring Boot → MySQL 8.4 企业端与消费者冒烟通过')
+  verifyBrowserCreatedSourceBatch(master.orgA)
+  console.log('[smoke] 真实 Vue → Vite proxy → Spring Boot → MySQL 8.4 企业端、来源建批与消费者冒烟通过')
 } catch (error) {
   primaryError = error
 } finally {

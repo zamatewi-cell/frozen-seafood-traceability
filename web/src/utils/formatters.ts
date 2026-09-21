@@ -156,6 +156,40 @@ export function formatBatchType(batchType: string | null | undefined): string {
 }
 
 /**
+ * 企业端追溯事件类型字典。
+ */
+export function formatTraceEventType(eventType: string | null | undefined): string {
+  if (!eventType) return '未标明'
+  const map: Record<string, string> = {
+    SOURCE: '来源（批次激活自动生成）',
+    PURCHASE: '采购收购',
+    PROCESS: '加工',
+    FREEZE: '速冻',
+    PACK: '包装',
+    WAREHOUSE_IN: '冷库入库',
+    WAREHOUSE_OUT: '冷库出库',
+    TRANSPORT: '冷链运输',
+    ARRIVAL: '运输到达',
+    SALE: '终端销售'
+  }
+  return map[eventType] || eventType
+}
+
+/**
+ * 追溯事件数据来源字典。
+ */
+export function formatDataSource(dataSource: string | null | undefined): string {
+  if (!dataSource) return '未标明'
+  const map: Record<string, string> = {
+    MANUAL: '企业人工登记',
+    IMPORT: '批量导入',
+    SIMULATED: '教学模拟数据',
+    DEVICE: '设备申报（非真实设备接入证明）'
+  }
+  return map[dataSource] || dataSource
+}
+
+/**
  * 组织类型字典。
  */
 export function formatOrgType(orgType: string | null | undefined): string {

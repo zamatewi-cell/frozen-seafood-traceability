@@ -3,11 +3,13 @@ import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useSession } from '@/stores/session'
 import { formatOrgType } from '@/utils/formatters'
+import { canManageSourceBatches } from '@/utils/permissions'
 
 const { user } = useSession()
 
 const roles = computed(() => (user.value?.roles.length ? user.value.roles.join('、') : '无'))
 const scopes = computed(() => (user.value?.scopes.length ? user.value.scopes.join('、') : '无'))
+const canCreateSourceBatch = computed(() => canManageSourceBatches(user.value))
 </script>
 
 <template>
@@ -40,6 +42,15 @@ const scopes = computed(() => (user.value?.scopes.length ? user.value.scopes.joi
     <section class="ent-card" aria-labelledby="entry-card-title">
       <h2 id="entry-card-title" class="ent-card-title">业务入口</h2>
       <div class="entry-grid">
+        <RouterLink
+          v-if="canCreateSourceBatch"
+          to="/app/batches/new"
+          class="entry-item"
+          data-testid="entry-new-source-batch"
+        >
+          <strong>新建来源批次</strong>
+          <span>登记本企业的来源批次（捕捞、养殖或进口原料），保存草稿或直接激活。</span>
+        </RouterLink>
         <RouterLink to="/app/batches" class="entry-item" data-testid="entry-batches">
           <strong>我的批次</strong>
           <span>查看当前由本组织负责的追溯批次，按流转状态与风险状态筛选。</span>

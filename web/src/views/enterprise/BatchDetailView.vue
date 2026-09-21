@@ -2,12 +2,15 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
-import { getBatch } from '@/api/batches'
+import { getBatch, listBatchEvents, submitBatch } from '@/api/batches'
 import { ApiError } from '@/api/client'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
-import type { Batch } from '@/types/enterprise'
+import { useSession } from '@/stores/session'
+import type { Batch, TraceEvent } from '@/types/enterprise'
+import { describeWriteError } from '@/utils/apiErrors'
 import {
   formatBatchType,
+  formatDataSource,
   formatDate,
   formatFlowStatus,
   formatIsoDateTime,
@@ -15,8 +18,11 @@ import {
   formatOriginType,
   formatProductCategory,
   formatQuantity,
-  formatRiskStatus
+  formatRiskStatus,
+  formatTraceEventType
 } from '@/utils/formatters'
+import { canManageSourceBatches } from '@/utils/permissions'
+import { takeBatchFlash, type BatchFlash } from './batchFlash'
 import { recalledBatchListQuery } from './batchQuery'
 
 const props = defineProps<{
@@ -24,12 +30,57 @@ const props = defineProps<{
 }>()
 
 type LoadState = 'loading' | 'loaded' | 'not-found' | 'forbidden' | 'error'
+type EventLoadState = 'loading' | 'loaded' | 'forbidden' | 'error'
 
 const directory = useDirectoryLabels()
 const loadState = ref<LoadState>('loading')
 const batch = ref<Batch | null>(null)
 const errorMessage = ref('')
 const backLink = computed(() => ({ path: '/app/batches', query: recalledBatchListQuery() }))
+const { user } = useSession()
+
+const eventState = ref<EventLoadState>('loading')
+const events = ref<TraceEvent[]>([])
+const eventError = ref('')
+
+const flash = ref<BatchFlash | null>(null)
+const submitting = ref(false)
+const submitError = ref('')
+
+/** 只有来源组织 OPERATOR、本组织负责的 DRAFT/NORMAL 来源批次显示“提交激活”；服务端仍独立校验。 */
+const canSubmit = computed(() => {
+  const b = batch.value
+  return Boolean(b && canManageSourceBatches(user.value)
+    && b.orgId === user.value?.orgId
+    && b.batchType === 'SOURCE'
+    && b.flowStatus === 'DRAFT'
+    && b.riskStatus === 'NORMAL')
+})
+
+const SOURCE_DETAIL_LABELS: Record<string, string> = {
+  traceBatchNo: '追溯批次号',
+  originType: '来源类型',
+  originText: '来源说明',
+  quantity: '声明数量',
+  productionDate: '生产日期',
+  captureDate: '捕捞日期',
+  freezeDate: '速冻日期',
+  shelfLifeDays: '保质期（天）'
+}
+
+function sourceFacts(event: TraceEvent): Array<{ label: string; value: string }> {
+  const details = event.detailsJson ?? {}
+  const facts: Array<{ label: string; value: string }> = []
+  for (const [key, label] of Object.entries(SOURCE_DETAIL_LABELS)) {
+    const raw = details[key]
+    if (raw === undefined || raw === null || raw === '') continue
+    let value = String(raw)
+    if (key === 'originType') value = formatOriginType(value)
+    if (key === 'quantity') value = formatQuantity(value, typeof details.unitCode === 'string' ? details.unitCode : null)
+    facts.push({ label, value })
+  }
+  return facts
+}
 
 const product = computed(() => {
   if (!batch.value) return null
@@ -44,6 +95,32 @@ const organization = computed(() => {
 })
 
 let activeRequest: AbortController | null = null
+let eventRequest: AbortController | null = null
+
+async function loadEvents(batchId: number) {
+  eventRequest?.abort()
+  const controller = new AbortController()
+  eventRequest = controller
+  eventState.value = 'loading'
+  eventError.value = ''
+  try {
+    const result = await listBatchEvents(batchId, controller.signal)
+    if (controller.signal.aborted) return
+    events.value = result
+    eventState.value = 'loaded'
+  } catch (err: unknown) {
+    if (controller.signal.aborted) return
+    events.value = []
+    if (err instanceof ApiError && err.status === 403) {
+      eventState.value = 'forbidden'
+    } else {
+      eventState.value = 'error'
+      eventError.value = err instanceof ApiError
+        ? `${err.message}${err.requestId ? `（请求编号 ${err.requestId}）` : ''}`
+        : '追溯事件加载失败，请稍后重试'
+    }
+  }
+}
 
 async function load() {
   activeRequest?.abort()
@@ -66,6 +143,7 @@ async function load() {
     loadState.value = 'loaded'
     directory.resolveProducts([result.productId])
     directory.resolveOrganizations([result.orgId])
+    loadEvents(result.id)
   } catch (err: unknown) {
     if (controller.signal.aborted) return
     if (err instanceof ApiError && err.status === 404) {
@@ -81,13 +159,45 @@ async function load() {
   }
 }
 
-watch(() => props.id, load, { immediate: true })
-onBeforeUnmount(() => activeRequest?.abort())
+async function submitActivation() {
+  const current = batch.value
+  if (!current || submitting.value) return
+  submitting.value = true
+  submitError.value = ''
+  flash.value = null
+  try {
+    await submitBatch(current.id, current.version)
+    flash.value = { tone: 'success', message: '来源批次已激活，系统已自动生成 SOURCE 追溯事件。' }
+    // 以服务端最新数据刷新详情与事件
+    await load()
+  } catch (err: unknown) {
+    if (err instanceof ApiError && err.status === 401) return
+    const message = describeWriteError(err, '提交激活')
+    // 409 表示状态或版本已被修改：刷新详情以展示服务端最新状态，并保留错误提示
+    if (err instanceof ApiError && err.status === 409) await load()
+    submitError.value = message
+  } finally {
+    submitting.value = false
+  }
+}
+
+watch(() => props.id, (id) => {
+  const numericId = Number(id)
+  flash.value = Number.isInteger(numericId) ? takeBatchFlash(numericId) : null
+  submitError.value = ''
+  load()
+}, { immediate: true })
+onBeforeUnmount(() => {
+  activeRequest?.abort()
+  eventRequest?.abort()
+})
 </script>
 
 <template>
   <div class="batch-detail-page">
     <RouterLink :to="backLink" class="ent-button back-link" data-testid="back-to-list">← 返回批次列表</RouterLink>
+
+    <p v-if="flash" class="flash" :class="flash.tone" role="status" data-testid="batch-flash">{{ flash.message }}</p>
 
     <div v-if="loadState === 'loading'" class="ent-card ent-state" data-testid="batch-detail-loading">正在加载批次详情…</div>
 
@@ -115,6 +225,24 @@ onBeforeUnmount(() => activeRequest?.abort())
           <span>风险 <StatusBadge :info="formatRiskStatus(batch.riskStatus)" dimension="风险" data-testid="detail-risk-status" /></span>
         </div>
       </div>
+
+      <section v-if="canSubmit" class="ent-card activation-card" aria-labelledby="activation-title" data-testid="activation-card">
+        <h2 id="activation-title" class="ent-card-title">提交激活</h2>
+        <p class="section-note">
+          激活后批次变为 ACTIVE / NORMAL，可参与后续业务；系统将在同一事务内自动生成唯一的 SOURCE 追溯事件。
+        </p>
+        <p v-if="submitError" class="ent-state error submit-error" role="alert" data-testid="submit-error">{{ submitError }}</p>
+        <button
+          type="button"
+          class="ent-button primary"
+          data-testid="submit-activation"
+          :disabled="submitting"
+          @click="submitActivation"
+        >
+          {{ submitting ? '提交激活中…' : '提交激活' }}
+        </button>
+      </section>
+      <p v-else-if="submitError" class="ent-state error submit-error" role="alert" data-testid="submit-error">{{ submitError }}</p>
 
       <div class="detail-grid">
         <section class="ent-card" aria-labelledby="identity-title">
@@ -203,6 +331,53 @@ onBeforeUnmount(() => activeRequest?.abort())
           </dl>
         </section>
       </div>
+
+      <section class="ent-card" aria-labelledby="events-title" data-testid="trace-events">
+        <h2 id="events-title" class="ent-card-title">追溯事件</h2>
+        <div v-if="eventState === 'loading'" class="ent-state" data-testid="events-loading">正在加载追溯事件…</div>
+        <div v-else-if="eventState === 'forbidden'" class="ent-state" role="alert" data-testid="events-forbidden">
+          无权查看该批次的追溯事件。
+        </div>
+        <div v-else-if="eventState === 'error'" class="ent-state error" role="alert" data-testid="events-error">
+          <p>追溯事件加载失败：{{ eventError }}</p>
+          <button type="button" class="ent-button" @click="loadEvents(batch.id)">重试</button>
+        </div>
+        <div v-else-if="events.length === 0" class="ent-state" data-testid="events-empty">
+          {{ batch.flowStatus === 'DRAFT' ? '草稿尚未激活，暂无追溯事件；提交激活后将自动生成 SOURCE 事件。' : '暂无追溯事件。' }}
+        </div>
+        <ol v-else class="event-list">
+          <li
+            v-for="event in events"
+            :key="event.id"
+            class="event-item"
+            :data-event-type="event.eventType"
+            data-testid="trace-event"
+          >
+            <div class="event-head">
+              <strong data-testid="event-type">{{ formatTraceEventType(event.eventType) }}</strong>
+              <span class="mono event-code">{{ event.eventType }}</span>
+              <span class="event-status" :class="{ corrected: event.status === 'CORRECTED' }">
+                {{ event.status === 'CORRECTED' ? '已更正' : '有效' }}
+              </span>
+            </div>
+            <p class="event-summary">{{ event.summary }}</p>
+            <dl class="ent-dl event-meta">
+              <dt>发生时间</dt>
+              <dd>{{ formatIsoDateTime(event.occurredAt) }}</dd>
+              <dt>登记时间</dt>
+              <dd>{{ formatIsoDateTime(event.recordedAt) }}</dd>
+              <dt>数据来源</dt>
+              <dd>{{ formatDataSource(event.dataSource) }}</dd>
+              <template v-if="event.eventType === 'SOURCE'">
+                <template v-for="fact in sourceFacts(event)" :key="fact.label">
+                  <dt>{{ fact.label }}</dt>
+                  <dd>{{ fact.value }}</dd>
+                </template>
+              </template>
+            </dl>
+          </li>
+        </ol>
+      </section>
     </template>
   </div>
 </template>
@@ -210,6 +385,81 @@ onBeforeUnmount(() => activeRequest?.abort())
 <style scoped>
 .back-link {
   margin-bottom: 14px;
+}
+.flash {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.flash.success {
+  color: #166534;
+  background-color: #f0fdf4;
+  border: 1px solid #bbf7d0;
+}
+.flash.warning {
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+}
+.activation-card .section-note {
+  margin: 0 0 12px;
+}
+.submit-error {
+  margin: 0 0 12px;
+  padding: 12px;
+  text-align: left;
+}
+.ent-button.primary {
+  background-color: var(--color-ocean);
+  border-color: var(--color-ocean);
+  color: #ffffff;
+}
+.ent-button.primary:hover:not(:disabled) {
+  background-color: var(--color-ocean-hover);
+  color: #ffffff;
+}
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.event-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+.event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.event-code {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.event-status {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background-color: var(--color-ocean-subtle);
+  color: var(--color-ocean-hover);
+}
+.event-status.corrected {
+  background-color: #f1f5f9;
+  color: var(--color-text-muted);
+}
+.event-summary {
+  margin: 8px 0;
+  font-size: 14px;
+  color: var(--color-text-body);
+}
+.event-meta {
+  font-size: 13px;
 }
 .status-pair {
   display: flex;
