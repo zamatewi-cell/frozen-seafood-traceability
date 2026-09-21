@@ -85,4 +85,46 @@ test.describe('Enterprise shell', () => {
     await expect(page.getByText('未找到该追溯码').first()).toBeVisible()
     expect(backend.meCalls).toBe(0)
   })
+
+  test('batch list filters through the URL and opens a read-only detail', async ({ page }) => {
+    const backend = await installFakeAuthBackend(page)
+    backend.loggedIn = true
+    const batch = {
+      id: 12, orgId: 30, productId: 5, traceBatchNo: 'TB-AAAAAAAAAAAAAAAAAAAAAAAAAA', externalBatchNo: 'SUP-2026-001',
+      batchType: 'SOURCE', quantity: 1000, unitCode: 'kg', originType: 'DOMESTIC_CAPTURE', originText: '东海舟山渔场',
+      flowStatus: 'ACTIVE', riskStatus: 'NORMAL', version: 1
+    }
+    const listQueries: string[] = []
+    await page.route('**/api/v1/batches?*', (route) => {
+      listQueries.push(new URL(route.request().url()).search)
+      return json(route, 200, { data: [batch], meta: { ...meta, page: { number: 1, size: 20, totalElements: 1, totalPages: 1 } } })
+    })
+    await page.route('**/api/v1/batches/12', (route) => json(route, 200, { data: batch, meta }))
+    await page.route('**/api/v1/products/5', (route) => json(route, 200, {
+      data: { id: 5, productCode: 'P-YELLOW', publicName: '冷冻大黄鱼', category: 'FISH', specification: '500g/条', sourceType: 'DOMESTIC_CAPTURE', baseUnitCode: 'kg', status: 'ACTIVE', version: 0 },
+      meta
+    }))
+    await page.route('**/api/v1/organizations/30', (route) => json(route, 200, {
+      data: { id: 30, orgNo: 'ORG_PROC_01', name: '东海水产加工有限公司', orgType: 'PROCESSOR', status: 'ACTIVE' },
+      meta
+    }))
+
+    await page.goto('/app/batches')
+    await expect(page.locator('.batch-row')).toHaveCount(1)
+    await expect(page.locator('.batch-row')).toContainText('冷冻大黄鱼')
+
+    await page.getByTestId('filter-flow-status').selectOption('ACTIVE')
+    await expect(page).toHaveURL(/flowStatus=ACTIVE/)
+    await page.getByTestId('filter-risk-status').selectOption('NORMAL')
+    await expect(page).toHaveURL(/riskStatus=NORMAL/)
+    await expect.poll(() => listQueries.at(-1)).toContain('riskStatus=NORMAL')
+
+    await page.locator('.batch-row').first().click()
+    await expect(page).toHaveURL(/\/app\/batches\/12$/)
+    await expect(page.getByTestId('detail-trace-batch-no')).toHaveText('TB-AAAAAAAAAAAAAAAAAAAAAAAAAA')
+    await expect(page.getByTestId('detail-org-name')).toHaveText('东海水产加工有限公司')
+
+    await page.getByTestId('back-to-list').click()
+    await expect(page).toHaveURL(/flowStatus=ACTIVE&riskStatus=NORMAL/)
+  })
 })

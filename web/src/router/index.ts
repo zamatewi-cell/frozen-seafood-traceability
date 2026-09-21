@@ -4,6 +4,8 @@ import EnterpriseLayout from '@/layouts/EnterpriseLayout.vue'
 import ConsumerTraceView from '@/views/ConsumerTraceView.vue'
 import LoginView from '@/views/LoginView.vue'
 import WorkbenchView from '@/views/enterprise/WorkbenchView.vue'
+import BatchListView from '@/views/enterprise/BatchListView.vue'
+import BatchDetailView from '@/views/enterprise/BatchDetailView.vue'
 import { installAuthGuard } from './guards'
 
 declare module 'vue-router' {
@@ -54,6 +56,19 @@ export const routes: RouteRecordRaw[] = [
         name: 'Workbench',
         component: WorkbenchView,
         meta: { title: '工作台' }
+      },
+      {
+        path: 'batches',
+        name: 'BatchList',
+        component: BatchListView,
+        meta: { title: '批次列表' }
+      },
+      {
+        path: 'batches/:id',
+        name: 'BatchDetail',
+        component: BatchDetailView,
+        props: true,
+        meta: { title: '批次详情' }
       },
       {
         path: ':pathMatch(.*)*',
