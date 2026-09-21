@@ -35,9 +35,13 @@ class MysqlMigrationIntegrationTest {
         Integer successfulV1 = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM flyway_schema_history WHERE version = '1' AND success = 1",
                 Integer.class);
+        Integer successfulV8 = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM flyway_schema_history WHERE version = '8' AND success = 1",
+                Integer.class);
 
         assertThat(tableCount).isGreaterThanOrEqualTo(24);
         assertThat(successfulV1).isEqualTo(1);
+        assertThat(successfulV8).isEqualTo(1);
 
         mockMvc.perform(get("/actuator/health"))
                 .andExpect(status().isOk())

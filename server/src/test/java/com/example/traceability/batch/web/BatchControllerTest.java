@@ -10,7 +10,6 @@ import com.example.traceability.common.envelope.PageMeta;
 import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.GlobalExceptionHandler;
-import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.common.filter.RequestIdFilter;
 import com.example.traceability.identity.config.SecurityConfiguration;
 import com.example.traceability.identity.domain.AppUser;
@@ -41,7 +40,6 @@ import java.util.List;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
-import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -56,7 +54,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @WebMvcTest(BatchController.class)
 @Import({GlobalExceptionHandler.class, RequestIdFilter.class, SecurityConfiguration.class})
-@DisplayName("追溯批次 Web 接口与权限契约测试")
+@DisplayName("追溯批次 Web 接口与双状态/双编号契约测试")
 class BatchControllerTest {
 
     @Autowired
@@ -132,7 +130,6 @@ class BatchControllerTest {
                 List.of("ADMIN"), List.of("PLATFORM"), true, true
         );
 
-        // Mock 活性复核过滤器依赖，使其平稳通过
         AppUser activeUser = new AppUser();
         activeUser.setId(101L);
         activeUser.setOrgId(10L);
@@ -198,13 +195,14 @@ class BatchControllerTest {
     }
 
     @Test
-    @DisplayName("所有写接口缺少 CSRF 令牌时返回 403 ACCESS_DENIED")
+    @DisplayName("非幂等写操作缺失 CSRF Token 一律返回 403 ACCESS_DENIED")
     void csrfProtection_MissingToken() throws Exception {
         BatchCreateRequest req = new BatchCreateRequest(
-                "BATCH-001", 500L, "SOURCE", new BigDecimal("100.000"), "kg",
+                "EXT-001", 500L, "SOURCE", new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
 
+        // 1. POST /api/v1/batches 缺 CSRF Token
         mockMvc.perform(post("/api/v1/batches")
                         .with(user(operatorPrincipal))
                         .header("Idempotency-Key", VALID_IDEMPOTENCY_KEY)
@@ -213,6 +211,7 @@ class BatchControllerTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
 
+        // 2. PATCH /api/v1/batches/100 缺 CSRF Token
         mockMvc.perform(patch("/api/v1/batches/100")
                         .with(user(operatorPrincipal))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -220,6 +219,7 @@ class BatchControllerTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
 
+        // 3. POST /api/v1/batches/100/submit 缺 CSRF Token
         mockMvc.perform(post("/api/v1/batches/100/submit")
                         .with(user(operatorPrincipal))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -229,13 +229,13 @@ class BatchControllerTest {
     }
 
     @Test
-    @DisplayName("分页查询批次列表成功 - 返回包含 page 元数据的标准封套")
+    @DisplayName("分页查询批次列表成功 - 返回包含双状态与双编号字段及分页元数据")
     void listBatches_Success() throws Exception {
         OffsetDateTime nowUtc = OffsetDateTime.of(2026, 9, 8, 8, 0, 0, 0, ZoneOffset.UTC);
         BatchResponse item = new BatchResponse(
-                100L, 10L, 500L, "BATCH-001", "SOURCE", new BigDecimal("100.000"), "kg",
+                100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", LocalDate.of(2026, 9, 1), null, null, 180,
-                "DRAFT", 0L, nowUtc, 101L, nowUtc, 101L
+                "DRAFT", "NORMAL", 0L, nowUtc, 101L, nowUtc, 101L
         );
 
         PageMeta pageMeta = new PageMeta(1, 20, 1L);
@@ -244,25 +244,33 @@ class BatchControllerTest {
 
         mockMvc.perform(get("/api/v1/batches")
                         .with(user(operatorPrincipal))
-                        .param("status", "DRAFT")
+                        .param("flowStatus", "DRAFT")
+                        .param("riskStatus", "NORMAL")
+                        .param("traceBatchNo", "TB-ABC")
+                        .param("externalBatchNo", "EXT-001")
                         .param("page", "1")
                         .param("size", "20"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data", hasSize(1)))
-                .andExpect(jsonPath("$.data[0].batchNo").value("BATCH-001"))
+                .andExpect(jsonPath("$.data[0].traceBatchNo").value("TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                .andExpect(jsonPath("$.data[0].externalBatchNo").value("EXT-001"))
+                .andExpect(jsonPath("$.data[0].flowStatus").value("DRAFT"))
+                .andExpect(jsonPath("$.data[0].riskStatus").value("NORMAL"))
+                .andExpect(jsonPath("$.data[0].batchNo").doesNotExist())
+                .andExpect(jsonPath("$.data[0].status").doesNotExist())
                 .andExpect(jsonPath("$.meta.page.number").value(1))
                 .andExpect(jsonPath("$.meta.page.size").value(20))
                 .andExpect(jsonPath("$.meta.page.totalElements").value(1));
     }
 
     @Test
-    @DisplayName("查询批次详情成功 - 严格白名单属性，绝不泄露 isDeleted 和 creationIdempotencyKey，时间输出带明确 UTC 偏移")
+    @DisplayName("查询批次详情成功 - 输出双状态双编号，绝不暴露 batchNo/status 或内部字段")
     void getBatch_Success() throws Exception {
         OffsetDateTime createdUtc = OffsetDateTime.of(2026, 9, 8, 9, 30, 0, 0, ZoneOffset.UTC);
         BatchResponse response = new BatchResponse(
-                100L, 10L, 500L, "BATCH-001", "SOURCE", new BigDecimal("100.000"), "kg",
+                100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "东海舟山渔场", LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 1),
-                LocalDate.of(2026, 9, 2), 180, "DRAFT", 0L, createdUtc, 101L, createdUtc, 101L
+                LocalDate.of(2026, 9, 2), 180, "DRAFT", "NORMAL", 0L, createdUtc, 101L, createdUtc, 101L
         );
 
         when(batchService.getBatchById(eq(100L), any(TraceSecurityPrincipal.class))).thenReturn(response);
@@ -273,22 +281,21 @@ class BatchControllerTest {
                 .andExpect(jsonPath("$.data.id").value(100))
                 .andExpect(jsonPath("$.data.orgId").value(10))
                 .andExpect(jsonPath("$.data.productId").value(500))
-                .andExpect(jsonPath("$.data.batchNo").value("BATCH-001"))
+                .andExpect(jsonPath("$.data.traceBatchNo").value("TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                .andExpect(jsonPath("$.data.externalBatchNo").value("EXT-001"))
+                .andExpect(jsonPath("$.data.flowStatus").value("DRAFT"))
+                .andExpect(jsonPath("$.data.riskStatus").value("NORMAL"))
                 .andExpect(jsonPath("$.data.batchType").value("SOURCE"))
                 .andExpect(jsonPath("$.data.quantity").value(100.000))
                 .andExpect(jsonPath("$.data.unitCode").value("kg"))
-                .andExpect(jsonPath("$.data.originType").value("DOMESTIC_CAPTURE"))
-                .andExpect(jsonPath("$.data.originText").value("东海舟山渔场"))
-                .andExpect(jsonPath("$.data.status").value("DRAFT"))
-                .andExpect(jsonPath("$.data.version").value(0))
-                .andExpect(jsonPath("$.data.createdAt").value("2026-09-08T09:30:00Z"))
-                // 验证绝对不暴露内部字段
+                .andExpect(jsonPath("$.data.batchNo").doesNotExist())
+                .andExpect(jsonPath("$.data.status").doesNotExist())
                 .andExpect(jsonPath("$.data.isDeleted").doesNotExist())
                 .andExpect(jsonPath("$.data.creationIdempotencyKey").doesNotExist());
     }
 
     @Test
-    @DisplayName("跨组织查询批次详情 - 返回 403 ORG_SCOPE_DENIED")
+    @DisplayName("查询批次详情失败 - 跨组织越权访问返回 403 ORG_SCOPE_DENIED")
     void getBatch_CrossOrgDenied() throws Exception {
         when(batchService.getBatchById(eq(200L), any(TraceSecurityPrincipal.class)))
                 .thenThrow(new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权", "无权访问其他组织的批次数据"));
@@ -301,18 +308,18 @@ class BatchControllerTest {
     }
 
     @Test
-    @DisplayName("创建批次草稿成功 - 返回 201 Created 且白名单封装")
+    @DisplayName("创建批次草稿成功 - 返回 201 Created 且输出服务端 traceBatchNo 与 DRAFT+NORMAL")
     void createBatch_Success() throws Exception {
         BatchCreateRequest req = new BatchCreateRequest(
-                "BATCH-001", 500L, "SOURCE", new BigDecimal("100.000"), "kg",
+                "EXT-001", 500L, "SOURCE", new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", LocalDate.of(2026, 9, 1), null, null, 180
         );
 
         OffsetDateTime nowUtc = OffsetDateTime.of(2026, 9, 8, 8, 0, 0, 0, ZoneOffset.UTC);
         BatchResponse response = new BatchResponse(
-                100L, 10L, 500L, "BATCH-001", "SOURCE", new BigDecimal("100.000"), "kg",
+                100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", LocalDate.of(2026, 9, 1), null, null, 180,
-                "DRAFT", 0L, nowUtc, 101L, nowUtc, 101L
+                "DRAFT", "NORMAL", 0L, nowUtc, 101L, nowUtc, 101L
         );
 
         when(batchService.createDraftBatch(any(BatchCreateRequest.class), eq(VALID_IDEMPOTENCY_KEY), any(TraceSecurityPrincipal.class)))
@@ -326,15 +333,88 @@ class BatchControllerTest {
                         .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.data.id").value(100))
-                .andExpect(jsonPath("$.data.batchNo").value("BATCH-001"))
-                .andExpect(jsonPath("$.data.status").value("DRAFT"));
+                .andExpect(jsonPath("$.data.traceBatchNo").value("TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                .andExpect(jsonPath("$.data.externalBatchNo").value("EXT-001"))
+                .andExpect(jsonPath("$.data.flowStatus").value("DRAFT"))
+                .andExpect(jsonPath("$.data.riskStatus").value("NORMAL"))
+                .andExpect(jsonPath("$.data.batchNo").doesNotExist())
+                .andExpect(jsonPath("$.data.status").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("创建批次草稿 - 客户端夹带 traceBatchNo/creationOrgId/orgId/flowStatus 不会被绑定，响应仍为服务端生成值")
+    void createBatch_ClientSuppliedServerFieldsAreNotBound() throws Exception {
+        OffsetDateTime nowUtc = OffsetDateTime.of(2026, 9, 8, 8, 0, 0, 0, ZoneOffset.UTC);
+        BatchResponse response = new BatchResponse(
+                100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), "kg",
+                "DOMESTIC_CAPTURE", "来源说明", null, null, null, null,
+                "DRAFT", "NORMAL", 0L, nowUtc, 101L, nowUtc, 101L
+        );
+        org.mockito.ArgumentCaptor<BatchCreateRequest> captor = org.mockito.ArgumentCaptor.forClass(BatchCreateRequest.class);
+        when(batchService.createDraftBatch(captor.capture(), eq(VALID_IDEMPOTENCY_KEY), any(TraceSecurityPrincipal.class)))
+                .thenReturn(response);
+
+        String body = """
+                {
+                    "traceBatchNo": "TB-CLIENTCHOSENVALUE0000000",
+                    "creationOrgId": 999,
+                    "orgId": 999,
+                    "flowStatus": "ACTIVE",
+                    "riskStatus": "FROZEN",
+                    "externalBatchNo": "EXT-001",
+                    "productId": 500,
+                    "batchType": "SOURCE",
+                    "quantity": 100.000,
+                    "unitCode": "kg",
+                    "originType": "DOMESTIC_CAPTURE",
+                    "originText": "来源说明"
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/batches")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.traceBatchNo").value("TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                .andExpect(jsonPath("$.data.orgId").value(10))
+                .andExpect(jsonPath("$.data.creationOrgId").doesNotExist());
+
+        // BatchCreateRequest 结构上不声明任何服务端字段，只保留企业可填写的 externalBatchNo
+        org.assertj.core.api.Assertions.assertThat(captor.getValue().externalBatchNo()).isEqualTo("EXT-001");
+        org.assertj.core.api.Assertions.assertThat(
+                java.util.Arrays.stream(BatchCreateRequest.class.getRecordComponents())
+                        .map(java.lang.reflect.RecordComponent::getName)
+                        .toList())
+                .doesNotContain("traceBatchNo", "creationOrgId", "orgId", "flowStatus", "riskStatus", "version");
     }
 
     @Test
     @DisplayName("创建批次草稿校验失败 - 缺少必填项或数量小数位超限返回 400 INVALID_REQUEST")
     void createBatch_ValidationFailure() throws Exception {
-        // 缺少 batchNo
-        String invalidJson = """
+        // 缺少 productId 与 batchType
+        String missingRequiredJson = """
+                {
+                    "quantity": 10.000,
+                    "unitCode": "kg",
+                    "originType": "DOMESTIC_CAPTURE",
+                    "originText": "来源说明"
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/batches")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(missingRequiredJson))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        // 数量小数位超限 (超过 3 位)
+        String invalidScaleJson = """
                 {
                     "productId": 500,
                     "batchType": "SOURCE",
@@ -350,23 +430,45 @@ class BatchControllerTest {
                         .with(csrf())
                         .header("Idempotency-Key", VALID_IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(invalidJson))
+                        .content(invalidScaleJson))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        // externalBatchNo 超长 (>64)
+        String longExternalBatchJson = """
+                {
+                    "externalBatchNo": "EXT-LONG-BATCH-NO-123456789012345678901234567890123456789012345678901234567890",
+                    "productId": 500,
+                    "batchType": "SOURCE",
+                    "quantity": 10.000,
+                    "unitCode": "kg",
+                    "originType": "DOMESTIC_CAPTURE",
+                    "originText": "来源说明"
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/batches")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(longExternalBatchJson))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
     }
 
     @Test
-    @DisplayName("更新批次草稿成功 - 返回 200 OK")
+    @DisplayName("更新批次草稿成功 - 支持修改 externalBatchNo")
     void patchBatch_Success() throws Exception {
         BatchPatchRequest patchReq = new BatchPatchRequest(
-                0L, new BigDecimal("120.000"), "变更后原产地描述", null, null, null, null
+                0L, new BigDecimal("120.000"), "EXT-UPDATED", "变更后原产地描述", null, null, null, null
         );
 
         OffsetDateTime nowUtc = OffsetDateTime.of(2026, 9, 8, 8, 0, 0, 0, ZoneOffset.UTC);
         BatchResponse response = new BatchResponse(
-                100L, 10L, 500L, "BATCH-001", "SOURCE", new BigDecimal("120.000"), "kg",
+                100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-UPDATED", "SOURCE", new BigDecimal("120.000"), "kg",
                 "DOMESTIC_CAPTURE", "变更后原产地描述", LocalDate.of(2026, 9, 1), null, null, 180,
-                "DRAFT", 1L, nowUtc, 101L, nowUtc, 101L
+                "DRAFT", "NORMAL", 1L, nowUtc, 101L, nowUtc, 101L
         );
 
         when(batchService.patchDraftBatch(eq(100L), any(BatchPatchRequest.class), any(TraceSecurityPrincipal.class)))
@@ -380,6 +482,7 @@ class BatchControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value(100))
                 .andExpect(jsonPath("$.data.version").value(1))
+                .andExpect(jsonPath("$.data.externalBatchNo").value("EXT-UPDATED"))
                 .andExpect(jsonPath("$.data.quantity").value(120.000));
     }
 
@@ -407,15 +510,15 @@ class BatchControllerTest {
     }
 
     @Test
-    @DisplayName("提交激活批次草稿成功 - 返回 200 OK 且状态为 ACTIVE")
+    @DisplayName("提交激活批次草稿成功 - 返回 200 OK 且流转状态为 ACTIVE，风险为 NORMAL")
     void submitBatch_Success() throws Exception {
         BatchSubmitRequest submitReq = new BatchSubmitRequest(0L);
 
         OffsetDateTime nowUtc = OffsetDateTime.of(2026, 9, 8, 8, 0, 0, 0, ZoneOffset.UTC);
         BatchResponse response = new BatchResponse(
-                100L, 10L, 500L, "BATCH-001", "SOURCE", new BigDecimal("100.000"), "kg",
+                100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "东海舟山", LocalDate.of(2026, 9, 1), null, null, 180,
-                "ACTIVE", 1L, nowUtc, 101L, nowUtc, 101L
+                "ACTIVE", "NORMAL", 1L, nowUtc, 101L, nowUtc, 101L
         );
 
         when(batchService.submitDraftBatch(eq(100L), any(BatchSubmitRequest.class), any(TraceSecurityPrincipal.class)))
@@ -428,18 +531,27 @@ class BatchControllerTest {
                         .content(objectMapper.writeValueAsString(submitReq)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value(100))
-                .andExpect(jsonPath("$.data.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.flowStatus").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.riskStatus").value("NORMAL"))
                 .andExpect(jsonPath("$.data.version").value(1));
     }
 
     @Test
-    @DisplayName("提交批次草稿失败 - 缺少 version 返回 400 INVALID_REQUEST")
+    @DisplayName("提交批次草稿失败 - 缺少 version 或 version 为负数返回 400 INVALID_REQUEST")
     void submitBatch_MissingVersion() throws Exception {
         mockMvc.perform(post("/api/v1/batches/100/submit")
                         .with(user(operatorPrincipal))
                         .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        mockMvc.perform(post("/api/v1/batches/100/submit")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"version\": -1}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
     }

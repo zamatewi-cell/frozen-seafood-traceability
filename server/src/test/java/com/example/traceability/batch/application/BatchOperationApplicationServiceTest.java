@@ -7,8 +7,8 @@ import com.example.traceability.batch.domain.BatchOperationItem;
 import com.example.traceability.batch.domain.BatchOperationStatus;
 import com.example.traceability.batch.domain.BatchOperationType;
 import com.example.traceability.batch.domain.BatchRelation;
-import com.example.traceability.batch.domain.BatchRelationType;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.dto.BatchOperationCreateRequest;
 import com.example.traceability.batch.dto.BatchOperationItemRequest;
 import com.example.traceability.batch.dto.BatchOperationResponse;
@@ -802,16 +802,20 @@ class BatchOperationApplicationServiceTest {
         Batch b101 = new Batch();
         b101.setId(101L);
         b101.setOrgId(10L);
-        b101.setBatchNo("B-101");
+        b101.setTraceBatchNo("TB-101");
+        b101.setExternalBatchNo("B-101");
         b101.setQuantity(new BigDecimal("100.000"));
-        b101.setStatus("ACTIVE");
+        b101.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b101.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         Batch b102 = new Batch();
         b102.setId(102L);
         b102.setOrgId(10L);
-        b102.setBatchNo("B-102");
+        b102.setTraceBatchNo("TB-102");
+        b102.setExternalBatchNo("B-102");
         b102.setQuantity(new BigDecimal("100.000"));
-        b102.setStatus("ACTIVE");
+        b102.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b102.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         when(batchMapper.selectByIdIgnoreTenantForUpdate(101L)).thenReturn(b101);
         when(batchMapper.selectByIdIgnoreTenantForUpdate(102L)).thenReturn(b102);
@@ -879,8 +883,10 @@ class BatchOperationApplicationServiceTest {
         Batch b101 = new Batch();
         b101.setId(101L);
         b101.setOrgId(10L);
-        b101.setBatchNo("B-101");
-        b101.setStatus("FROZEN"); // 冻结状态
+        b101.setTraceBatchNo("TB-101");
+        b101.setExternalBatchNo("B-101");
+        b101.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b101.setRiskStatus(BatchRiskStatus.FROZEN.name()); // 冻结状态
         when(batchMapper.selectByIdIgnoreTenantForUpdate(101L)).thenReturn(b101);
 
         assertThatThrownBy(() -> operationService.submitOperation(100L, req, VALID_SUBMISSION_KEY, operatorPrincipal))
@@ -929,11 +935,15 @@ class BatchOperationApplicationServiceTest {
         Batch b101 = new Batch();
         b101.setId(101L);
         b101.setOrgId(10L);
-        b101.setStatus("ACTIVE");
+        b101.setTraceBatchNo("TB-101");
+        b101.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b101.setRiskStatus(BatchRiskStatus.NORMAL.name());
         Batch b102 = new Batch();
         b102.setId(102L);
         b102.setOrgId(10L);
-        b102.setStatus("ACTIVE");
+        b102.setTraceBatchNo("TB-102");
+        b102.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b102.setRiskStatus(BatchRiskStatus.NORMAL.name());
         when(batchMapper.selectByIdIgnoreTenantForUpdate(101L)).thenReturn(b101);
         when(batchMapper.selectByIdIgnoreTenantForUpdate(102L)).thenReturn(b102);
 
@@ -982,12 +992,16 @@ class BatchOperationApplicationServiceTest {
         Batch b101 = new Batch();
         b101.setId(101L);
         b101.setOrgId(10L);
-        b101.setStatus("ACTIVE");
+        b101.setTraceBatchNo("TB-101");
+        b101.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b101.setRiskStatus(BatchRiskStatus.NORMAL.name());
         Batch b102 = new Batch();
         b102.setId(102L);
         b102.setOrgId(10L);
-        b102.setBatchNo("B-102");
-        b102.setStatus("ACTIVE");
+        b102.setTraceBatchNo("TB-102");
+        b102.setExternalBatchNo("B-102");
+        b102.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b102.setRiskStatus(BatchRiskStatus.NORMAL.name());
         when(batchMapper.selectByIdIgnoreTenantForUpdate(101L)).thenReturn(b101);
         when(batchMapper.selectByIdIgnoreTenantForUpdate(102L)).thenReturn(b102);
 
@@ -1038,16 +1052,20 @@ class BatchOperationApplicationServiceTest {
         Batch b101 = new Batch();
         b101.setId(101L);
         b101.setOrgId(10L);
-        b101.setBatchNo("B-101");
+        b101.setTraceBatchNo("TB-101");
+        b101.setExternalBatchNo("B-101");
         b101.setQuantity(new BigDecimal("100.000")); // 声明数量为 100kg
-        b101.setStatus("ACTIVE");
+        b101.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b101.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         Batch b102 = new Batch();
         b102.setId(102L);
         b102.setOrgId(10L);
-        b102.setBatchNo("B-102");
+        b102.setTraceBatchNo("TB-102");
+        b102.setExternalBatchNo("B-102");
         b102.setQuantity(new BigDecimal("60.000"));
-        b102.setStatus("ACTIVE");
+        b102.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b102.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         when(batchMapper.selectByIdIgnoreTenantForUpdate(101L)).thenReturn(b101);
         when(batchMapper.selectByIdIgnoreTenantForUpdate(102L)).thenReturn(b102);
@@ -1101,16 +1119,20 @@ class BatchOperationApplicationServiceTest {
         Batch b101 = new Batch();
         b101.setId(101L);
         b101.setOrgId(10L);
-        b101.setBatchNo("B-101");
+        b101.setTraceBatchNo("TB-101");
+        b101.setExternalBatchNo("B-101");
         b101.setQuantity(new BigDecimal("100.000"));
-        b101.setStatus("ACTIVE");
+        b101.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b101.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         Batch b103 = new Batch();
         b103.setId(103L);
         b103.setOrgId(10L);
-        b103.setBatchNo("B-103");
+        b103.setTraceBatchNo("TB-103");
+        b103.setExternalBatchNo("B-103");
         b103.setQuantity(new BigDecimal("100.000"));
-        b103.setStatus("ACTIVE");
+        b103.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b103.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         when(batchMapper.selectByIdIgnoreTenantForUpdate(101L)).thenReturn(b101);
         when(batchMapper.selectByIdIgnoreTenantForUpdate(103L)).thenReturn(b103);
@@ -1190,26 +1212,34 @@ class BatchOperationApplicationServiceTest {
         Batch b101 = new Batch();
         b101.setId(101L);
         b101.setOrgId(10L);
+        b101.setTraceBatchNo("TB-101");
         b101.setQuantity(new BigDecimal("600.000"));
-        b101.setStatus("ACTIVE");
+        b101.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b101.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         Batch b102 = new Batch();
         b102.setId(102L);
         b102.setOrgId(10L);
+        b102.setTraceBatchNo("TB-102");
         b102.setQuantity(new BigDecimal("420.000"));
-        b102.setStatus("ACTIVE");
+        b102.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b102.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         Batch b103 = new Batch();
         b103.setId(103L);
         b103.setOrgId(10L);
+        b103.setTraceBatchNo("TB-103");
         b103.setQuantity(new BigDecimal("480.000"));
-        b103.setStatus("ACTIVE");
+        b103.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b103.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         Batch b104 = new Batch();
         b104.setId(104L);
         b104.setOrgId(10L);
+        b104.setTraceBatchNo("TB-104");
         b104.setQuantity(new BigDecimal("520.000"));
-        b104.setStatus("ACTIVE");
+        b104.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        b104.setRiskStatus(BatchRiskStatus.NORMAL.name());
 
         when(batchMapper.selectByIdIgnoreTenantForUpdate(101L)).thenReturn(b101);
         when(batchMapper.selectByIdIgnoreTenantForUpdate(102L)).thenReturn(b102);
@@ -1309,16 +1339,20 @@ class BatchOperationApplicationServiceTest {
         Batch inBatch = new Batch();
         inBatch.setId(201L);
         inBatch.setOrgId(10L);
-        inBatch.setBatchNo("BAT-IN-001");
-        inBatch.setStatus("ACTIVE");
+        inBatch.setTraceBatchNo("TB-IN-001");
+        inBatch.setExternalBatchNo("BAT-IN-001");
+        inBatch.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        inBatch.setRiskStatus(BatchRiskStatus.NORMAL.name());
         inBatch.setUnitCode("kg");
         inBatch.setQuantity(new BigDecimal("100.000"));
 
         Batch outBatch = new Batch();
         outBatch.setId(202L);
         outBatch.setOrgId(10L);
-        outBatch.setBatchNo("BAT-OUT-001");
-        outBatch.setStatus("ACTIVE");
+        outBatch.setTraceBatchNo("TB-OUT-001");
+        outBatch.setExternalBatchNo("BAT-OUT-001");
+        outBatch.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        outBatch.setRiskStatus(BatchRiskStatus.NORMAL.name());
         outBatch.setUnitCode("kg");
         outBatch.setQuantity(new BigDecimal("100.000"));
 
@@ -1344,16 +1378,20 @@ class BatchOperationApplicationServiceTest {
         Batch inBatch = new Batch();
         inBatch.setId(201L);
         inBatch.setOrgId(10L);
-        inBatch.setBatchNo("BAT-IN-001");
-        inBatch.setStatus("ACTIVE");
+        inBatch.setTraceBatchNo("TB-IN-001");
+        inBatch.setExternalBatchNo("BAT-IN-001");
+        inBatch.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        inBatch.setRiskStatus(BatchRiskStatus.NORMAL.name());
         inBatch.setUnitCode("kg");
         inBatch.setQuantity(new BigDecimal("100.000"));
 
         Batch outBatch = new Batch();
         outBatch.setId(202L);
         outBatch.setOrgId(10L);
-        outBatch.setBatchNo("BAT-OUT-001");
-        outBatch.setStatus("ACTIVE");
+        outBatch.setTraceBatchNo("TB-OUT-001");
+        outBatch.setExternalBatchNo("BAT-OUT-001");
+        outBatch.setFlowStatus(BatchFlowStatus.ACTIVE.name());
+        outBatch.setRiskStatus(BatchRiskStatus.NORMAL.name());
         outBatch.setUnitCode("kg");
         outBatch.setQuantity(new BigDecimal("100.000"));
 

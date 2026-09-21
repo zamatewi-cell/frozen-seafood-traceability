@@ -4,7 +4,12 @@ import {
   formatDate,
   formatProductCategory,
   formatOriginType,
-  formatBatchStatus,
+  formatPublicTraceStatus,
+  formatFlowStatus,
+  formatRiskStatus,
+  formatBatchType,
+  formatOrgType,
+  formatQuantity,
   formatTemperatureResult
 } from '@/utils/formatters'
 
@@ -36,18 +41,30 @@ describe('Display Formatters', () => {
     expect(formatOriginType('IMPORT')).toBe('进口海产')
   })
 
-  it('maps batch statuses to labels and tone classes', () => {
-    expect(formatBatchStatus('ACTIVE').tone).toBe('success')
-    expect(formatBatchStatus('ACTIVE').label).toBe('当前记录正常')
+  it('derives the consumer status conclusion with risk taking precedence over flow', () => {
+    expect(formatPublicTraceStatus('ACTIVE', 'NORMAL')).toMatchObject({ tone: 'success', label: '当前记录正常' })
+    expect(formatPublicTraceStatus('ACTIVE', 'FROZEN')).toMatchObject({ tone: 'warning', label: '业务冻结状态' })
+    expect(formatPublicTraceStatus('ACTIVE', 'RECALLED')).toMatchObject({ tone: 'danger', label: '模拟召回提示' })
+    expect(formatPublicTraceStatus('CLOSED', 'NORMAL')).toMatchObject({ tone: 'neutral', label: '流转已关闭' })
+    expect(formatPublicTraceStatus('CLOSED', 'RECALLED')).toMatchObject({ tone: 'danger', label: '模拟召回提示' })
+  })
 
-    expect(formatBatchStatus('FROZEN').tone).toBe('warning')
-    expect(formatBatchStatus('FROZEN').label).toBe('业务冻结状态')
+  it('maps flowStatus and riskStatus independently', () => {
+    expect(formatFlowStatus('DRAFT').label).toBe('草稿')
+    expect(formatFlowStatus('ACTIVE')).toMatchObject({ label: '可流转', tone: 'success' })
+    expect(formatFlowStatus('CLOSED').label).toBe('已关闭')
+    expect(formatRiskStatus('NORMAL')).toMatchObject({ label: '正常', tone: 'success' })
+    expect(formatRiskStatus('FROZEN')).toMatchObject({ label: '冻结', tone: 'warning' })
+    expect(formatRiskStatus('RECALLED')).toMatchObject({ label: '模拟召回', tone: 'danger' })
+    expect(formatRiskStatus('QUARANTINED').label).toBe('QUARANTINED')
+  })
 
-    expect(formatBatchStatus('RECALLED').tone).toBe('danger')
-    expect(formatBatchStatus('RECALLED').label).toBe('模拟召回提示')
-
-    expect(formatBatchStatus('CLOSED').tone).toBe('neutral')
-    expect(formatBatchStatus('CLOSED').label).toBe('流转已关闭')
+  it('formats batch type, org type and declared quantity', () => {
+    expect(formatBatchType('SOURCE')).toBe('来源批次')
+    expect(formatOrgType('PROCESSOR')).toBe('加工企业')
+    expect(formatQuantity(1000, 'kg')).toBe('1,000 kg')
+    expect(formatQuantity(12.5, 'kg')).toBe('12.5 kg')
+    expect(formatQuantity(null, 'kg')).toBe('未标明')
   })
 
   it('formats temperature results truthfully', () => {

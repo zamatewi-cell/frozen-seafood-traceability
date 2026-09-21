@@ -14,16 +14,17 @@ import java.time.LocalDate;
 /**
  * 批次草稿创建请求 DTO。
  * <p>
- * 包含必填的批号、产品、类型、数量、单位、来源类型及来源说明，以及可选的生产/捕捞/速冻日期和保质期天数。
+ * 绝不声明 traceBatchNo（由服务端在创建时安全生成全局唯一追溯批号），
+ * 仅接受企业可选的外部业务批次号 externalBatchNo。
+ * 包含必填的产品、类型、数量、单位、来源类型及来源说明，以及可选的生产/捕捞/速冻日期和保质期天数。
  * </p>
  *
  * @author Seafood Traceability Team
  * @since 0.1.0
  */
 public record BatchCreateRequest(
-        @NotBlank(message = "批次号不能为空")
-        @Size(min = 1, max = 64, message = "批次号长度必须在 1 到 64 之间")
-        String batchNo,
+        @Size(max = 64, message = "外部业务批次号长度不能超过 64")
+        String externalBatchNo,
 
         @NotNull(message = "产品ID不能为空")
         @Positive(message = "产品ID必须为正整数")

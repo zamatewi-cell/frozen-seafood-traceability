@@ -2,7 +2,8 @@ package com.example.traceability.trace;
 
 import com.example.traceability.audit.application.AuditApplicationService;
 import com.example.traceability.batch.domain.Batch;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.batch.mapper.BatchOperationItemMapper;
 import com.example.traceability.common.exception.BusinessException;
@@ -53,7 +54,7 @@ import static org.mockito.Mockito.when;
  * 1. 创建仅限本组织 ACTIVE 批次，快照数量/单位，阻止已消耗批次，同组织幂等防重；
  * 2. 仅发送方 OPERATOR 可修改/删除/提交草稿；
  * 3. 仅接收方 OPERATOR / QUALITY_MANAGER 可接受/拒绝；
- * 4. 接受时差异数量必填 differenceReason，更新批次持有人，批次号冲突返回 409，追加 ARRIVAL 事件与写审计；
+ * 4. 接受时差异数量必填 differenceReason，更新批次持有人（externalBatchNo 重复不再拦截接收），追加 ARRIVAL 事件与写审计；
  * 5. 拒绝时不转移持有人，不追加追溯事件，写审计；
  * 6. 跨组织数据隔离与权限越界拦截。
  * </p>
@@ -145,6 +146,25 @@ class TransferApplicationServiceTest {
         lenient().when(organizationMapper.selectById(10L)).thenReturn(senderOrg);
     }
 
+    private Batch createTestBatch(Long batchId, Long orgId, String batchNo, String flowStatus, String riskStatus) {
+        Batch batch = new Batch();
+        batch.setId(batchId);
+        batch.setOrgId(orgId);
+        batch.setTraceBatchNo("TB-" + batchId);
+        batch.setExternalBatchNo(batchNo);
+        batch.setQuantity(new BigDecimal("500.000"));
+        batch.setUnitCode("kg");
+        batch.setFlowStatus(flowStatus);
+        batch.setRiskStatus(riskStatus);
+        batch.setVersion(0L);
+        batch.setIsDeleted(0);
+        return batch;
+    }
+
+    private Batch createTestBatch(Long batchId, Long orgId, String batchNo) {
+        return createTestBatch(batchId, orgId, batchNo, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.NORMAL.name());
+    }
+
     @Test
     @DisplayName("创建交接草稿：成功快照批次数量单位，保存DRAFT状态并记录审计")
     void createDraft_success() {
@@ -152,13 +172,7 @@ class TransferApplicationServiceTest {
         Long receiverOrgId = 20L;
         String idempotencyKey = "idem-create-0000001";
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-2026-001");
-        batch.setQuantity(new BigDecimal("500.000"));
-        batch.setUnitCode("kg");
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-001");
 
         Organization receiverOrg = new Organization();
         receiverOrg.setId(receiverOrgId);
@@ -196,10 +210,7 @@ class TransferApplicationServiceTest {
     @DisplayName("创建交接草稿：非ACTIVE状态批次拒绝创建，抛出 409 BATCH_NOT_ACTIVE")
     void createDraft_nonActiveBatch_throwsException() {
         Long batchId = 1002L;
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setStatus(BatchStatus.DRAFT.name());
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-002", BatchFlowStatus.DRAFT.name(), BatchRiskStatus.NORMAL.name());
 
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
 
@@ -214,10 +225,7 @@ class TransferApplicationServiceTest {
     @DisplayName("创建交接草稿：已被已提交批次操作消耗的批次拒绝创建，抛出 409 BATCH_ALREADY_CONSUMED")
     void createDraft_consumedBatch_throwsException() {
         Long batchId = 1003L;
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-003");
 
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(batchOperationItemMapper.countSubmittedInputUsageByBatchId(batchId)).thenReturn(1);
@@ -244,10 +252,7 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.DRAFT);
         transfer.setVersion(0L);
 
-        Batch batch = new Batch();
-        batch.setId(1004L);
-        batch.setOrgId(10L);
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(1004L, 10L, "BATCH-2026-004");
 
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(1004L)).thenReturn(batch);
@@ -284,16 +289,10 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-2026-005");
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setVersion(0L);
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-005");
 
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
-        when(batchMapper.countByOrgIdAndBatchNo(20L, "BATCH-2026-005")).thenReturn(0);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L)).thenReturn(1);
@@ -327,10 +326,12 @@ class TransferApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("接收方接受：接收组织已有同名批次号时抛出 409 BATCH_NO_CONFLICT，事务回滚")
-    void acceptTransfer_batchNoConflict_throws409() {
+    @DisplayName("接收方接受：接收组织已有同 externalBatchNo 仍接受成功")
+    void acceptTransfer_receiverHasSameExternalBatchNo_success() {
         Long transferId = 5004L;
         Long batchId = 1006L;
+        String idempotencyKey = "idem-accept-same-external-01";
+        OffsetDateTime receivedAt = OffsetDateTime.now(ZoneOffset.UTC);
 
         Transfer transfer = new Transfer();
         transfer.setId(transferId);
@@ -342,25 +343,23 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-EXISTING");
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-EXISTING");
 
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
-        when(batchMapper.countByOrgIdAndBatchNo(20L, "BATCH-EXISTING")).thenReturn(1);
+        when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
+        when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
+        when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L)).thenReturn(1);
+        when(publicTraceCodeMapper.transferOrgScopeByBatchId(eq(batchId), eq(10L), eq(20L), any(), eq(201L))).thenReturn(1);
 
         TransferAcceptRequest req = new TransferAcceptRequest(
-                new BigDecimal("500.000"), "kg", OffsetDateTime.now(ZoneOffset.UTC), null, 1L
+                new BigDecimal("500.000"), "kg", receivedAt, null, 1L
         );
-        assertThatThrownBy(() -> transferService.acceptTransfer(transferId, req, "idem-accept-0000004", receiverOperator))
-                .isInstanceOf(BusinessException.class)
-                .extracting("code")
-                .isEqualTo("BATCH_NO_CONFLICT");
+        TransferResponse resp = transferService.acceptTransfer(transferId, req, idempotencyKey, receiverOperator);
 
-        verify(traceEventService, never()).appendArrivalEvent(any(), any(), any(), any(), any(), any(), any());
+        assertThat(resp).isNotNull();
+        assertThat(resp.status()).isEqualTo(TransferStatus.ACCEPTED);
+        verify(traceEventService).appendArrivalEvent(eq(batchId), eq(20L), eq(201L), eq(receivedAt), any(), eq(transferId), any());
     }
 
     @Test
@@ -379,10 +378,7 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-REJECT");
 
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
@@ -435,10 +431,7 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.DRAFT);
         transfer.setVersion(0L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-CONSUMED");
 
         when(idempotencyMapper.selectByOrgIdAndKey(10L, idempotencyKey)).thenReturn(null);
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
@@ -471,10 +464,7 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.DRAFT);
         transfer.setVersion(0L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(99L); // 被并发篡改或归属不同
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(batchId, 99L, "BATCH-2026-ORG-99"); // 被并发篡改或归属不同
 
         when(idempotencyMapper.selectByOrgIdAndKey(10L, idempotencyKey)).thenReturn(null);
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
@@ -508,11 +498,7 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(99L); // 非原发货方
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setUnitCode("kg");
+        Batch batch = createTestBatch(batchId, 99L, "BATCH-2026-ORG-99"); // 非原发货方
 
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
@@ -546,11 +532,7 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setUnitCode("kg");
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-UNIT");
 
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
@@ -627,13 +609,7 @@ class TransferApplicationServiceTest {
         Long receiverOrgId = 20L;
         String idempotencyKey = "idem-create-open-conflict";
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-2026-007");
-        batch.setQuantity(new BigDecimal("100.000"));
-        batch.setUnitCode("kg");
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-007");
 
         Organization receiverOrg = new Organization();
         receiverOrg.setId(receiverOrgId);
@@ -685,7 +661,7 @@ class TransferApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("接受交接：并发触发接收企业同名批次号唯一冲突时映射为 409 BATCH_NO_CONFLICT 且事务回滚")
+    @DisplayName("接受交接：并发触发批次更新唯一冲突时映射为 409 BATCH_CONCURRENT_CONFLICT 且事务回滚")
     void acceptTransfer_whenConcurrentDuplicateBatchNoConflict_rollsBackAndMapsConflict() {
         Long transferId = 6009L;
         Long batchId = 2009L;
@@ -701,21 +677,14 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-CONFLICT-001");
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setUnitCode("kg");
-        batch.setVersion(0L);
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-CONFLICT-001");
 
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
-        when(batchMapper.countByOrgIdAndBatchNo(20L, "BATCH-CONFLICT-001")).thenReturn(0);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L))
-                .thenThrow(new org.springframework.dao.DuplicateKeyException("uk_batch_org_no"));
+                .thenThrow(new org.springframework.dao.DuplicateKeyException("uk_batch_trace_no"));
 
         TransferAcceptRequest req = new TransferAcceptRequest(new BigDecimal("100.000"), "kg", OffsetDateTime.now(ZoneOffset.UTC), null, 1L);
 
@@ -724,7 +693,7 @@ class TransferApplicationServiceTest {
                 .satisfies(ex -> {
                     BusinessException be = (BusinessException) ex;
                     assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-                    assertThat(be.getCode()).isEqualTo("BATCH_NO_CONFLICT");
+                    assertThat(be.getCode()).isEqualTo("BATCH_CONCURRENT_CONFLICT");
                 });
     }
 
@@ -790,12 +759,7 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-2026-701");
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setVersion(0L);
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-701");
 
         java.util.concurrent.atomic.AtomicReference<TransferIdempotency> savedIdem = new java.util.concurrent.atomic.AtomicReference<>();
         when(idempotencyMapper.selectByOrgIdAndKey(eq(20L), eq(idempotencyKey)))
@@ -808,7 +772,6 @@ class TransferApplicationServiceTest {
                 });
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
-        when(batchMapper.countByOrgIdAndBatchNo(20L, "BATCH-2026-701")).thenReturn(0);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L)).thenReturn(1);
         when(transferMapper.selectById(transferId)).thenReturn(transfer);
@@ -898,12 +861,7 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-2026-703");
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setVersion(0L);
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-703");
 
         java.util.concurrent.atomic.AtomicReference<TransferIdempotency> savedIdem = new java.util.concurrent.atomic.AtomicReference<>();
         when(idempotencyMapper.selectByOrgIdAndKey(eq(20L), eq(idempotencyKey)))
@@ -916,7 +874,6 @@ class TransferApplicationServiceTest {
                 });
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
-        when(batchMapper.countByOrgIdAndBatchNo(20L, "BATCH-2026-703")).thenReturn(0);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L)).thenReturn(1);
 
@@ -952,13 +909,7 @@ class TransferApplicationServiceTest {
         String key128 = "idem-128-char-test-" + "x".repeat(109);
         assertThat(key128.length()).isEqualTo(128);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-128-KEY");
-        batch.setQuantity(new BigDecimal("100.000"));
-        batch.setUnitCode("kg");
-        batch.setStatus(BatchStatus.ACTIVE.name());
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-128-KEY");
 
         java.util.concurrent.atomic.AtomicReference<TransferIdempotency> savedIdem = new java.util.concurrent.atomic.AtomicReference<>();
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
@@ -1019,16 +970,10 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-2026-CODE-MISMATCH");
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setVersion(0L);
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-CODE-MISMATCH");
 
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
-        when(batchMapper.countByOrgIdAndBatchNo(20L, "BATCH-2026-CODE-MISMATCH")).thenReturn(0);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L)).thenReturn(1);
@@ -1071,16 +1016,10 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-2026-NO-CODE");
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setVersion(0L);
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-NO-CODE");
 
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
-        when(batchMapper.countByOrgIdAndBatchNo(20L, "BATCH-2026-NO-CODE")).thenReturn(0);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L)).thenReturn(1);
@@ -1118,16 +1057,10 @@ class TransferApplicationServiceTest {
         transfer.setStatus(TransferStatus.PENDING);
         transfer.setVersion(1L);
 
-        Batch batch = new Batch();
-        batch.setId(batchId);
-        batch.setOrgId(10L);
-        batch.setBatchNo("BATCH-2026-ORG-DIFF");
-        batch.setStatus(BatchStatus.ACTIVE.name());
-        batch.setVersion(0L);
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-ORG-DIFF");
 
         when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
-        when(batchMapper.countByOrgIdAndBatchNo(20L, "BATCH-2026-ORG-DIFF")).thenReturn(0);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         // 模拟底层组织或版本冲突返回 0 行

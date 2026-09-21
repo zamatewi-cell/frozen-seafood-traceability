@@ -14,7 +14,7 @@ describe('API Client', () => {
 
   it('unwraps SuccessEnvelope data correctly', async () => {
     const mockEnvelope = {
-      data: { publicTraceId: 'WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A', batchStatus: 'ACTIVE' },
+      data: { publicTraceId: 'WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A', flowStatus: 'ACTIVE', riskStatus: 'NORMAL' },
       meta: { requestId: 'req-123', timestamp: '2026-09-10T08:00:00Z' }
     }
 

@@ -77,6 +77,21 @@ jobs:
       - name: Make Maven Wrapper executable
         run: chmod +x server/mvnw
 
+      # V8 历史 trace_batch_no 回填需要高熵 pepper（TraceBatchNoHistoryPepperFlywayCallback 拒绝缺失、占位或弱值）。
+      # 每个 CI job 临时随机生成一次，仅通过 GITHUB_ENV 传给后续步骤，并注册日志掩码；不提交任何固定或真实值。
+      - name: Generate job-scoped trace batch number history pepper
+        shell: bash
+        run: |
+          set -euo pipefail
+          pepper="$(openssl rand -base64 48 | tr -d '\n')"
+          if [ "${#pepper}" -lt 64 ]; then
+            echo "Failed to generate a high-entropy pepper" >&2
+            exit 1
+          fi
+          echo "::add-mask::${pepper}"
+          echo "TRACE_BATCH_NO_HISTORY_PEPPER=${pepper}" >> "$GITHUB_ENV"
+          unset pepper
+
       - name: Run unit, API contract, health and MySQL migration tests
         working-directory: server
         run: ./mvnw -B clean test --no-transfer-progress

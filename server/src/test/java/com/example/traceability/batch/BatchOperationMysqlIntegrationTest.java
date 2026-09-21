@@ -1063,8 +1063,10 @@ class BatchOperationMysqlIntegrationTest {
     private Batch createBatchWithStatus(Long orgId, Long productId, String batchNo, BigDecimal quantity, String status) {
         Batch batch = new Batch();
         batch.setOrgId(orgId);
+        batch.setCreationOrgId(orgId);
         batch.setProductId(productId);
-        batch.setBatchNo(batchNo);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo(batchNo);
         batch.setBatchType("PROCESSING");
         batch.setQuantity(quantity);
         batch.setUnitCode("kg");
@@ -1072,7 +1074,8 @@ class BatchOperationMysqlIntegrationTest {
         batch.setOriginText("东海近海");
         batch.setProductionDate(LocalDate.now());
         batch.setShelfLifeDays(180);
-        batch.setStatus(status);
+        batch.setFlowStatus(status);
+        batch.setRiskStatus("NORMAL");
         batch.setCreationIdempotencyKey("idem-batch-" + UUID.randomUUID());
         batch.setVersion(0L);
         batch.setIsDeleted(0);

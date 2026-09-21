@@ -1,7 +1,8 @@
 package com.example.traceability.trace;
 
 import com.example.traceability.batch.domain.Batch;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.dto.BatchCreateRequest;
 import com.example.traceability.batch.dto.BatchSubmitRequest;
 import com.example.traceability.batch.mapper.BatchMapper;
@@ -296,7 +297,8 @@ class PublicTraceMysqlIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.publicTraceId").value(publicId))
                 .andExpect(jsonPath("$.data.product.name").value("东海野生大黄鱼"))
-                .andExpect(jsonPath("$.data.batchStatus").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.flowStatus").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.riskStatus").value("NORMAL"))
                 .andExpect(jsonPath("$.data.temperatureSummary.result").value("INSUFFICIENT_DATA"))
                 .andExpect(jsonPath("$.data.timeline.length()").value(1)) // 仅包含更正后的 SUBMITTED 版本，排除 CORRECTED 原版本
                 .andExpect(jsonPath("$.data.timeline[0].dataSourceLabel").value(containsString("SIMULATED")))
@@ -311,24 +313,27 @@ class PublicTraceMysqlIntegrationTest {
         assertThat(pubJson).doesNotContain("is_deleted");
         assertThat(pubJson).doesNotContain("detailsJson");
 
-        // 6. 批次变为 RECALLED 状态后，查询如实反映 batchStatus=RECALLED 且有明确模拟召回声明
-        jdbcTemplate.update("UPDATE batch SET status = 'RECALLED' WHERE id = ?", batch.getId());
+        // 6. 批次变为 RECALLED 状态后，查询如实反映 riskStatus=RECALLED 且有明确模拟召回声明
+        jdbcTemplate.update("UPDATE batch SET risk_status = 'RECALLED' WHERE id = ?", batch.getId());
         mockMvc.perform(get("/api/public/v1/public/traces/" + publicId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.batchStatus").value("RECALLED"))
+                .andExpect(jsonPath("$.data.flowStatus").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.riskStatus").value("RECALLED"))
                 .andExpect(jsonPath("$.data.recallNotice").value(containsString("模拟召回演练")));
 
         // 7. 批次变为 FROZEN 与 CLOSED 状态
-        jdbcTemplate.update("UPDATE batch SET status = 'FROZEN' WHERE id = ?", batch.getId());
+        jdbcTemplate.update("UPDATE batch SET risk_status = 'FROZEN' WHERE id = ?", batch.getId());
         mockMvc.perform(get("/api/public/v1/public/traces/" + publicId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.batchStatus").value("FROZEN"))
+                .andExpect(jsonPath("$.data.flowStatus").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.riskStatus").value("FROZEN"))
                 .andExpect(jsonPath("$.data.recallNotice").doesNotExist());
 
-        jdbcTemplate.update("UPDATE batch SET status = 'CLOSED' WHERE id = ?", batch.getId());
+        jdbcTemplate.update("UPDATE batch SET flow_status = 'CLOSED', risk_status = 'NORMAL' WHERE id = ?", batch.getId());
         mockMvc.perform(get("/api/public/v1/public/traces/" + publicId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.batchStatus").value("CLOSED"))
+                .andExpect(jsonPath("$.data.flowStatus").value("CLOSED"))
+                .andExpect(jsonPath("$.data.riskStatus").value("NORMAL"))
                 .andExpect(jsonPath("$.data.recallNotice").doesNotExist());
 
         // 8. 企业操作员停用公开追溯码 (disable is terminal)
@@ -1275,14 +1280,18 @@ class PublicTraceMysqlIntegrationTest {
     private Long insertBatchDirect(Long orgId, Long productId, String batchNo, String status) {
         Batch batch = new Batch();
         batch.setOrgId(orgId);
+        batch.setCreationOrgId(orgId);
         batch.setProductId(productId);
-        batch.setBatchNo(batchNo);
+        batch.setTraceBatchNo("TB-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+        batch.setExternalBatchNo(batchNo);
         batch.setBatchType("SOURCE");
         batch.setQuantity(new BigDecimal("100.000"));
         batch.setUnitCode("kg");
         batch.setOriginType("DOMESTIC_CAPTURE");
         batch.setOriginText("东海渔场作业区");
-        batch.setStatus(status);
+        batch.setFlowStatus(status);
+        batch.setRiskStatus("NORMAL");
+        batch.setCreationIdempotencyKey("idem-batch-" + UUID.randomUUID());
         batch.setVersion(0L);
         batch.setIsDeleted(0);
         batch.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));

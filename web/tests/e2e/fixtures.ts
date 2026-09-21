@@ -29,8 +29,8 @@ export const mockSuccessTrace: PublicTrace = {
     result: 'INSUFFICIENT_DATA',
     ruleNote: '当前切片尚未接入冷链实时温控时序采集流，暂无有效温控监测记录，不构成本项目温控合规依据。'
   },
-  batchStatus: 'ACTIVE',
-  recallNotice: null,
+  flowStatus: 'ACTIVE',
+  riskStatus: 'NORMAL',
   queriedAt: '2026-09-10T08:00:00Z',
   disclosure: '本溯源信息仅反映供应链各节点企业申报登记的电子履历，不作为货物物理真实性或防伪验证凭证；系统相关模拟标识仅用于教学实训推演。'
 }
@@ -38,7 +38,7 @@ export const mockSuccessTrace: PublicTrace = {
 export const mockRecalledTrace: PublicTrace = {
   ...mockSuccessTrace,
   publicTraceId: 'RECALL2C4P4Q6T7XZ2M7K3B2AC',
-  batchStatus: 'RECALLED',
+  riskStatus: 'RECALLED',
   recallNotice: '此批次海产品已启动系统模拟召回演练，流通环节已暂停，请联系销售商或质量管理部门处理（本提示为系统教学演练模拟信息）。'
 }
 

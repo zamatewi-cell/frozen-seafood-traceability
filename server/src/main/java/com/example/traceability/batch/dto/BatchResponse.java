@@ -12,6 +12,7 @@ import java.time.ZoneOffset;
  * 追溯批次响应 DTO。
  * <p>
  * 严格执行白名单投影，绝不暴露 {@code isDeleted}、{@code creationIdempotencyKey} 等内部字段。
+ * 业务字段投影采用双编号（{@code traceBatchNo}, {@code externalBatchNo}）与双状态（{@code flowStatus}, {@code riskStatus}）。
  * 所有审计时间统一输出带明确 UTC 偏移量的 ISO 8601 格式时间。
  * </p>
  *
@@ -22,7 +23,8 @@ public record BatchResponse(
         Long id,
         Long orgId,
         Long productId,
-        String batchNo,
+        String traceBatchNo,
+        String externalBatchNo,
         String batchType,
         BigDecimal quantity,
         String unitCode,
@@ -32,7 +34,8 @@ public record BatchResponse(
         LocalDate captureDate,
         LocalDate freezeDate,
         Integer shelfLifeDays,
-        String status,
+        String flowStatus,
+        String riskStatus,
         Long version,
         @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ssXXX", timezone = "UTC")
         OffsetDateTime createdAt,
@@ -50,7 +53,8 @@ public record BatchResponse(
                 b.getId(),
                 b.getOrgId(),
                 b.getProductId(),
-                b.getBatchNo(),
+                b.getTraceBatchNo(),
+                b.getExternalBatchNo(),
                 b.getBatchType(),
                 b.getQuantity(),
                 b.getUnitCode(),
@@ -60,7 +64,8 @@ public record BatchResponse(
                 b.getCaptureDate(),
                 b.getFreezeDate(),
                 b.getShelfLifeDays(),
-                b.getStatus(),
+                b.getFlowStatus(),
+                b.getRiskStatus(),
                 b.getVersion(),
                 b.getCreatedAt() != null ? b.getCreatedAt().atOffset(ZoneOffset.UTC) : null,
                 b.getCreatedBy(),

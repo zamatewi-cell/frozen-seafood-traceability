@@ -3,8 +3,8 @@ package com.example.traceability.trace.domain;
 /**
  * 消费者端数据脱敏与掩码工具类。
  * <p>
- * 严格按照安全白名单要求，对批次号与产地文本执行确定性掩码遮蔽，
- * 彻底杜绝原始 {@code batch_no} 与完整 {@code origin_text} 在消费者公开投影中泄露。
+ * 严格按照安全白名单要求，对外部业务批次号与产地文本执行确定性掩码遮蔽，
+ * 绝不暴露内部追溯批次号 {@code traceBatchNo}，亦杜绝完整 {@code origin_text} 在消费者公开投影中泄露。
  * </p>
  *
  * @author Seafood Traceability Team
@@ -16,9 +16,9 @@ public final class TraceDataMasker {
     }
 
     /**
-     * 业务批次号掩码遮盖（保留首尾部分字符，中间以 **** 混淆）。
+     * 外部业务批次号掩码遮盖（保留首尾部分字符，中间以 **** 混淆；若外部批次号为空或空白则返回 ****，绝不回退暴露内部 traceBatchNo）。
      *
-     * @param raw 原始批次号
+     * @param raw 外部业务批次号 (externalBatchNo)
      * @return 掩码后的公开批次号
      */
     public static String maskBatchNo(String raw) {

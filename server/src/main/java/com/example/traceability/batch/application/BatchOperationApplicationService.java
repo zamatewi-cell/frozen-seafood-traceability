@@ -8,7 +8,8 @@ import com.example.traceability.batch.domain.BatchOperationStatus;
 import com.example.traceability.batch.domain.BatchOperationType;
 import com.example.traceability.batch.domain.BatchRelation;
 import com.example.traceability.batch.domain.BatchRelationType;
-import com.example.traceability.batch.domain.BatchStatus;
+import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.dto.BatchOperationCreateRequest;
 import com.example.traceability.batch.dto.BatchOperationItemRequest;
 import com.example.traceability.batch.dto.BatchOperationItemResponse;
@@ -454,15 +455,17 @@ public class BatchOperationApplicationService {
                         HttpStatus.FORBIDDEN,
                         "ORG_SCOPE_DENIED",
                         "组织数据访问越权",
-                        "关联批次 " + b.getBatchNo() + " 属于其他企业组织，严禁跨组织流转"
+                        "关联批次 " + b.getTraceBatchNo() + " 属于其他企业组织，严禁跨组织流转"
                 );
             }
-            if (!BatchStatus.ACTIVE.name().equals(b.getStatus())) {
+            if (!BatchFlowStatus.ACTIVE.name().equals(b.getFlowStatus())
+                    || !BatchRiskStatus.NORMAL.name().equals(b.getRiskStatus())) {
                 throw new BusinessException(
                         HttpStatus.UNPROCESSABLE_ENTITY,
                         "BATCH_FLOW_BLOCKED",
                         "批次状态不可流转",
-                        "批次 " + b.getBatchNo() + " 状态为 " + b.getStatus() + "，仅 ACTIVE 状态批次允许参与操作流转"
+                        "批次 " + b.getTraceBatchNo() + " 流转或风险状态不允许操作 (flowStatus="
+                                + b.getFlowStatus() + ", riskStatus=" + b.getRiskStatus() + ")"
                 );
             }
             if (transferMapper.countPendingTransfersByBatchId(bid) > 0) {
@@ -470,7 +473,7 @@ public class BatchOperationApplicationService {
                         HttpStatus.CONFLICT,
                         "BATCH_TRANSFER_PENDING",
                         "批次存在在途交接",
-                        "批次 " + b.getBatchNo() + " 当前存在正在交接确认中的凭证(PENDING)，已形成排他业务预留，禁止参与批次操作流转"
+                        "批次 " + b.getTraceBatchNo() + " 当前存在正在交接确认中的凭证(PENDING)，已形成排他业务预留，禁止参与批次操作流转"
                 );
             }
             lockedBatchMap.put(bid, b);
@@ -517,7 +520,7 @@ public class BatchOperationApplicationService {
                         HttpStatus.UNPROCESSABLE_ENTITY,
                         "BATCH_OUTPUT_ALREADY_PRODUCED",
                         "输出批次已被产出",
-                        "批次 " + outBatch.getBatchNo() + " 已存在上游谱系边，一个批次只能由一次已提交操作产出"
+                        "批次 " + outBatch.getTraceBatchNo() + " 已存在上游谱系边，一个批次只能由一次已提交操作产出"
                 );
             }
             Batch outBatch = lockedBatchMap.get(outItem.getBatchId());
@@ -543,7 +546,7 @@ public class BatchOperationApplicationService {
                         "BATCH_QUANTITY_EXCEEDED",
                         "输入批次数量超额",
                         String.format("输入批次 %s 累计投入量(%s kg)超过声明数量(%s kg)，历史已用 %s kg，本次投入 %s kg",
-                                inBatch.getBatchNo(), totalRequested.toPlainString(), inBatch.getQuantity().toPlainString(),
+                                inBatch.getTraceBatchNo(), totalRequested.toPlainString(), inBatch.getQuantity().toPlainString(),
                                 historicalUsed.toPlainString(), inItem.getQuantity().toPlainString())
                 );
             }

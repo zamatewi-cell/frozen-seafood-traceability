@@ -35,8 +35,8 @@ const sampleTrace: PublicTrace = {
     result: 'INSUFFICIENT_DATA',
     ruleNote: '当前切片尚未接入冷链实时温控时序采集流，暂无有效温控监测记录，不构成本项目温控合规依据。'
   },
-  batchStatus: 'ACTIVE',
-  recallNotice: null,
+  flowStatus: 'ACTIVE',
+  riskStatus: 'NORMAL',
   queriedAt: '2026-09-10T08:00:00Z',
   disclosure: '本溯源信息仅反映供应链各节点企业申报登记的电子履历，不作为货物物理真实性或防伪验证凭证；系统相关模拟标识仅用于教学实训推演。'
 }
@@ -105,10 +105,10 @@ describe('ConsumerTraceView Component States', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('renders FROZEN badge when batchStatus is FROZEN', async () => {
+  it('renders FROZEN badge when riskStatus is FROZEN while flowStatus stays ACTIVE', async () => {
     vi.spyOn(traceApi, 'fetchPublicTrace').mockResolvedValue({
       ...sampleTrace,
-      batchStatus: 'FROZEN'
+      riskStatus: 'FROZEN'
     })
 
     await router.push('/trace/WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A')
@@ -118,12 +118,15 @@ describe('ConsumerTraceView Component States', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('业务冻结状态')
+    expect(wrapper.find('[data-testid="public-flow-status"]').text()).toBe('可流转')
+    expect(wrapper.find('[data-testid="public-risk-status"]').text()).toBe('冻结')
+    expect(wrapper.find('.recall-alert-card').exists()).toBe(false)
   })
 
-  it('renders CLOSED badge when batchStatus is CLOSED', async () => {
+  it('renders CLOSED badge when flowStatus is CLOSED and riskStatus is NORMAL', async () => {
     vi.spyOn(traceApi, 'fetchPublicTrace').mockResolvedValue({
       ...sampleTrace,
-      batchStatus: 'CLOSED'
+      flowStatus: 'CLOSED'
     })
 
     await router.push('/trace/WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A')
@@ -135,11 +138,12 @@ describe('ConsumerTraceView Component States', () => {
     expect(wrapper.text()).toContain('流转已关闭')
   })
 
-  it('renders prominent simulated drill alert banner when batchStatus is RECALLED', async () => {
+  it('renders prominent simulated drill alert banner when a CLOSED batch is RECALLED', async () => {
     const customNotice = '此批次海产品已启动系统模拟召回演练，流通环节已暂停'
     vi.spyOn(traceApi, 'fetchPublicTrace').mockResolvedValue({
       ...sampleTrace,
-      batchStatus: 'RECALLED',
+      flowStatus: 'CLOSED',
+      riskStatus: 'RECALLED',
       recallNotice: customNotice
     })
 
@@ -154,6 +158,9 @@ describe('ConsumerTraceView Component States', () => {
     expect(alert.text()).toContain('系统模拟召回演练声明')
     expect(alert.text()).toContain(customNotice)
     expect(alert.text()).toContain('教学演练推演')
+    expect(wrapper.find('.consumer-hero-card .status-badge').text()).toContain('模拟召回提示')
+    expect(wrapper.find('[data-testid="public-flow-status"]').text()).toBe('已关闭')
+    expect(wrapper.find('[data-testid="public-risk-status"]').text()).toBe('模拟召回')
   })
 
   it('renders empty timeline notice when timeline is empty array', async () => {
