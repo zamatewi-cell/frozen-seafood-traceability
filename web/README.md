@@ -1,6 +1,6 @@
-# 冷冻海产品溯源系统 - 消费者查询 Web 前端
+# 冷冻海产品溯源系统 - 生产 Web 前端
 
-面向消费者的冷冻海产品公开追溯与履历查验生产前端应用。基于 Vue 3 + TypeScript + Vite 8 构建，遵循 [ADR-003 前端技术选型决策](../docs/adr/ADR-003-vue-toolchain.md)，严格对接已合入的 FR-TRACE-002 公开追溯接口。
+包含消费者公开追溯查询页与企业端（Phase 0：登录、会话、工作台、批次列表与只读详情）的生产前端应用。基于 Vue 3 + TypeScript + Vite 8 构建，遵循 [ADR-003 前端技术选型决策](../docs/adr/ADR-003-vue-toolchain.md)，严格对接已合入的 FR-TRACE-002 公开追溯接口。
 
 > **提示**：本目录为正式生产前端工程。根目录下的 `prototype/` 原型工程为 Phase 1 阶段交互走查参考基线，保持冻结不作修改。
 
@@ -33,8 +33,23 @@
   - 紧凑移动优先（Mobile-First）：针对 360px (Android)、390px (iPhone)、480px 等小屏竖屏深度适配，触控区域均 ≥ 44px；
   - 意图清晰的桌面端布局（Desktop）：在宽屏下采用主副两列流式组合（左侧产品属性与温控、右侧流转时间线），避免手机卡片单纯横向拉伸变形。
 - **路由定义**：
-  - `/trace`：手动输入查验页（含表单、RFC 4648 Base32 格式实时提示与清空功能）；
-  - `/trace/:publicTraceId`：直接查询路由（支持扫码一码直达，自动执行参数校验与异步加载）。
+  - `PublicLayout`：
+    - `/trace`：手动输入查验页（含表单、RFC 4648 Base32 格式实时提示与清空功能）；
+    - `/trace/:publicTraceId`：直接查询路由（匿名访问，不触发企业会话检查）；
+    - `/login`：企业用户登录（已登录时跳转 `/app`）。
+  - `EnterpriseLayout`（需要登录，未登录跳转 `/login?redirect=...`）：
+    - `/app`：工作台，仅展示真实会话信息与业务入口，不展示虚构统计；
+    - `/app/batches`：批次列表（服务端分页，flowStatus / riskStatus 筛选保存在 URL 中）；
+    - `/app/batches/:id`：批次只读详情。
+
+## 企业端会话与 CSRF
+
+- 登录、登出与会话恢复直接调用后端 `POST /api/v1/auth/login`、`POST /api/v1/auth/logout`、`GET /api/v1/me`；
+  会话凭据只存在于服务端 Session 的 HttpOnly Cookie（`TRACESESSION`）中，前端仅在内存中保存当前用户信息。
+- 所有非 GET 的 `/api/v1` 请求由 `src/api/client.ts` 自动附带 `GET /api/v1/auth/csrf` 返回的 `X-CSRF-TOKEN`，
+  凭据被拒绝（403）时刷新一次后重试；登出后丢弃旧凭据。
+- 任一企业接口返回 401 时清理前端会话并回到登录页。
+- 产品与组织名称通过最小只读目录 `GET /api/v1/products/{id}`、`GET /api/v1/organizations/{id}` 获取。
 
 ---
 
@@ -100,7 +115,7 @@ VITE_BACKEND_PROXY_TARGET=http://localhost:8080
 | `npm run test` | Vitest 单元与组件交互测试 | 全部绿色通过 |
 | `npm run build` | Vite 生产包编译构建 | 产物输出至 `dist/` |
 | `npm run test:e2e` | Playwright 多端视口 (360/390/desktop) 浏览器自动化测试 | 全部绿色通过 |
-| `npm run test:smoke` | 真实 Vue → Vite proxy → Spring Boot → MySQL 8.4 冒烟 | 成功后夹具残留 0 行 |
+| `npm run test:smoke` | 真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue 企业端与消费者冒烟 | 隔离 schema 用后删除，残留 0 |
 
 ---
 
@@ -114,4 +129,13 @@ npm run build
 
 ### 真实联调冒烟
 
-`npm run test:smoke` 会读取仓库根目录未提交的 `.env`（或同名环境变量），要求 `seafood-mysql` 容器可用。脚本会分配并确认无碰撞的随机夹具标识，启动独立的 `18081` 端口 Spring Boot 进程，再由 Playwright 驱动页面经过 Vite 代理完成查询。无论成功或失败，脚本都会按精确主键物理清理夹具并验证残留为 0；缺少后端或数据库时测试会失败，不会降级为假成功。
+`npm run test:smoke` 读取仓库根目录未提交的 `.env`（或同名环境变量，需要 `DB_PASSWORD` 与 `DB_ROOT_PASSWORD`），要求 `seafood-mysql`（MySQL 8.4）容器可用，并且 5173、18081 端口空闲。脚本会：
+
+1. 新建隔离 schema `seafood_trace_phase0_demo_<随机后缀>` 并仅对其授权，绝不读写 `seafood_trace`；
+2. 以进程级随机 `TRACE_BATCH_NO_HISTORY_PEPPER` 在 `18081` 端口启动 Spring Boot，由 Flyway 执行 V1～V8；
+3. 用 SQL 准备组织、账号（随机密码）、角色与产品，用真实 HTTP API（Session + CSRF）创建并提交批次、激活公开码；
+   Phase 0 尚无冻结 / 召回 / 关闭接口，因此 FROZEN、RECALLED、CLOSED 状态在隔离 schema 中直接写入，仅用于验证展示与筛选；
+4. 由 Playwright 在不使用任何接口拦截的情况下完成：登录 → 工作台 → 批次列表 → 双状态筛选 → 详情 → 刷新恢复会话 → 返回列表 → 登出 → 受保护路由回到登录页，以及匿名消费者查询；
+5. 无论成功或失败都会停止后端、删除该 schema 并撤销授权。
+
+密码、pepper、Cookie 与 CSRF 凭据只通过进程环境和内存传递，不会被打印。
