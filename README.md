@@ -1,8 +1,8 @@
 # 冷冻海产品溯源系统
 
-面向高校实训的冷冻海产品供应链追溯原型。系统以“批次、追溯事件、批次关系”为核心，记录来源、加工速冻、仓储、运输、交接、检测和销售等关键节点，支持消费者一码查询，以及企业侧的正向追踪、反向溯源和模拟召回。
+面向高校实训的冷冻海产品供应链追溯原型。系统以“批次、追溯事件、批次关系”为核心，目标覆盖来源、加工速冻、仓储、运输、交接、检测、销售、消费者查询和模拟召回。当前已经实现部分后端基础模块及消费者查询页，尚未形成完整企业端正常业务链和异常召回链。
 
-> 当前阶段：`Phase 3 / 最小纵向闭环研发`。已完成 Phase 1 设计评审与 Phase 2 后端工程骨架建设；已完成 Issue #7 会话认证与组织上下文；已完成 Issue #9 产品主数据与分阶段温控规则；已完成 Issue #11 组织范围批次草稿生命周期；已完成 Issue #13 批次操作、物料平衡与谱系边；已完成 Issue #15 追加式追溯事件与更正工作流；已完成 Issue #17（PR #18 已合入）公开追溯码与消费者公开投影；已完成 Issue #19（PR #20 已合入）响应式消费者追溯 Web 生产前端；当前分支 `codex/21-batch-transfer-lifecycle` 已严格按 TDD 完成 Issue #21 企业间整批交接生命周期（FR-TRANSFER-001：跨企业整批交接生命周期 DRAFT -> PENDING -> ACCEPTED | REJECTED、双方双时间独立留痕、批次所有权原子转移与数量快照防篡改、拒收不转移所有权与不追加事件、同名批次冲突排他回滚、在途批次加工流转排他预留、多动作独立幂等表、open_batch_id 虚拟生成列排他唯一索引与 Flyway V7 物理约束）。
+> 当前阶段：`业务模型纠偏后的 Demo MVP 重构阶段`。统一业务契约 v1.1 与 Demo MVP 路线图已经确认。后续先完成 Phase 0 基础模型纠偏，再以端到端纵向 Slice 形成 Phase A 正常业务闭环；温度异常、告警、隔离和模拟召回属于 Phase B。数据库中已有表结构或文档中的规划项不代表对应功能已经实现。
 
 ## 项目边界
 
@@ -12,7 +12,7 @@
 - 演示数据必须虚构或脱敏，不上传真实个人信息、密钥、企业证照原件。
 - 当前目录中的“肉类食品溯源”材料仅供结构参考，不是本项目需求来源，也不会提交到仓库。
 
-## MVP 业务闭环
+## 目标 MVP 业务闭环（规划）
 
 ```mermaid
 flowchart LR
@@ -29,6 +29,8 @@ flowchart LR
 
 ## 已形成的项目文档
 
+- [统一业务契约 v1.1](docs/BUSINESS_CONTRACT_V1.1.md)：当前业务对象、状态、数量、交接运输、销售、异常和权限规则的最高优先级实现基线。
+- [Demo MVP 实施路线图](docs/DEMO_MVP_ROADMAP.md)：当前实现差距、Phase 0/A/B、企业端最小页面、纵向 Slice 和验收顺序。
 - [产品需求文档](docs/PRD.md)：产品目标、角色、功能需求、业务规则、数据模型和验收标准。
 - [领域调研与依据](docs/RESEARCH.md)：法规、标准、旧参考资料差异与需求推导。
 - [开发流程规范](docs/DEVELOPMENT_PROCESS.md)：从需求到发布的阶段门、Issue、分支、提交、PR、测试和发布规则。
@@ -86,8 +88,14 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 - [x] 完成 Phase 3 公开追溯码与消费者公开投影（Issue #17 / PR #18：26 位 RFC 4648 Base32 唯一编码、内部 token_hash SHA-256 哈希索引、企业端激活与终态停用、统一幂等记录表持久绑定与组织隔离、消费者匿名免认证免 CSRF 白名单安全投影、敏感自由文本隔离、温度 INSUFFICIENT_DATA 诚实声明、RECALLED 模拟召回演练声明与 Flyway V6 物理约束）
 - [x] 完成 Phase 3 响应式消费者追溯 Web 生产前端（Issue #19 / PR #20 已合并到主分支：Vue 3 + TypeScript + Vite 8、移动优先查询页、真实性披露、Vitest、Playwright、真实 Vue → Spring Boot → MySQL 8.4 冒烟与独立前端 CI）
 - [x] 完成 Phase 3 企业间整批交接生命周期（Issue #21：FR-TRANSFER-001 跨组织整批交接生命周期 DRAFT -> PENDING -> ACCEPTED | REJECTED、双时间维度独立留痕、批次持有组织原子转移与数量快照防篡改、拒收不转移与不生成事件、同名批次排他回滚、在途批次加工排他预留、多动作独立幂等表、open_batch_id 虚拟生成列排他唯一索引与 Flyway V7 物理约束）
-- [ ] 完成异常、追溯、召回、测试、部署和答辩材料
+- [x] 确认统一业务契约 v1.1 与 Demo MVP 实施路线图
+- [ ] 完成 Phase 0：Batch 双状态、双编号及企业端基础壳纠偏
+- [ ] 完成 Phase A：来源建批至消费者查询的正常业务闭环
+- [ ] 完成 Phase B：温度异常、隔离与模拟召回闭环
+- [ ] 完成综合测试、部署和答辩材料
 
 ## 下一步
 
-在 Issue #7 会话认证、Issue #9 产品及温控规则、Issue #11 批次生命周期、Issue #13 批次操作与谱系边、Issue #15 追溯事件更正、Issue #17 公开追溯码、Issue #19 消费者 Web 端及 Issue #21 企业间整批交接生命周期的基础上，由团队推进后续质量告警处置、双向图谱追溯与综合答辩材料准备。
+按照 [Demo MVP 实施路线图](docs/DEMO_MVP_ROADMAP.md) 从 Phase 0 开始：先收敛 Batch 双状态、双编号和企业端基础壳，再按“来源建批 → Transfer + Shipment → PROCESS/SPLIT → 自有冷库 → 终端 Sale → PublicTraceCode 与消费者查询”的纵向 Slice 推进 Phase A。
+
+在 Phase A 完成并通过 3～5 分钟真实业务演示前，暂停 FR-COLD-001A、TemperatureRecord、Alert、QUARANTINED、Freeze/Recall、InspectionReport、第三方仓储和企业端完整图谱。当前 Shipment 只有数据库表、Sale 尚不存在，TemperatureRecord、Alert、InspectionReport、Recall 也没有可执行 Java/API，不得描述为已完成功能。
