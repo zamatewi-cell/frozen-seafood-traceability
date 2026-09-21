@@ -127,8 +127,8 @@ watch(
 
     <div v-else-if="viewState === 'SUCCESS' && traceData" class="trace-content-grid">
       <TraceRecallAlert
-        v-if="traceData.batchStatus === 'RECALLED'"
-        :notice="traceData.recallNotice"
+        v-if="traceData.riskStatus === 'RECALLED'"
+        :notice="traceData.recallNotice ?? null"
       />
 
       <div class="desktop-layout-row">

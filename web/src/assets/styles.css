@@ -142,3 +142,102 @@ button {
   background-color: #f1f5f9;
   border: 1px solid var(--color-border-dark);
 }
+
+/* ===================== 企业端通用样式 ===================== */
+.ent-page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.ent-page-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--color-text-title);
+}
+
+.ent-page-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.ent-card {
+  background-color: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.ent-card-title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-title);
+}
+
+.ent-button {
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 1px solid var(--color-border-dark);
+  border-radius: var(--radius-sm);
+  background-color: #ffffff;
+  color: var(--color-text-body);
+  font-size: 13px;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ent-button:hover:not(:disabled) {
+  border-color: var(--color-ocean);
+  color: var(--color-ocean-hover);
+}
+
+.ent-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ent-state {
+  padding: 32px 16px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--color-text-muted);
+}
+
+.ent-state.error {
+  color: var(--color-danger-text);
+  background-color: var(--color-danger-bg);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-sm);
+}
+
+.ent-dl {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: 8px 16px;
+  margin: 0;
+  font-size: 14px;
+}
+
+.ent-dl dt {
+  color: var(--color-text-muted);
+}
+
+.ent-dl dd {
+  margin: 0;
+  color: var(--color-text-body);
+  word-break: break-all;
+}
+
+.ent-muted {
+  color: var(--color-text-light);
+}

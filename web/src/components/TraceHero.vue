@@ -2,13 +2,15 @@
 import { computed } from 'vue'
 import AppIcons from '@/components/icons/AppIcons.vue'
 import type { PublicTrace } from '@/types/trace'
-import { formatBatchStatus } from '@/utils/formatters'
+import { formatFlowStatus, formatPublicTraceStatus, formatRiskStatus } from '@/utils/formatters'
 
 const props = defineProps<{
   trace: PublicTrace
 }>()
 
-const statusInfo = computed(() => formatBatchStatus(props.trace.batchStatus))
+const statusInfo = computed(() => formatPublicTraceStatus(props.trace.flowStatus, props.trace.riskStatus))
+const flowInfo = computed(() => formatFlowStatus(props.trace.flowStatus))
+const riskInfo = computed(() => formatRiskStatus(props.trace.riskStatus))
 </script>
 
 <template>
@@ -23,6 +25,12 @@ const statusInfo = computed(() => formatBatchStatus(props.trace.batchStatus))
       </div>
       <span class="status-note">{{ statusInfo.description }}</span>
     </div>
+
+    <p class="dual-status-row" aria-label="批次双维状态">
+      <span>流转状态：<strong data-testid="public-flow-status">{{ flowInfo.label }}</strong></span>
+      <span class="divider">·</span>
+      <span>风险状态：<strong data-testid="public-risk-status">{{ riskInfo.label }}</strong></span>
+    </p>
 
     <h1 class="product-title">{{ trace.product.name }}</h1>
 
@@ -57,6 +65,17 @@ const statusInfo = computed(() => formatBatchStatus(props.trace.batchStatus))
   gap: 12px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+.dual-status-row {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dual-status-row strong {
+  color: var(--color-text-body);
 }
 .status-note {
   font-size: 11px;
