@@ -19,6 +19,7 @@ import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.masterdata.domain.Product;
 import com.example.traceability.masterdata.mapper.ProductMapper;
+import com.example.traceability.trace.application.TraceEventApplicationService;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -27,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
 
@@ -47,15 +49,18 @@ public class BatchApplicationService {
     private final BatchMapper batchMapper;
     private final ProductMapper productMapper;
     private final TraceBatchNoGenerator traceBatchNoGenerator;
+    private final TraceEventApplicationService traceEventApplicationService;
 
     public BatchApplicationService(
             BatchMapper batchMapper,
             ProductMapper productMapper,
-            TraceBatchNoGenerator traceBatchNoGenerator
+            TraceBatchNoGenerator traceBatchNoGenerator,
+            TraceEventApplicationService traceEventApplicationService
     ) {
         this.batchMapper = batchMapper;
         this.productMapper = productMapper;
         this.traceBatchNoGenerator = traceBatchNoGenerator;
+        this.traceEventApplicationService = traceEventApplicationService;
     }
 
     /**
@@ -142,13 +147,15 @@ public class BatchApplicationService {
     }
 
     /**
-     * 创建批次草稿。
+     * 创建来源批次草稿。
      * <p>
-     * 仅允许 OPERATOR 角色操作。系统管理员按 RBAC 原则默认不能代写企业业务。
+     * 企业端公开创建接口只建立来源批次：仅 {@code orgType=SOURCE} 组织的 OPERATOR 可以调用，
+     * batchType 由服务端固定为 SOURCE，客户端不能选择或指定任何其他批次类型；
+     * PROCESSING 等输出批次只能在未来由 BatchOperation 产生。系统管理员按 RBAC 原则默认不能代写企业业务。
      * 强制携带 Idempotency-Key；同<b>创建组织</b>同 key 且请求语义相同时返回原批次；
      * 语义不同时返回 409 IDEMPOTENCY_KEY_REUSED。
      * 服务端生成全局唯一 traceBatchNo，初始化 flowStatus=DRAFT, riskStatus=NORMAL，
-     * 并把 creationOrgId 与 orgId 同时置为当前主体组织。
+     * 并把 creationOrgId 与 orgId 同时置为当前主体组织。请求体夹带任何未声明字段时返回 400。
      * </p>
      * <p>
      * 幂等作用域使用不可变的 creationOrgId 而非会随交接转移的 orgId，因此：
@@ -166,6 +173,7 @@ public class BatchApplicationService {
     @Transactional
     public BatchResponse createDraftBatch(BatchCreateRequest req, String idempotencyKey, TraceSecurityPrincipal principal) {
         checkOperatorRole(principal);
+        checkSourceOrganization(principal, "只有来源组织 (SOURCE) 可以创建来源批次");
 
         // 1. 幂等键基础格式校验
         if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.trim().length() < 16 || idempotencyKey.trim().length() > 128) {
@@ -178,11 +186,18 @@ public class BatchApplicationService {
         }
         String cleanIdempotencyKey = idempotencyKey.trim();
 
-        // 2. 枚举字段与基础参数业务校验与规范化
-        if (!BatchType.isValid(req.batchType())) {
-            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "不支持的批次环节类型: " + req.batchType());
+        // 2. 拒绝客户端夹带的服务端字段或任何未声明字段（batchType、traceBatchNo、orgId、flowStatus 等）
+        if (req.unknownFields() != null && !req.unknownFields().isEmpty()) {
+            throw new BusinessException(
+                    HttpStatus.BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "参数校验失败",
+                    "来源批次创建请求不接受以下字段（由服务端决定或未在契约中声明）: " + String.join(", ", req.unknownFields().keySet())
+            );
         }
-        String normalizedBatchType = BatchType.fromCode(req.batchType()).name();
+
+        // 3. 枚举字段与基础参数业务校验与规范化；批次类型由服务端固定为 SOURCE
+        String normalizedBatchType = BatchType.SOURCE.name();
 
         if (!OriginType.isValid(req.originType())) {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "不支持的来源类型: " + req.originType());
@@ -427,10 +442,13 @@ public class BatchApplicationService {
     }
 
     /**
-     * 提交批次草稿（DRAFT+NORMAL -> ACTIVE+NORMAL）。
+     * 提交激活来源批次草稿（DRAFT+NORMAL -> ACTIVE+NORMAL），并在同一事务内自动生成唯一 SOURCE 追溯事件。
      * <p>
-     * 仅限 OPERATOR 角色操作。关联产品必须处于 ACTIVE 状态。
-     * 单条 SQL 同时约束 id + org_id + flow_status='DRAFT' + risk_status='NORMAL' + version，原子递增版本号。
+     * 仅限来源组织 (SOURCE) 的 OPERATOR 操作；批次必须为 SOURCE 类型、当前责任组织仍是创建它的来源组织、
+     * 来源字段完整且关联产品处于 ACTIVE 状态。
+     * 单条 SQL 同时约束 id + org_id + flow_status='DRAFT' + risk_status='NORMAL' + version，原子递增版本号；
+     * 并发提交时只有一个事务能命中该条件更新，其余返回 409。
+     * SOURCE 事件写入失败会抛出异常并使批次激活随事务整体回滚。
      * </p>
      *
      * @param batchId   批次 ID
@@ -441,6 +459,7 @@ public class BatchApplicationService {
     @Transactional
     public BatchResponse submitDraftBatch(Long batchId, BatchSubmitRequest req, TraceSecurityPrincipal principal) {
         checkOperatorRole(principal);
+        checkSourceOrganization(principal, "只有来源组织 (SOURCE) 可以提交激活来源批次");
 
         if (req.version() == null || req.version() < 0) {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "乐观锁版本号 version 不能为空且必须非负");
@@ -461,12 +480,41 @@ public class BatchApplicationService {
             );
         }
 
+        // 当前责任组织必须仍是创建该来源批次的组织
+        if (!Objects.equals(existing.getCreationOrgId(), existing.getOrgId())) {
+            throw new BusinessException(
+                    HttpStatus.FORBIDDEN,
+                    "ORG_SCOPE_DENIED",
+                    "组织数据访问越权",
+                    "只有创建该来源批次且仍为当前责任组织的来源组织可以提交激活"
+            );
+        }
+
         if (!BatchFlowStatus.DRAFT.name().equals(existing.getFlowStatus()) || !BatchRiskStatus.NORMAL.name().equals(existing.getRiskStatus())) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
                     "INVALID_STATE_TRANSITION",
                     "非法状态流转",
                     "仅处于草稿正常状态 (DRAFT+NORMAL) 的批次允许提交激活，当前状态为: flow=" + existing.getFlowStatus() + ", risk=" + existing.getRiskStatus()
+            );
+        }
+
+        // 普通提交只激活来源批次；输出批次未来只能随 BatchOperation 提交激活
+        if (!BatchType.SOURCE.name().equals(existing.getBatchType())) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "BATCH_TYPE_NOT_SUBMITTABLE",
+                    "批次类型不允许普通提交",
+                    "普通提交接口仅允许激活来源批次 (SOURCE)，当前批次类型为: " + existing.getBatchType()
+            );
+        }
+
+        if (!OriginType.isValid(existing.getOriginType()) || existing.getOriginText() == null || existing.getOriginText().isBlank()) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "SOURCE_FIELDS_INCOMPLETE",
+                    "来源信息不完整",
+                    "来源批次激活前必须具备合法的来源类型与产地来源描述"
             );
         }
 
@@ -494,7 +542,7 @@ public class BatchApplicationService {
         }
 
         // 3. 单条 SQL 原子状态流转与版本递增 (id + org_id + flow_status='DRAFT' + risk_status='NORMAL' + version)
-        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS);
         int affectedRows = batchMapper.submitDraftBatch(batchId, principal.getOrgId(), req.version(), nowUtc, principal.getUserId());
         if (affectedRows == 0) {
             Batch latest = batchMapper.selectByIdIgnoreTenantForUpdate(batchId);
@@ -520,8 +568,21 @@ public class BatchApplicationService {
             );
         }
 
+        // 4. 同一事务内自动投影唯一 SOURCE 追溯事件；写入失败抛出异常，批次激活随之回滚
         Batch submitted = batchMapper.selectByIdAndOrgId(batchId, principal.getOrgId());
+        traceEventApplicationService.appendSourceEvent(submitted, principal.getUserId(), nowUtc);
         return BatchResponse.fromEntity(submitted);
+    }
+
+    private void checkSourceOrganization(TraceSecurityPrincipal principal, String detail) {
+        if (principal == null || !"SOURCE".equals(principal.getOrgType())) {
+            throw new BusinessException(
+                    HttpStatus.FORBIDDEN,
+                    "ORG_TYPE_NOT_ALLOWED",
+                    "组织类型不允许当前操作",
+                    detail
+            );
+        }
     }
 
     private void checkOperatorRole(TraceSecurityPrincipal principal) {
@@ -554,6 +615,7 @@ public class BatchApplicationService {
             String normalizedOriginType,
             String normalizedUnitCode
     ) {
+        // batchType 恒为服务端决定的 SOURCE；历史非 SOURCE 批次即便同 key 也视为语义不同
         return Objects.equals(b.getExternalBatchNo(), normalizedExternal)
                 && Objects.equals(b.getProductId(), req.productId())
                 && Objects.equals(b.getBatchType(), normalizedBatchType)

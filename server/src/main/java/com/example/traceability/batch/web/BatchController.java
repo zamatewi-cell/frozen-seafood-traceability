@@ -90,10 +90,13 @@ public class BatchController {
     }
 
     /**
-     * 创建批次草稿（仅限企业操作员 OPERATOR 角色）。
+     * 创建来源批次草稿（仅限来源组织 SOURCE 的企业操作员 OPERATOR）。
+     * <p>
+     * batchType 固定为 SOURCE，初始状态固定为 DRAFT/NORMAL；traceBatchNo、orgId 等服务端字段不接受客户端传入。
+     * </p>
      *
      * @param idempotencyKey 客户端幂等键
-     * @param request        批次创建参数
+     * @param request        来源批次创建参数
      * @param principal      当前认证主体
      * @return 创建后的批次详情
      */
@@ -125,7 +128,10 @@ public class BatchController {
     }
 
     /**
-     * 提交激活批次草稿（仅限企业操作员 OPERATOR 角色）。
+     * 提交激活来源批次草稿（仅限来源组织 SOURCE 的企业操作员 OPERATOR）。
+     * <p>
+     * DRAFT/NORMAL -> ACTIVE/NORMAL，并在同一事务内自动生成唯一 SOURCE 追溯事件。
+     * </p>
      *
      * @param batchId   批次内部主键 ID
      * @param request   提交请求参数（必须携带 version）

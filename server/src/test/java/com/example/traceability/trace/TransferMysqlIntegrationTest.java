@@ -291,7 +291,7 @@ class TransferMysqlIntegrationTest {
             String idemCreate
     ) throws Exception {
         BatchCreateRequest createReq = new BatchCreateRequest(
-                externalBatchNo, testProduct.getId(), "SOURCE",
+                externalBatchNo, testProduct.getId(),
                 quantity, "kg", "DOMESTIC_CAPTURE", "舟山渔场",
                 LocalDate.now(), null, null, 180
         );
@@ -818,7 +818,7 @@ class TransferMysqlIntegrationTest {
         assertThat(batchCountBeforeReplay).isEqualTo(1);
 
         BatchCreateRequest replayReq = new BatchCreateRequest(
-                "EXT-SHARED-KEY-S", testProduct.getId(), "SOURCE",
+                "EXT-SHARED-KEY-S", testProduct.getId(),
                 new BigDecimal("300.000"), "kg", "DOMESTIC_CAPTURE", "舟山渔场",
                 LocalDate.now(), null, null, 180
         );
@@ -841,7 +841,7 @@ class TransferMysqlIntegrationTest {
 
         // 同 key 不同载荷仍然是 409 IDEMPOTENCY_KEY_REUSED
         BatchCreateRequest differentPayload = new BatchCreateRequest(
-                "EXT-SHARED-KEY-S", testProduct.getId(), "SOURCE",
+                "EXT-SHARED-KEY-S", testProduct.getId(),
                 new BigDecimal("999.000"), "kg", "DOMESTIC_CAPTURE", "舟山渔场",
                 LocalDate.now(), null, null, 180
         );

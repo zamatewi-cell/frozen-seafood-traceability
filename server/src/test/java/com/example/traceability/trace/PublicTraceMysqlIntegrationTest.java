@@ -233,7 +233,7 @@ class PublicTraceMysqlIntegrationTest {
         // 3. 记录两条事件：一条原事件随后被更正，一条为有效事件
         OffsetDateTime occurredAt1 = OffsetDateTime.of(2026, 9, 1, 8, 0, 0, 0, ZoneOffset.UTC);
         CreateTraceEventRequest ev1Req = new CreateTraceEventRequest(
-                "SOURCE", occurredAt1, site.getId(), "MANUAL", "出塘采收初始记录", Map.of("temp", -15.0)
+                "FREEZE", occurredAt1, site.getId(), "MANUAL", "出塘采收初始记录", Map.of("temp", -15.0)
         );
         String event1Key = "idem-ev1-" + suffix;
         MvcResult ev1Res = mockMvc.perform(post("/api/v1/batches/" + batch.getId() + "/events")
@@ -251,7 +251,7 @@ class PublicTraceMysqlIntegrationTest {
         // 更正事件 1
         OffsetDateTime occurredAt1Corrected = OffsetDateTime.of(2026, 9, 1, 8, 30, 0, 0, ZoneOffset.UTC);
         CorrectTraceEventRequest corrReq = new CorrectTraceEventRequest(
-                "SOURCE", occurredAt1Corrected, site.getId(), "SIMULATED", "采收校准更正", Map.of("temp", -18.0), "修正水温记录"
+                "FREEZE", occurredAt1Corrected, site.getId(), "SIMULATED", "采收校准更正", Map.of("temp", -18.0), "修正水温记录"
         );
         String corrKey = "idem-corr-" + suffix;
         MvcResult corrRes = mockMvc.perform(post("/api/v1/batches/" + batch.getId() + "/events/" + ev1Id + "/corrections")
@@ -300,8 +300,10 @@ class PublicTraceMysqlIntegrationTest {
                 .andExpect(jsonPath("$.data.flowStatus").value("ACTIVE"))
                 .andExpect(jsonPath("$.data.riskStatus").value("NORMAL"))
                 .andExpect(jsonPath("$.data.temperatureSummary.result").value("INSUFFICIENT_DATA"))
-                .andExpect(jsonPath("$.data.timeline.length()").value(1)) // 仅包含更正后的 SUBMITTED 版本，排除 CORRECTED 原版本
+                // 更正后的 SUBMITTED 版本 + 批次提交激活自动产生的 SOURCE；排除 CORRECTED 原版本
+                .andExpect(jsonPath("$.data.timeline.length()").value(2))
                 .andExpect(jsonPath("$.data.timeline[0].dataSourceLabel").value(containsString("SIMULATED")))
+                .andExpect(jsonPath("$.data.timeline[1].event").value("原料采收/出塘"))
                 .andReturn();
 
         String pubJson = pubQueryRes.getResponse().getContentAsString();
@@ -1302,7 +1304,7 @@ class PublicTraceMysqlIntegrationTest {
 
     private Batch createAndSubmitBatch(HttpSession session, Long productId, String batchNo, String originText) throws Exception {
         BatchCreateRequest req = new BatchCreateRequest(
-                batchNo, productId, "SOURCE", new BigDecimal("100.000"), "kg",
+                batchNo, productId, new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", originText,
                 LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 2), 180
         );

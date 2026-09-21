@@ -22,6 +22,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
@@ -32,7 +33,9 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -59,6 +62,12 @@ public class TraceEventApplicationService {
     private static final Logger log = LoggerFactory.getLogger(TraceEventApplicationService.class);
 
     private static final Pattern DETAIL_KEY_PATTERN = Pattern.compile("^[a-z][A-Za-z0-9]{0,63}$");
+
+    /** 服务端自动事件保留的幂等键前缀；人工事件接口不得使用。 */
+    static final String RESERVED_IDEMPOTENCY_PREFIX = "SYS:";
+
+    /** 只能由结构化业务对象自动投影、人工普通事件接口不得伪造的事件类型（本切片落地 SOURCE）。 */
+    private static final Set<String> AUTO_ONLY_EVENT_TYPES = Set.of(TraceEventType.SOURCE.name());
 
     private static final Set<String> FORBIDDEN_DETAIL_KEYS = Set.of(
             "id", "batchid", "batch_id", "orgid", "org_id", "siteid", "site_id",
@@ -148,6 +157,7 @@ public class TraceEventApplicationService {
 
         // 1. 基础字段业务校验与规范化
         String normalizedEventType = validateEventType(req.eventType());
+        rejectAutoOnlyEventType(normalizedEventType);
         String normalizedDataSource = validateDataSource(req.dataSource());
         LocalDateTime reqOccurredAtUtc = toUtcLocalDateTime(req.occurredAt(), "业务发生时间 occurredAt");
         String cleanSummary = validateSummary(req.summary());
@@ -271,6 +281,7 @@ public class TraceEventApplicationService {
 
         // 1. 基础字段业务校验与规范化
         String normalizedEventType = validateEventType(req.eventType());
+        rejectAutoOnlyEventType(normalizedEventType);
         String normalizedDataSource = validateDataSource(req.dataSource());
         LocalDateTime reqOccurredAtUtc = toUtcLocalDateTime(req.occurredAt(), "业务发生时间 occurredAt");
         String cleanSummary = validateSummary(req.summary());
@@ -334,6 +345,15 @@ public class TraceEventApplicationService {
         }
         if (!Objects.equals(targetEvent.getBatchId(), batchId)) {
             throw new ResourceNotFoundException("待更正事件 " + eventId + " 不属于批次 " + batchId);
+        }
+        // 自动投影事件（如 SOURCE）由结构化业务对象唯一决定，禁止经人工更正链替换或作废
+        if (targetEvent.getEventType() != null && AUTO_ONLY_EVENT_TYPES.contains(targetEvent.getEventType())) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "AUTO_EVENT_NOT_CORRECTABLE",
+                    "自动事件不可人工更正",
+                    "事件类型 " + targetEvent.getEventType() + " 由业务单据自动生成，不能通过人工更正接口修改"
+            );
         }
 
         // 5. 获得目标事件排他锁后、检查状态前，再次当前读复核幂等键（消除同 key 并发更正竞争时等待唤醒后的误判）
@@ -476,7 +496,26 @@ public class TraceEventApplicationService {
                     "Idempotency-Key 请求头长度必须在 16 到 128 个字符之间，当前长度: " + clean.length()
             );
         }
+        if (clean.toUpperCase(Locale.ROOT).startsWith(RESERVED_IDEMPOTENCY_PREFIX)) {
+            throw new BusinessException(
+                    HttpStatus.BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "参数校验失败",
+                    "Idempotency-Key 不得使用服务端保留前缀 " + RESERVED_IDEMPOTENCY_PREFIX
+            );
+        }
         return clean;
+    }
+
+    private void rejectAutoOnlyEventType(String normalizedEventType) {
+        if (AUTO_ONLY_EVENT_TYPES.contains(normalizedEventType)) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "EVENT_TYPE_NOT_MANUAL",
+                    "事件类型不允许人工录入",
+                    "事件类型 " + normalizedEventType + " 只能由业务单据自动生成（SOURCE 由来源批次提交激活自动产生），人工事件接口不得创建或更正为该类型"
+            );
+        }
     }
 
     private String validateEventType(String eventType) {
@@ -782,6 +821,91 @@ public class TraceEventApplicationService {
             return false;
         }
         return Objects.equals(existingMap, requestMap);
+    }
+
+    /**
+     * 来源批次激活时，在调用方事务内自动投影唯一一条 SOURCE 追溯事件。
+     * <p>
+     * 唯一可靠触发源是 SOURCE Batch 从 DRAFT/NORMAL 激活为 ACTIVE/NORMAL（统一业务契约 v1.1 §11）。
+     * 事件幂等身份由服务端基于批次 ID 决定（{@link #sourceEventIdempotencyKey(Long)}），
+     * 并由既有唯一约束 {@code uk_trace_event_org_idempotency (org_id, idempotency_key)} 保证同一批次至多一条 SOURCE；
+     * 人工事件接口拒绝 {@code SYS:} 前缀幂等键，客户端无法预先占用该身份。
+     * 业务发生时间取提交激活时刻；生产/捕捞/速冻日期仅以原始 LocalDate 存入结构化 detailsJson，不伪造为精确时间。
+     * 必须在已有事务中调用（{@link Propagation#MANDATORY}）；写入失败抛出异常，由调用方事务整体回滚批次激活。
+     * </p>
+     *
+     * @param batch          已激活的来源批次（提交后重新读取的最新行）
+     * @param operatorId     提交激活的操作人 ID
+     * @param activatedAtUtc 提交激活时刻 (UTC)
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void appendSourceEvent(Batch batch, Long operatorId, LocalDateTime activatedAtUtc) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("sourceObjectType", "BATCH");
+        details.put("sourceObjectId", batch.getId());
+        details.put("traceBatchNo", batch.getTraceBatchNo());
+        details.put("productId", batch.getProductId());
+        details.put("originType", batch.getOriginType());
+        details.put("originText", batch.getOriginText());
+        details.put("quantity", batch.getQuantity().toPlainString());
+        details.put("unitCode", batch.getUnitCode());
+        if (batch.getProductionDate() != null) {
+            details.put("productionDate", batch.getProductionDate().toString());
+        }
+        if (batch.getCaptureDate() != null) {
+            details.put("captureDate", batch.getCaptureDate().toString());
+        }
+        if (batch.getFreezeDate() != null) {
+            details.put("freezeDate", batch.getFreezeDate().toString());
+        }
+        if (batch.getShelfLifeDays() != null) {
+            details.put("shelfLifeDays", batch.getShelfLifeDays());
+        }
+        details.put("occurredAtBasis", "BATCH_ACTIVATION");
+
+        TraceEvent event = new TraceEvent();
+        event.setBatchId(batch.getId());
+        event.setOrgId(batch.getOrgId());
+        event.setSiteId(null);
+        event.setEventType(TraceEventType.SOURCE.name());
+        event.setOccurredAt(activatedAtUtc);
+        event.setRecordedAt(activatedAtUtc);
+        event.setOperatorId(operatorId);
+        // 来源事实由企业操作员在来源批次中手工登记，沿用既有 MANUAL 语义
+        event.setDataSource(DataSource.MANUAL.name());
+        event.setStatus(TraceEventStatus.SUBMITTED.name());
+        event.setIdempotencyKey(sourceEventIdempotencyKey(batch.getId()));
+        event.setCorrectsEventId(null);
+        event.setCorrectionReason(null);
+        event.setSummary("来源批次激活：" + batch.getOriginText());
+        event.setDetailsJson(objectMapper.writeValueAsString(details));
+        event.setVersion(0L);
+        event.setIsDeleted(0);
+        event.setCreatedAt(activatedAtUtc);
+        event.setCreatedBy(operatorId);
+        event.setUpdatedAt(activatedAtUtc);
+        event.setUpdatedBy(operatorId);
+
+        try {
+            traceEventMapper.insert(event);
+        } catch (DuplicateKeyException e) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "SOURCE_EVENT_CONFLICT",
+                    "来源事件冲突",
+                    "该来源批次的 SOURCE 追溯事件身份已被占用，批次激活已回滚"
+            );
+        }
+    }
+
+    /**
+     * 来源批次 SOURCE 事件的服务端幂等身份。以保留前缀 {@code SYS:} 开头，人工接口不可使用。
+     *
+     * @param batchId 来源批次 ID
+     * @return 服务端内部幂等键
+     */
+    public static String sourceEventIdempotencyKey(Long batchId) {
+        return RESERVED_IDEMPOTENCY_PREFIX + "SOURCE:BATCH:" + batchId;
     }
 
     /**

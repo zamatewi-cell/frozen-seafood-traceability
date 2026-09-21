@@ -164,7 +164,7 @@ class BatchMysqlIntegrationTest {
 
         // 1. 尝试关联 INACTIVE 产品创建批次 -> 422 PRODUCT_NOT_ACTIVE
         BatchCreateRequest reqInactive = new BatchCreateRequest(
-                commonExternalBatchNo, inactiveProduct.getId(), "SOURCE",
+                commonExternalBatchNo, inactiveProduct.getId(),
                 new BigDecimal("100.000"), "kg", "DOMESTIC_CAPTURE", "舟山海域",
                 LocalDate.now(), null, null, 180
         );
@@ -179,7 +179,7 @@ class BatchMysqlIntegrationTest {
 
         // 2. User A 关联 ACTIVE 产品创建批次草稿 -> 201 Created
         BatchCreateRequest reqValid = new BatchCreateRequest(
-                commonExternalBatchNo, activeProduct.getId(), "SOURCE",
+                commonExternalBatchNo, activeProduct.getId(),
                 new BigDecimal("100.000"), "kg", "DOMESTIC_CAPTURE", "舟山海域",
                 LocalDate.now(), null, null, 180
         );
@@ -234,7 +234,7 @@ class BatchMysqlIntegrationTest {
 
         // 5. 幂等冲突：相同幂等键不同 externalBatchNo -> 409 IDEMPOTENCY_KEY_REUSED
         BatchCreateRequest reqDiffExternal = new BatchCreateRequest(
-                "EXT-DIFF-" + suffix, activeProduct.getId(), "SOURCE",
+                "EXT-DIFF-" + suffix, activeProduct.getId(),
                 new BigDecimal("100.000"), "kg", "DOMESTIC_CAPTURE", "舟山海域",
                 LocalDate.now(), null, null, 180
         );
@@ -249,7 +249,7 @@ class BatchMysqlIntegrationTest {
 
         // 6. 跨组织使用相同 externalBatchNo 创建 -> 成功（跨组织不冲突）
         BatchCreateRequest reqOrgB = new BatchCreateRequest(
-                commonExternalBatchNo, activeProduct.getId(), "DISTRIBUTION",
+                commonExternalBatchNo, activeProduct.getId(),
                 new BigDecimal("50.000"), "kg", "DOMESTIC_FARMED", "分销仓储中心",
                 LocalDate.now(), null, null, 365
         );
@@ -482,7 +482,7 @@ class BatchMysqlIntegrationTest {
 
         // 6. 企业用户 1 创建组织 1 批次
         BatchCreateRequest req1 = new BatchCreateRequest(
-                "EXT-PL1-" + suffix, product1.getId(), "SOURCE",
+                "EXT-PL1-" + suffix, product1.getId(),
                 new BigDecimal("10.000"), "kg", "DOMESTIC_CAPTURE", "舟山1区",
                 LocalDate.now(), null, null, 100
         );
@@ -499,7 +499,7 @@ class BatchMysqlIntegrationTest {
 
         // 7. 企业用户 2 创建组织 2 批次
         BatchCreateRequest req2 = new BatchCreateRequest(
-                "EXT-PL2-" + suffix, product2.getId(), "DISTRIBUTION",
+                "EXT-PL2-" + suffix, product2.getId(),
                 new BigDecimal("20.000"), "kg", "DOMESTIC_FARMED", "分销2区",
                 LocalDate.now(), null, null, 200
         );
@@ -539,7 +539,7 @@ class BatchMysqlIntegrationTest {
         // 9. 验证写操作拦截：非 OPERATOR 的平台用户不能执行企业写操作（403 ACCESS_DENIED）
         // 9.1 平台用户创建批次草稿 -> 403
         BatchCreateRequest platformCreateReq = new BatchCreateRequest(
-                "EXT-PL-ADMIN-" + suffix, product1.getId(), "SOURCE",
+                "EXT-PL-ADMIN-" + suffix, product1.getId(),
                 new BigDecimal("30.000"), "kg", "DOMESTIC_CAPTURE", "产地说明",
                 LocalDate.now(), null, null, 100
         );
@@ -664,7 +664,7 @@ class BatchMysqlIntegrationTest {
         String idempotencyKey = "idem-conc-key-" + UUID.randomUUID();
 
         BatchCreateRequest req = new BatchCreateRequest(
-                commonExternalBatchNo, product.getId(), "SOURCE",
+                commonExternalBatchNo, product.getId(),
                 new BigDecimal("50.000"), "kg", "DOMESTIC_CAPTURE", "舟山渔场",
                 LocalDate.now(), null, null, 180
         );

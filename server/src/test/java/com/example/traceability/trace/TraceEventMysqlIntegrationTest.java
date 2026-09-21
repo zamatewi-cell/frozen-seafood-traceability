@@ -213,7 +213,7 @@ class TraceEventMysqlIntegrationTest {
         // 6. 创建批次 A (DRAFT)
         String externalBatchNo = "BATCH-EVT-" + suffix;
         BatchCreateRequest batchReq = new BatchCreateRequest(
-                externalBatchNo, product.getId(), "SOURCE",
+                externalBatchNo, product.getId(),
                 new BigDecimal("100.000"), "kg", "DOMESTIC_CAPTURE", "东海捕捞区",
                 LocalDate.now(), null, null, 180
         );
@@ -233,7 +233,7 @@ class TraceEventMysqlIntegrationTest {
 
         // 7. 批次状态矩阵约束：在 DRAFT 批次上创建事件 -> 422 BATCH_FLOW_BLOCKED
         CreateTraceEventRequest createReq1 = new CreateTraceEventRequest(
-                "SOURCE", occurredAt, siteA.getId(), "MANUAL", "东海首批捕捞起网",
+                "FREEZE", occurredAt, siteA.getId(), "MANUAL", "东海首批捕捞起网",
                 Map.of("seaArea", "舟山海域", "waterTemp", -1.5)
         );
         mockMvc.perform(post("/api/v1/batches/" + batchIdA + "/events")
@@ -258,7 +258,7 @@ class TraceEventMysqlIntegrationTest {
 
         // 9. 关联停用场所创建事件 -> 422 SITE_NOT_ACTIVE
         CreateTraceEventRequest reqInactiveSite = new CreateTraceEventRequest(
-                "SOURCE", occurredAt, siteInactive.getId(), "MANUAL", "停用场所起网", null
+                "FREEZE", occurredAt, siteInactive.getId(), "MANUAL", "停用场所起网", null
         );
         mockMvc.perform(post("/api/v1/batches/" + batchIdA + "/events")
                         .session((MockHttpSession) sessionA)
@@ -271,7 +271,7 @@ class TraceEventMysqlIntegrationTest {
 
         // 10. 跨组织关联 Site B 创建事件 -> 403 ORG_SCOPE_DENIED
         CreateTraceEventRequest reqCrossOrgSite = new CreateTraceEventRequest(
-                "SOURCE", occurredAt, siteB.getId(), "MANUAL", "跨组织场所起网", null
+                "FREEZE", occurredAt, siteB.getId(), "MANUAL", "跨组织场所起网", null
         );
         mockMvc.perform(post("/api/v1/batches/" + batchIdA + "/events")
                         .session((MockHttpSession) sessionA)
@@ -290,7 +290,7 @@ class TraceEventMysqlIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(createReq1)))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.data.eventType").value("SOURCE"))
+                .andExpect(jsonPath("$.data.eventType").value("FREEZE"))
                 .andExpect(jsonPath("$.data.status").value("SUBMITTED"))
                 .andExpect(jsonPath("$.data.occurredAt").exists())
                 .andExpect(jsonPath("$.data.recordedAt").exists())
@@ -344,7 +344,7 @@ class TraceEventMysqlIntegrationTest {
         // 16. 链式更正：对事件 1 发起更正 (POST /api/v1/batches/{batchId}/events/{eventId}/corrections)
         String correctKey1 = "idem-corr-1-" + suffix;
         CorrectTraceEventRequest correctReq1 = new CorrectTraceEventRequest(
-                "SOURCE", occurredAt, siteA.getId(), "MANUAL", "东海捕捞起网修正",
+                "FREEZE", occurredAt, siteA.getId(), "MANUAL", "东海捕捞起网修正",
                 Map.of("seaArea", "舟山海域外缘", "waterTemp", -1.8), "修正捕捞经纬度偏差点"
         );
         MvcResult correctRes1 = mockMvc.perform(post("/api/v1/batches/" + batchIdA + "/events/" + eventId1 + "/corrections")
@@ -354,7 +354,7 @@ class TraceEventMysqlIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(correctReq1)))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.data.eventType").value("SOURCE"))
+                .andExpect(jsonPath("$.data.eventType").value("FREEZE"))
                 .andExpect(jsonPath("$.data.status").value("SUBMITTED"))
                 .andExpect(jsonPath("$.data.correctsEventId").value(eventId1))
                 .andExpect(jsonPath("$.data.correctionReason").value("修正捕捞经纬度偏差点"))
@@ -367,17 +367,18 @@ class TraceEventMysqlIntegrationTest {
         String status1 = jdbcTemplate.queryForObject("SELECT status FROM trace_event WHERE id = ?", String.class, eventId1);
         assertThat(status1).isEqualTo("CORRECTED");
 
-        // 18. 事件列表查询：包含两条事件，原记录 CORRECTED，新记录 SUBMITTED
+        // 18. 事件列表查询：提交激活自动产生的唯一 SOURCE + 原记录 CORRECTED + 新记录 SUBMITTED
         mockMvc.perform(get("/api/v1/batches/" + batchIdA + "/events")
                         .session((MockHttpSession) sessionA))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.length()").value(2))
+                .andExpect(jsonPath("$.data.length()").value(3))
+                .andExpect(jsonPath("$.data[?(@.eventType == 'SOURCE')]", org.hamcrest.Matchers.hasSize(1)))
                 .andExpect(jsonPath("$.data[?(@.id == " + eventId1 + ")].status").value("CORRECTED"))
                 .andExpect(jsonPath("$.data[?(@.id == " + eventId2 + ")].status").value("SUBMITTED"));
 
         // 19. 链式更正防分叉：再次对已被更正的原事件 1 发起更正 (不同幂等键) -> 409 EVENT_ALREADY_CORRECTED
         CorrectTraceEventRequest forkReq = new CorrectTraceEventRequest(
-                "SOURCE", occurredAt, siteA.getId(), "MANUAL", "试图分叉更正", null, "非法二次更正"
+                "FREEZE", occurredAt, siteA.getId(), "MANUAL", "试图分叉更正", null, "非法二次更正"
         );
         mockMvc.perform(post("/api/v1/batches/" + batchIdA + "/events/" + eventId1 + "/corrections")
                         .session((MockHttpSession) sessionA)
@@ -415,7 +416,7 @@ class TraceEventMysqlIntegrationTest {
 
         // 在 CLOSED 批次上对最新版本 eventId2 发起更正 -> 201 Created
         CorrectTraceEventRequest closedCorrReq = new CorrectTraceEventRequest(
-                "SOURCE", occurredAt, siteA.getId(), "MANUAL", "归档批次审计更正", null, "历史审计校准"
+                "FREEZE", occurredAt, siteA.getId(), "MANUAL", "归档批次审计更正", null, "历史审计校准"
         );
         MvcResult correctRes2 = mockMvc.perform(post("/api/v1/batches/" + batchIdA + "/events/" + eventId2 + "/corrections")
                         .session((MockHttpSession) sessionA)
@@ -949,7 +950,7 @@ class TraceEventMysqlIntegrationTest {
 
         // 1. 非 OPERATOR 用户 (组织 A 审计员) 向本组织批次创建事件 -> 403 ACCESS_DENIED
         CreateTraceEventRequest createReq = new CreateTraceEventRequest(
-                "SOURCE", occurredAt, siteA.getId(), "MANUAL", "审计员尝试创建", null
+                "FREEZE", occurredAt, siteA.getId(), "MANUAL", "审计员尝试创建", null
         );
         mockMvc.perform(post("/api/v1/batches/" + batchA.getId() + "/events")
                         .session((MockHttpSession) sessionAuditorA)
@@ -994,7 +995,7 @@ class TraceEventMysqlIntegrationTest {
 
         // 5. 组织 B 的 OPERATOR 对组织 A 批次的事件发起更正 -> 403 ORG_SCOPE_DENIED
         CorrectTraceEventRequest correctReq = new CorrectTraceEventRequest(
-                "SOURCE", occurredAt, siteA.getId(), "MANUAL", "跨组织更正", null, "非法跨组织"
+                "FREEZE", occurredAt, siteA.getId(), "MANUAL", "跨组织更正", null, "非法跨组织"
         );
         mockMvc.perform(post("/api/v1/batches/" + batchA.getId() + "/events/" + baseEventId + "/corrections")
                         .session((MockHttpSession) sessionOpB)
@@ -1074,7 +1075,7 @@ class TraceEventMysqlIntegrationTest {
 
         // 1. 正常创建基准事件
         CreateTraceEventRequest createReq = new CreateTraceEventRequest(
-                "SOURCE", occurredAt, site.getId(), "MANUAL", "原始基准事件", null
+                "FREEZE", occurredAt, site.getId(), "MANUAL", "原始基准事件", null
         );
         String baseKey = "idem-rb-base-" + suffix;
         MvcResult baseRes = mockMvc.perform(post("/api/v1/batches/" + batch.getId() + "/events")
@@ -1102,7 +1103,7 @@ class TraceEventMysqlIntegrationTest {
 
         String failedCorrectionKey = "idem-rb-corr-fail-" + suffix;
         CorrectTraceEventRequest corrReq = new CorrectTraceEventRequest(
-                "SOURCE", occurredAt, site.getId(), "MANUAL", "尝试更正摘要", null, "测试回滚原因"
+                "FREEZE", occurredAt, site.getId(), "MANUAL", "尝试更正摘要", null, "测试回滚原因"
         );
 
         try {

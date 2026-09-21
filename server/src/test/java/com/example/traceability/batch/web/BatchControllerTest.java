@@ -198,7 +198,7 @@ class BatchControllerTest {
     @DisplayName("非幂等写操作缺失 CSRF Token 一律返回 403 ACCESS_DENIED")
     void csrfProtection_MissingToken() throws Exception {
         BatchCreateRequest req = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("100.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
 
@@ -311,7 +311,7 @@ class BatchControllerTest {
     @DisplayName("创建批次草稿成功 - 返回 201 Created 且输出服务端 traceBatchNo 与 DRAFT+NORMAL")
     void createBatch_Success() throws Exception {
         BatchCreateRequest req = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("100.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", LocalDate.of(2026, 9, 1), null, null, 180
         );
 
@@ -342,7 +342,7 @@ class BatchControllerTest {
     }
 
     @Test
-    @DisplayName("创建批次草稿 - 客户端夹带 traceBatchNo/creationOrgId/orgId/flowStatus 不会被绑定，响应仍为服务端生成值")
+    @DisplayName("创建来源批次 - 客户端夹带 traceBatchNo/creationOrgId/orgId/flowStatus/batchType 不会绑定到业务字段，而是收集到 unknownFields 交由服务层以 400 拒绝")
     void createBatch_ClientSuppliedServerFieldsAreNotBound() throws Exception {
         OffsetDateTime nowUtc = OffsetDateTime.of(2026, 9, 8, 8, 0, 0, 0, ZoneOffset.UTC);
         BatchResponse response = new BatchResponse(
@@ -382,19 +382,22 @@ class BatchControllerTest {
                 .andExpect(jsonPath("$.data.orgId").value(10))
                 .andExpect(jsonPath("$.data.creationOrgId").doesNotExist());
 
-        // BatchCreateRequest 结构上不声明任何服务端字段，只保留企业可填写的 externalBatchNo
+        // BatchCreateRequest 结构上不声明任何服务端字段，只保留企业可填写的 externalBatchNo；
+        // 夹带的服务端字段全部进入 unknownFields，由 BatchApplicationService 以 400 INVALID_REQUEST 拒绝
         org.assertj.core.api.Assertions.assertThat(captor.getValue().externalBatchNo()).isEqualTo("EXT-001");
+        org.assertj.core.api.Assertions.assertThat(captor.getValue().unknownFields().keySet())
+                .containsExactlyInAnyOrder("traceBatchNo", "creationOrgId", "orgId", "flowStatus", "riskStatus", "batchType");
         org.assertj.core.api.Assertions.assertThat(
                 java.util.Arrays.stream(BatchCreateRequest.class.getRecordComponents())
                         .map(java.lang.reflect.RecordComponent::getName)
                         .toList())
-                .doesNotContain("traceBatchNo", "creationOrgId", "orgId", "flowStatus", "riskStatus", "version");
+                .doesNotContain("traceBatchNo", "creationOrgId", "orgId", "flowStatus", "riskStatus", "version", "batchType");
     }
 
     @Test
     @DisplayName("创建批次草稿校验失败 - 缺少必填项或数量小数位超限返回 400 INVALID_REQUEST")
     void createBatch_ValidationFailure() throws Exception {
-        // 缺少 productId 与 batchType
+        // 缺少 productId
         String missingRequiredJson = """
                 {
                     "quantity": 10.000,
@@ -417,7 +420,6 @@ class BatchControllerTest {
         String invalidScaleJson = """
                 {
                     "productId": 500,
-                    "batchType": "SOURCE",
                     "quantity": 10.1234,
                     "unitCode": "kg",
                     "originType": "DOMESTIC_CAPTURE",
@@ -439,7 +441,6 @@ class BatchControllerTest {
                 {
                     "externalBatchNo": "EXT-LONG-BATCH-NO-123456789012345678901234567890123456789012345678901234567890",
                     "productId": 500,
-                    "batchType": "SOURCE",
                     "quantity": 10.000,
                     "unitCode": "kg",
                     "originType": "DOMESTIC_CAPTURE",
