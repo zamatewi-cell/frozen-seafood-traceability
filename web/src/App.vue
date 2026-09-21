@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { RouterView } from 'vue-router'
+import { RouterView, RouterLink } from 'vue-router'
 import AppIcons from '@/components/icons/AppIcons.vue'
 </script>
 
@@ -14,6 +14,10 @@ import AppIcons from '@/components/icons/AppIcons.vue'
             <span class="brand-subtitle">国家冷链可追溯体系教学实训工程</span>
           </div>
         </div>
+        <nav class="header-nav" aria-label="主导航">
+          <RouterLink to="/" class="nav-link">消费者溯源</RouterLink>
+          <RouterLink to="/login" class="nav-link">企业工作台</RouterLink>
+        </nav>
       </div>
     </header>
 
@@ -75,6 +79,27 @@ import AppIcons from '@/components/icons/AppIcons.vue'
 .brand-subtitle {
   font-size: 10px;
   color: #bae6fd;
+}
+.header-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.header-nav .nav-link {
+  color: #e0eefb;
+  font-size: 13px;
+  text-decoration: none;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.15s ease;
+}
+.header-nav .nav-link:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+.header-nav .nav-link.router-link-active {
+  background-color: var(--color-ocean);
+  color: #ffffff;
 }
 .main-content-canvas {
   flex: 1;
