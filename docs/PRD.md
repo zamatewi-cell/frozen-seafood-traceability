@@ -1,5 +1,7 @@
 # 冷冻海产品溯源系统 PRD
 
+> **基线说明：如本 PRD 与 [BUSINESS_CONTRACT_V1.1](BUSINESS_CONTRACT_V1.1.md) 存在冲突，以已确认的统一业务契约为当前实现基线。**
+
 | 项目 | 内容 |
 |---|---|
 | 文档版本 | v0.2-design-baseline |
