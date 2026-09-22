@@ -9,6 +9,8 @@ import com.example.traceability.batch.dto.BatchPatchRequest;
 import com.example.traceability.batch.dto.BatchQueryCriteria;
 import com.example.traceability.batch.dto.BatchResponse;
 import com.example.traceability.batch.dto.BatchSubmitRequest;
+import com.example.traceability.batch.dto.DirectStockInRequest;
+import com.example.traceability.batch.dto.ProcessRequest;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.common.envelope.PageMeta;
 import com.example.traceability.common.envelope.SuccessEnvelope;
@@ -493,6 +495,98 @@ public class BatchApplicationService {
 
         Batch submitted = batchMapper.selectByIdAndOrgId(batchId, principal.getOrgId());
         return BatchResponse.fromEntity(submitted);
+    }
+
+    // ==================== 直接入库(捕捞船长自捕自产) ====================
+
+    @Transactional(rollbackFor = Exception.class)
+    public BatchResponse directStockIn(DirectStockInRequest req, TraceSecurityPrincipal principal) {
+        checkOperatorRole(principal);
+        if (req.quantity() == null || req.quantity().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "入库数量必须大于 0");
+        }
+        Product product = productMapper.selectById(req.productId());
+        if (product == null || !"ACTIVE".equals(product.getStatus())) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "关联商品不存在或已停用");
+        }
+        Batch batch = new Batch();
+        batch.setOrgId(principal.getOrgId());
+        batch.setProductId(req.productId());
+        batch.setBatchNo(req.batchNo() != null && !req.batchNo().isBlank()
+                ? req.batchNo().trim()
+                : "DS-" + System.currentTimeMillis());
+        batch.setBatchType("SOURCE");
+        batch.setQuantity(req.quantity());
+        batch.setUnitCode("kg");
+        batch.setOriginType("DOMESTIC_CAPTURE");
+        batch.setOriginText(req.originText() != null ? req.originText().trim() : "自捕捞入库");
+        batch.setCaptureDate(req.captureDate() != null ? req.captureDate() : java.time.LocalDate.now());
+        batch.setStatus("ACTIVE");
+        batch.setCreatedBy(principal.getUserId());
+        batch.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        batch.setVersion(0L);
+        batch.setIsDeleted(0);
+        batchMapper.insert(batch);
+        return BatchResponse.fromEntity(batch);
+    }
+
+    // ==================== 加工厂加工:消耗原料批次 → 生成成品批次 ====================
+
+    @Transactional(rollbackFor = Exception.class)
+    public BatchResponse processMaterials(ProcessRequest req, TraceSecurityPrincipal principal) {
+        checkOperatorRole(principal);
+        if (req.consumedQuantity() == null || req.consumedQuantity().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "消耗数量必须大于 0");
+        }
+        if (req.outputQuantity() == null || req.outputQuantity().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "产出数量必须大于 0");
+        }
+        // 查原料批次,校验归属和可用量
+        Batch sourceBatch = batchMapper.selectById(req.sourceBatchId());
+        if (sourceBatch == null || !sourceBatch.getOrgId().equals(principal.getOrgId())) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ACCESS_DENIED", "无权访问", "原料批次不存在或不属于本组织");
+        }
+        if (!"ACTIVE".equals(sourceBatch.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "BATCH_NOT_ACTIVE", "批次不可用", "原料批次状态非ACTIVE");
+        }
+        BigDecimal available = sourceBatch.getQuantity() == null ? BigDecimal.ZERO : sourceBatch.getQuantity();
+        if (available.compareTo(req.consumedQuantity()) < 0) {
+            throw new BusinessException(HttpStatus.CONFLICT, "BATCH_INSUFFICIENT", "原料不足",
+                    "原料批次可用量 " + available + "kg，不足以消耗 " + req.consumedQuantity() + "kg");
+        }
+        // 校验产出商品是加工成品
+        Product outputProduct = productMapper.selectById(req.outputProductId());
+        if (outputProduct == null || !"ACTIVE".equals(outputProduct.getStatus())) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "产出商品不存在或已停用");
+        }
+
+        // 扣减原料批次数量
+        sourceBatch.setQuantity(available.subtract(req.consumedQuantity()));
+        sourceBatch.setUpdatedBy(principal.getUserId());
+        sourceBatch.setUpdatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        if (sourceBatch.getQuantity().compareTo(BigDecimal.ZERO) == 0) {
+            sourceBatch.setStatus("CLOSED");
+        }
+        batchMapper.updateById(sourceBatch);
+
+        // 生成成品批次
+        Batch outputBatch = new Batch();
+        outputBatch.setOrgId(principal.getOrgId());
+        outputBatch.setProductId(req.outputProductId());
+        outputBatch.setBatchNo("PR-" + System.currentTimeMillis());
+        outputBatch.setBatchType("PROCESSING");
+        outputBatch.setQuantity(req.outputQuantity());
+        outputBatch.setUnitCode("kg");
+        outputBatch.setOriginType(sourceBatch.getOriginType());
+        outputBatch.setOriginText("加工自批次 " + sourceBatch.getBatchNo() + " (消耗" + req.consumedQuantity() + "kg)");
+        outputBatch.setProductionDate(java.time.LocalDate.now());
+        outputBatch.setStatus("ACTIVE");
+        outputBatch.setCreatedBy(principal.getUserId());
+        outputBatch.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        outputBatch.setVersion(0L);
+        outputBatch.setIsDeleted(0);
+        batchMapper.insert(outputBatch);
+        return BatchResponse.fromEntity(outputBatch);
     }
 
     private void checkOperatorRole(TraceSecurityPrincipal principal) {

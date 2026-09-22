@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import ConsumerTraceView from '@/views/ConsumerTraceView.vue'
 import LoginView from '@/views/LoginView.vue'
 import OrdersView from '@/views/OrdersView.vue'
+import WorkbenchView from '@/views/WorkbenchView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -25,6 +26,11 @@ const router = createRouter({
       path: '/login',
       name: 'Login',
       component: LoginView
+    },
+    {
+      path: '/workbench',
+      name: 'Workbench',
+      component: WorkbenchView
     },
     {
       path: '/orders',

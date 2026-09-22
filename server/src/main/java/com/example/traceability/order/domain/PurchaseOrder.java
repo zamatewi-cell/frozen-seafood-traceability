@@ -34,6 +34,9 @@ public class PurchaseOrder {
     @TableField("status")
     private String status;
 
+    @TableField("handling_status")
+    private String handlingStatus;
+
     @TableField("ordered_at")
     private LocalDateTime orderedAt;
 
@@ -43,6 +46,24 @@ public class PurchaseOrder {
     @TableField("receipt_batch_id")
     private Long receiptBatchId;
 
+    @TableField("trace_code_id")
+    private Long traceCodeId;
+
+    @TableField("public_trace_id")
+    private String publicTraceId;
+
+    @TableField("cancel_request_role")
+    private String cancelRequestRole;
+
+    @TableField("cancel_request_reason")
+    private String cancelRequestReason;
+
+    @TableField("cancel_request_status")
+    private String cancelRequestStatus;
+
+    @TableField("cancel_request_at")
+    private LocalDateTime cancelRequestAt;
+
     @TableField("amount_total")
     private BigDecimal amountTotal;
 
@@ -51,6 +72,24 @@ public class PurchaseOrder {
 
     @TableField("note")
     private String note;
+
+    @TableField("buyer_contact_name")
+    private String buyerContactName;
+
+    @TableField("buyer_contact_phone")
+    private String buyerContactPhone;
+
+    @TableField("buyer_contact_address")
+    private String buyerContactAddress;
+
+    @TableField("approved_by")
+    private Long approvedBy;
+
+    @TableField("approved_at")
+    private LocalDateTime approvedAt;
+
+    @TableField("reject_reason")
+    private String rejectReason;
 
     @Version
     @TableField("version")
@@ -120,6 +159,14 @@ public class PurchaseOrder {
         this.status = status;
     }
 
+    public String getHandlingStatus() {
+        return handlingStatus;
+    }
+
+    public void setHandlingStatus(String handlingStatus) {
+        this.handlingStatus = handlingStatus;
+    }
+
     public LocalDateTime getOrderedAt() {
         return orderedAt;
     }
@@ -144,6 +191,54 @@ public class PurchaseOrder {
         this.receiptBatchId = receiptBatchId;
     }
 
+    public Long getTraceCodeId() {
+        return traceCodeId;
+    }
+
+    public void setTraceCodeId(Long traceCodeId) {
+        this.traceCodeId = traceCodeId;
+    }
+
+    public String getPublicTraceId() {
+        return publicTraceId;
+    }
+
+    public void setPublicTraceId(String publicTraceId) {
+        this.publicTraceId = publicTraceId;
+    }
+
+    public String getCancelRequestRole() {
+        return cancelRequestRole;
+    }
+
+    public void setCancelRequestRole(String cancelRequestRole) {
+        this.cancelRequestRole = cancelRequestRole;
+    }
+
+    public String getCancelRequestReason() {
+        return cancelRequestReason;
+    }
+
+    public void setCancelRequestReason(String cancelRequestReason) {
+        this.cancelRequestReason = cancelRequestReason;
+    }
+
+    public String getCancelRequestStatus() {
+        return cancelRequestStatus;
+    }
+
+    public void setCancelRequestStatus(String cancelRequestStatus) {
+        this.cancelRequestStatus = cancelRequestStatus;
+    }
+
+    public LocalDateTime getCancelRequestAt() {
+        return cancelRequestAt;
+    }
+
+    public void setCancelRequestAt(LocalDateTime cancelRequestAt) {
+        this.cancelRequestAt = cancelRequestAt;
+    }
+
     public BigDecimal getAmountTotal() {
         return amountTotal;
     }
@@ -166,6 +261,54 @@ public class PurchaseOrder {
 
     public void setNote(String note) {
         this.note = note;
+    }
+
+    public String getBuyerContactName() {
+        return buyerContactName;
+    }
+
+    public void setBuyerContactName(String buyerContactName) {
+        this.buyerContactName = buyerContactName;
+    }
+
+    public String getBuyerContactPhone() {
+        return buyerContactPhone;
+    }
+
+    public void setBuyerContactPhone(String buyerContactPhone) {
+        this.buyerContactPhone = buyerContactPhone;
+    }
+
+    public String getBuyerContactAddress() {
+        return buyerContactAddress;
+    }
+
+    public void setBuyerContactAddress(String buyerContactAddress) {
+        this.buyerContactAddress = buyerContactAddress;
+    }
+
+    public Long getApprovedBy() {
+        return approvedBy;
+    }
+
+    public void setApprovedBy(Long approvedBy) {
+        this.approvedBy = approvedBy;
+    }
+
+    public LocalDateTime getApprovedAt() {
+        return approvedAt;
+    }
+
+    public void setApprovedAt(LocalDateTime approvedAt) {
+        this.approvedAt = approvedAt;
+    }
+
+    public String getRejectReason() {
+        return rejectReason;
+    }
+
+    public void setRejectReason(String rejectReason) {
+        this.rejectReason = rejectReason;
     }
 
     public Long getVersion() {

@@ -6,6 +6,7 @@ import TraceHero from '@/components/TraceHero.vue'
 import TraceRecallAlert from '@/components/TraceRecallAlert.vue'
 import TraceProductCard from '@/components/TraceProductCard.vue'
 import TraceTimeline from '@/components/TraceTimeline.vue'
+import TraceTreeView from '@/components/TraceTreeView.vue'
 import TraceTemperatureCard from '@/components/TraceTemperatureCard.vue'
 import TraceSkeleton from '@/components/TraceSkeleton.vue'
 import TraceNotFound from '@/components/TraceNotFound.vue'
@@ -134,7 +135,15 @@ watch(
       <div class="desktop-layout-row">
         <div class="main-column">
           <TraceHero :trace="traceData" />
-          <TraceProductCard :product="traceData.product" :batch="traceData.batch" />
+          <TraceProductCard
+            v-if="traceData.batch"
+            :product="traceData.product"
+            :batch="traceData.batch"
+          />
+          <div v-else class="pending-batch-card">
+            <strong>该溯源码已由终端订单生成</strong>
+            <span>货物仍在交付途中，批次履历将在各环节到货/发货后自动补充聚合，敬请持续关注。</span>
+          </div>
           <TraceTemperatureCard :temperature-summary="traceData.temperatureSummary" />
           <TraceDisclosure
             :queried-at="traceData.queriedAt"
@@ -143,7 +152,41 @@ watch(
         </div>
 
         <div class="timeline-column">
-          <TraceTimeline :timeline="traceData.timeline" />
+          <!-- 优先:树状溯源(一单聚合多批次,各环节多分支向上溯源) -->
+          <div v-if="traceData.tree && traceData.tree.nodes.length" class="tree-section">
+            <h2 class="tree-section-title">溯源链路 · 树状图</h2>
+            <p v-if="traceData.tree.orderNo" class="tree-order-no">
+              终端订单:<span class="mono">{{ traceData.tree.orderNo }}</span>
+            </p>
+            <p class="tree-hint">由终端零售向上逐层溯源,每环节若多批合成同一订单则显示多个分支。</p>
+            <TraceTreeView :nodes="traceData.tree.nodes" />
+          </div>
+
+          <!-- 回退1:平铺多批次段 -->
+          <template v-else-if="traceData.segments && traceData.segments.length">
+            <div
+              v-for="(seg, idx) in traceData.segments"
+              :key="idx"
+              class="segment-block"
+            >
+              <div class="segment-header">
+                <span class="segment-index">{{ idx + 1 }}</span>
+                <div class="segment-meta">
+                  <span class="segment-batch">{{ seg.publicBatchNo }}</span>
+                  <span class="segment-origin">
+                    {{ seg.maskedOrigin }}<template v-if="seg.productionDate"> · {{ seg.productionDate }}</template>
+                  </span>
+                </div>
+              </div>
+              <TraceTimeline :timeline="seg.timeline" />
+            </div>
+          </template>
+
+          <!-- 回退2:单条时间线 -->
+          <TraceTimeline
+            v-else
+            :timeline="traceData.timeline"
+          />
         </div>
       </div>
     </div>
@@ -231,5 +274,93 @@ watch(
 .bullet-item span {
   font-size: 12px;
   color: var(--color-text-muted);
+}
+.tree-section {
+  background-color: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  box-shadow: var(--shadow-sm);
+}
+.tree-section-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-title);
+}
+.tree-order-no {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.tree-order-no .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--color-text-body);
+}
+.tree-hint {
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: var(--color-text-light, #94a3b8);
+  line-height: 1.5;
+}
+.segment-block {
+  margin-bottom: 16px;
+}
+.segment-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background-color: #f1f7fb;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-ocean, #2563eb);
+  border-radius: var(--radius-sm);
+}
+.segment-index {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background-color: var(--color-ocean, #2563eb);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.segment-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.segment-batch {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-title);
+}
+.segment-origin {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.pending-batch-card {
+  background-color: var(--color-card);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.pending-batch-card strong {
+  font-size: 14px;
+  color: var(--color-text-title);
+}
+.pending-batch-card span {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  line-height: 1.6;
 }
 </style>

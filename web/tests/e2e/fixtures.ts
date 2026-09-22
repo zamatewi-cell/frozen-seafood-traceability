@@ -25,6 +25,7 @@ export const mockSuccessTrace: PublicTrace = {
       dataSourceLabel: '企业系统导入'
     }
   ],
+  segments: [],
   temperatureSummary: {
     result: 'INSUFFICIENT_DATA',
     ruleNote: '当前切片尚未接入冷链实时温控时序采集流，暂无有效温控监测记录，不构成本项目温控合规依据。'

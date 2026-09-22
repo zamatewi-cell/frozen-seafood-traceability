@@ -6,6 +6,8 @@ import com.example.traceability.batch.dto.BatchPatchRequest;
 import com.example.traceability.batch.dto.BatchQueryCriteria;
 import com.example.traceability.batch.dto.BatchResponse;
 import com.example.traceability.batch.dto.BatchSubmitRequest;
+import com.example.traceability.batch.dto.DirectStockInRequest;
+import com.example.traceability.batch.dto.ProcessRequest;
 import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import jakarta.validation.Valid;
@@ -133,5 +135,35 @@ public class BatchController {
             @AuthenticationPrincipal TraceSecurityPrincipal principal
     ) {
         return SuccessEnvelope.of(batchService.submitDraftBatch(batchId, request, principal));
+    }
+
+    /**
+     * 捕捞船长直接入库（自捕自产，无需上游订单，直接创建 ACTIVE 批次）。
+     *
+     * @param request   直接入库参数
+     * @param principal 当前认证主体
+     * @return 创建后的批次详情
+     */
+    @PostMapping("/direct-stock-in")
+    public SuccessEnvelope<BatchResponse> directStockIn(
+            @Valid @RequestBody DirectStockInRequest request,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal
+    ) {
+        return SuccessEnvelope.of(batchService.directStockIn(request, principal));
+    }
+
+    /**
+     * 加工厂加工：消耗原料批次，生成成品批次。
+     *
+     * @param request   加工请求参数
+     * @param principal 当前认证主体
+     * @return 产出的成品批次详情
+     */
+    @PostMapping("/process")
+    public SuccessEnvelope<BatchResponse> processMaterials(
+            @Valid @RequestBody ProcessRequest request,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal
+    ) {
+        return SuccessEnvelope.of(batchService.processMaterials(request, principal));
     }
 }

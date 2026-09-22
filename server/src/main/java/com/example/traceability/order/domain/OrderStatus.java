@@ -16,6 +16,7 @@ public final class OrderStatus {
     public static final String PURCHASE_SHIPPED = "SHIPPED";
     public static final String PURCHASE_RECEIVED = "RECEIVED";
     public static final String PURCHASE_CANCELLED = "CANCELLED";
+    public static final String PURCHASE_REJECTED = "REJECTED";
 
     // 销售订单状态
     public static final String SALES_PLACED = "PLACED";

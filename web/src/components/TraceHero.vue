@@ -28,8 +28,8 @@ const statusInfo = computed(() => formatBatchStatus(props.trace.batchStatus))
 
     <div class="product-meta">
       <span class="spec-item">规格：{{ trace.product.specification }}</span>
-      <span class="divider">·</span>
-      <span class="batch-item">
+      <span v-if="trace.batch" class="divider">·</span>
+      <span v-if="trace.batch" class="batch-item">
         公开批次号：<strong class="mono">{{ trace.batch.publicBatchNo }}</strong>
       </span>
     </div>

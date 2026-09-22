@@ -24,6 +24,12 @@ public interface BatchRelationMapper extends BaseMapper<BatchRelation> {
     @Select("SELECT * FROM batch_relation WHERE operation_id = #{operationId} ORDER BY id ASC")
     List<BatchRelation> selectByOperationId(@Param("operationId") Long operationId);
 
+    /**
+     * 按子批次(下游生成批次)查所有上游父批次边,用于溯源树向上递归。
+     */
+    @Select("SELECT * FROM batch_relation WHERE child_batch_id = #{childBatchId} ORDER BY id ASC")
+    List<BatchRelation> selectByChildBatchId(@Param("childBatchId") Long childBatchId);
+
     @Select("SELECT COUNT(*) FROM batch_relation WHERE child_batch_id = #{childBatchId}")
     int countUpstreamRelationsByChildBatchId(@Param("childBatchId") Long childBatchId);
 

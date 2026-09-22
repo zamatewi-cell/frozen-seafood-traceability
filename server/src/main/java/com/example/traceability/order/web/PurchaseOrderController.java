@@ -3,6 +3,7 @@ package com.example.traceability.order.web;
 import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.order.application.OrderApplicationService;
+import com.example.traceability.order.dto.OrderDecisionRequest;
 import com.example.traceability.order.dto.OrderStatusUpdateRequest;
 import com.example.traceability.order.dto.PurchaseOrderCreateRequest;
 import com.example.traceability.order.dto.PurchaseOrderResponse;
@@ -59,5 +60,66 @@ public class PurchaseOrderController {
             @Valid @RequestBody OrderStatusUpdateRequest request,
             @AuthenticationPrincipal TraceSecurityPrincipal principal) {
         return SuccessEnvelope.of(orderService.updatePurchaseStatus(orderId, request, principal));
+    }
+
+    @PostMapping("/{orderId}/approve")
+    public SuccessEnvelope<PurchaseOrderResponse> approve(
+            @PathVariable Long orderId,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.approvePurchaseOrder(orderId, principal));
+    }
+
+    @PostMapping("/{orderId}/reject")
+    public SuccessEnvelope<PurchaseOrderResponse> reject(
+            @PathVariable Long orderId,
+            @Valid @RequestBody OrderDecisionRequest request,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.rejectPurchaseOrder(orderId, request, principal));
+    }
+
+    @PostMapping("/{orderId}/schedule")
+    public SuccessEnvelope<PurchaseOrderResponse> schedule(
+            @PathVariable Long orderId,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.schedulePurchaseOrder(orderId, principal));
+    }
+
+    @PostMapping("/{orderId}/complete-delivery")
+    public SuccessEnvelope<PurchaseOrderResponse> completeDelivery(
+            @PathVariable Long orderId,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.completePurchaseOrderDelivery(orderId, principal));
+    }
+
+    @PostMapping("/{orderId}/receive")
+    public SuccessEnvelope<PurchaseOrderResponse> receive(
+            @PathVariable Long orderId,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.receivePurchaseOrder(orderId, principal));
+    }
+
+    @PostMapping("/{orderId}/cancel-request")
+    public SuccessEnvelope<PurchaseOrderResponse> cancelRequest(
+            @PathVariable Long orderId,
+            @RequestBody CancelReasonBody body,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.requestCancelOrder(orderId, body.reason(), principal));
+    }
+
+    @PostMapping("/{orderId}/cancel-approve")
+    public SuccessEnvelope<PurchaseOrderResponse> cancelApprove(
+            @PathVariable Long orderId,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.approveCancelRequest(orderId, principal));
+    }
+
+    @PostMapping("/{orderId}/cancel-reject")
+    public SuccessEnvelope<PurchaseOrderResponse> cancelReject(
+            @PathVariable Long orderId,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.rejectCancelRequest(orderId, principal));
+    }
+
+    public record CancelReasonBody(String reason) {
     }
 }

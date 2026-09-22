@@ -14,9 +14,13 @@ const errorMessage = ref('')
 const demoAccounts = [
   { username: 'sys_admin', label: '系统管理员' },
   { username: 'capt_ship', label: '捕捞船长（原料供给）' },
+  { username: 'capt_qa', label: '捕捞舰队质管' },
   { username: 'plant_op', label: '加工厂操作员' },
+  { username: 'plant_qa', label: '加工厂质管' },
   { username: 'whl_op', label: '批发分装开单员' },
+  { username: 'whl_qa', label: '批发分装质管' },
   { username: 'market_op', label: '超市采购员' },
+  { username: 'market_qa', label: '超市质管' },
   { username: 'shop_op', label: '电商商家运营' }
 ]
 
@@ -33,7 +37,7 @@ async function handleLogin() {
   errorMessage.value = ''
   try {
     await login(username.value.trim(), password.value)
-    await router.push('/orders')
+    await router.push('/workbench')
   } catch (err) {
     errorMessage.value =
       err instanceof ApiError ? err.message : err instanceof Error ? err.message : '登录失败'

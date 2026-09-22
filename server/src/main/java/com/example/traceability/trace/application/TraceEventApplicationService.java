@@ -180,12 +180,13 @@ public class TraceEventApplicationService {
                     "无权向其他组织的批次记录追溯事件"
             );
         }
-        if (!BatchStatus.ACTIVE.name().equals(batch.getStatus())) {
+        if (!BatchStatus.ACTIVE.name().equals(batch.getStatus())
+                && !BatchStatus.FROZEN.name().equals(batch.getStatus())) {
             throw new BusinessException(
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "BATCH_FLOW_BLOCKED",
                     "批次状态不允许当前操作",
-                    "批次当前状态为 " + batch.getStatus() + "，仅 ACTIVE 状态批次允许创建追溯事件"
+                    "批次当前状态为 " + batch.getStatus() + "，仅 ACTIVE 与 FROZEN 状态批次允许补充追溯事件"
             );
         }
 

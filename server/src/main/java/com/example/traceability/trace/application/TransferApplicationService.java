@@ -1,5 +1,6 @@
 package com.example.traceability.trace.application;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.traceability.audit.application.AuditApplicationService;
 import com.example.traceability.batch.domain.Batch;
 import com.example.traceability.batch.domain.BatchStatus;
@@ -10,6 +11,9 @@ import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.domain.Organization;
 import com.example.traceability.identity.mapper.OrganizationMapper;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
+import com.example.traceability.quality.domain.QualityInspection;
+import com.example.traceability.quality.domain.QualityInspectionResult;
+import com.example.traceability.quality.mapper.QualityInspectionMapper;
 import com.example.traceability.trace.domain.Transfer;
 import com.example.traceability.trace.domain.TransferIdempotency;
 import com.example.traceability.trace.domain.TransferStatus;
@@ -78,6 +82,7 @@ public class TransferApplicationService {
     private final AuditApplicationService auditService;
     private final PublicTraceCodeMapper publicTraceCodeMapper;
     private final ObjectMapper objectMapper;
+    private final QualityInspectionMapper qualityInspectionMapper;
 
     public TransferApplicationService(
             TransferMapper transferMapper,
@@ -88,7 +93,8 @@ public class TransferApplicationService {
             TraceEventApplicationService traceEventService,
             AuditApplicationService auditService,
             PublicTraceCodeMapper publicTraceCodeMapper,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            QualityInspectionMapper qualityInspectionMapper
     ) {
         this.transferMapper = Objects.requireNonNull(transferMapper, "transferMapper 不能为空");
         this.idempotencyMapper = Objects.requireNonNull(idempotencyMapper, "idempotencyMapper 不能为空");
@@ -99,6 +105,7 @@ public class TransferApplicationService {
         this.auditService = Objects.requireNonNull(auditService, "auditService 不能为空");
         this.publicTraceCodeMapper = Objects.requireNonNull(publicTraceCodeMapper, "publicTraceCodeMapper 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
+        this.qualityInspectionMapper = Objects.requireNonNull(qualityInspectionMapper, "qualityInspectionMapper 不能为空");
     }
 
     /**
@@ -739,6 +746,20 @@ public class TransferApplicationService {
                     "BATCH_FLOW_BLOCKED",
                     "批次状态不可流转",
                     "关联批次状态为 " + batch.getStatus() + "，已被质量冻结或召回，禁止接受交接"
+            );
+        }
+
+        // 7.5 质检前置：发货方对批次必须已有 PASS 质检记录(出厂/到货/抽检任一) 方可收货
+        long passQc = qualityInspectionMapper.selectCount(new LambdaQueryWrapper<QualityInspection>()
+                .eq(QualityInspection::getBatchId, transfer.getBatchId())
+                .eq(QualityInspection::getOrgId, transfer.getSenderOrgId())
+                .eq(QualityInspection::getResult, QualityInspectionResult.PASS));
+        if (passQc == 0) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "QC_NOT_PASSED",
+                    "出厂质检未通过",
+                    "该批次尚无发货方 PASS 质检记录，禁止收货，请先由质量管理员完成出厂质检"
             );
         }
 

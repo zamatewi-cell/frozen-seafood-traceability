@@ -12,6 +12,7 @@ import com.example.traceability.identity.mapper.OrganizationMapper;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.trace.application.TraceEventApplicationService;
 import com.example.traceability.trace.application.TransferApplicationService;
+import com.example.traceability.quality.mapper.QualityInspectionMapper;
 import com.example.traceability.trace.domain.Transfer;
 import com.example.traceability.trace.domain.TransferIdempotency;
 import com.example.traceability.trace.domain.TransferStatus;
@@ -85,6 +86,9 @@ class TransferApplicationServiceTest {
     @Mock
     private com.example.traceability.trace.mapper.PublicTraceCodeMapper publicTraceCodeMapper;
 
+    @Mock
+    private QualityInspectionMapper qualityInspectionMapper;
+
     private final tools.jackson.databind.ObjectMapper objectMapper = new tools.jackson.databind.ObjectMapper();
 
     private TransferApplicationService transferService;
@@ -105,8 +109,13 @@ class TransferApplicationServiceTest {
                 traceEventService,
                 auditService,
                 publicTraceCodeMapper,
-                objectMapper
+                objectMapper,
+                qualityInspectionMapper
         );
+
+        // 质检门槛：默认认为发送方已完成 PASS 出厂质检，豁免既有交接接收用例；
+        // 若某批次需验证"未质检禁止收货"，应单独 stub selectCount 返回 0。
+        lenient().when(qualityInspectionMapper.selectCount(any())).thenReturn(1L);
 
         senderOperator = new TraceSecurityPrincipal(
                 101L, "sender_op", "发货操作员", "hash",

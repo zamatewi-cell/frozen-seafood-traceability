@@ -28,6 +28,12 @@ public class PublicTraceCode {
     @TableField("batch_id")
     private Long batchId;
 
+    @TableField("source_order_id")
+    private Long sourceOrderId;
+
+    @TableField("source_order_type")
+    private String sourceOrderType;
+
     @TableField("org_id")
     private Long orgId;
 
@@ -80,6 +86,22 @@ public class PublicTraceCode {
 
     public void setBatchId(Long batchId) {
         this.batchId = batchId;
+    }
+
+    public Long getSourceOrderId() {
+        return sourceOrderId;
+    }
+
+    public void setSourceOrderId(Long sourceOrderId) {
+        this.sourceOrderId = sourceOrderId;
+    }
+
+    public String getSourceOrderType() {
+        return sourceOrderType;
+    }
+
+    public void setSourceOrderType(String sourceOrderType) {
+        this.sourceOrderType = sourceOrderType;
     }
 
     public Long getOrgId() {

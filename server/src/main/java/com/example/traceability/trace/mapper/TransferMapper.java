@@ -75,6 +75,17 @@ public interface TransferMapper extends BaseMapper<Transfer> {
     int countPendingTransfersByBatchId(@Param("batchId") Long batchId);
 
     /**
+     * 查询指定下游批次（接收方收到货后生成的新批次）对应的已接受交接记录，
+     * 用于溯源树向上递归查找上游发货批次（open_batch_id）。
+     *
+     * @param batchId 下游批次 ID
+     * @return 已接受的交接记录（含 open_batch_id 上游批次 ID）
+     */
+    @Select("SELECT * FROM `transfer` WHERE batch_id = #{batchId} " +
+            "AND status = 'ACCEPTED' AND is_deleted = 0 ORDER BY received_at DESC")
+    List<Transfer> selectAcceptedByReceiverBatchId(@Param("batchId") Long batchId);
+
+    /**
      * 强约束组织谓词、期望状态与乐观锁版本号的条件更新交接记录。
      *
      * @param entity                待更新实体

@@ -1,14 +1,17 @@
 package com.example.traceability.trace.application;
 
 import com.example.traceability.batch.domain.Batch;
+import com.example.traceability.batch.domain.BatchRelation;
 import com.example.traceability.batch.domain.BatchStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
+import com.example.traceability.batch.mapper.BatchRelationMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.masterdata.domain.Product;
 import com.example.traceability.masterdata.mapper.ProductMapper;
 import com.example.traceability.trace.domain.PublicTraceCode;
+import com.example.traceability.trace.domain.PublicTraceCodeBatch;
 import com.example.traceability.trace.domain.PublicTraceCodeIdempotency;
 import com.example.traceability.trace.domain.PublicTraceCodeStatus;
 import com.example.traceability.trace.domain.PublicTraceIdGenerator;
@@ -16,6 +19,7 @@ import com.example.traceability.trace.domain.TraceDataMasker;
 import com.example.traceability.trace.domain.TraceEvent;
 import com.example.traceability.trace.dto.PublicTraceCodeResponse;
 import com.example.traceability.trace.dto.PublicTraceProjectionResponse;
+import com.example.traceability.trace.mapper.PublicTraceCodeBatchMapper;
 import com.example.traceability.trace.mapper.PublicTraceCodeIdempotencyMapper;
 import com.example.traceability.trace.mapper.PublicTraceCodeMapper;
 import com.example.traceability.trace.mapper.TraceEventMapper;
@@ -32,7 +36,9 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
@@ -64,23 +70,35 @@ public class PublicTraceApplicationService {
             "当前切片尚未接入冷链实时温控时序采集流，暂无有效温控监测记录，不构成本项目温控合规依据。";
 
     private final BatchMapper batchMapper;
+    private final BatchRelationMapper batchRelationMapper;
     private final ProductMapper productMapper;
     private final TraceEventMapper traceEventMapper;
     private final PublicTraceCodeMapper publicTraceCodeMapper;
+    private final PublicTraceCodeBatchMapper publicTraceCodeBatchMapper;
     private final PublicTraceCodeIdempotencyMapper idempotencyMapper;
+    private final com.example.traceability.trace.mapper.TransferMapper transferMapper;
+    private final com.example.traceability.identity.mapper.OrganizationMapper organizationMapper;
 
     public PublicTraceApplicationService(
             BatchMapper batchMapper,
+            BatchRelationMapper batchRelationMapper,
             ProductMapper productMapper,
             TraceEventMapper traceEventMapper,
             PublicTraceCodeMapper publicTraceCodeMapper,
-            PublicTraceCodeIdempotencyMapper idempotencyMapper
+            PublicTraceCodeBatchMapper publicTraceCodeBatchMapper,
+            PublicTraceCodeIdempotencyMapper idempotencyMapper,
+            com.example.traceability.trace.mapper.TransferMapper transferMapper,
+            com.example.traceability.identity.mapper.OrganizationMapper organizationMapper
     ) {
         this.batchMapper = batchMapper;
+        this.batchRelationMapper = batchRelationMapper;
         this.productMapper = productMapper;
         this.traceEventMapper = traceEventMapper;
         this.publicTraceCodeMapper = publicTraceCodeMapper;
+        this.publicTraceCodeBatchMapper = publicTraceCodeBatchMapper;
         this.idempotencyMapper = idempotencyMapper;
+        this.transferMapper = transferMapper;
+        this.organizationMapper = organizationMapper;
     }
 
     /**
@@ -323,6 +341,121 @@ public class PublicTraceApplicationService {
     }
 
     /**
+     * 终端下单时生成公开追溯码（无物理批次绑定）。
+     * <p>
+     * 业务规则：
+     * 1. 终端（超市/电商等最终售卖方）创建面向消费者的订单时调用入口；
+     * 2. 生成的码初始不绑定任何批次，后续随货物交付逐步聚合多个批次；
+     * 3. 记录 source_order_type / source_order_id 溯源到生成它的终端订单；
+     * 4. 生成 26 位 Base32 公开标识与内部指纹，ACTIVE 且零批次。
+     * </p>
+     *
+     * @param orgId        所属企业组织 ID（终端售卖方）
+     * @param sourceType   源代码类型（如 SALES）
+     * @param sourceOrderId 生成该码的终端订单 ID
+     * @param userId       操作人用户 ID
+     * @return 生成的公开追溯码响应
+     */
+    @Transactional
+    public PublicTraceCodeResponse createPublicTraceCodeForSource(
+            Long orgId, String sourceType, Long sourceOrderId, Long userId) {
+        Objects.requireNonNull(orgId, "orgId");
+        Objects.requireNonNull(sourceOrderId, "sourceOrderId");
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS);
+        String publicId = PublicTraceIdGenerator.generatePublicId();
+        String tokenHash = PublicTraceIdGenerator.computeTokenHash(publicId);
+
+        PublicTraceCode newCode = new PublicTraceCode();
+        newCode.setBatchId(null);
+        newCode.setSourceOrderId(sourceOrderId);
+        newCode.setSourceOrderType(sourceType == null ? "SALES" : sourceType);
+        newCode.setOrgId(orgId);
+        newCode.setPublicId(publicId);
+        newCode.setTokenHash(tokenHash);
+        newCode.setStatus(PublicTraceCodeStatus.ACTIVE.name());
+        newCode.setActivatedAt(nowUtc);
+        newCode.setDisabledAt(null);
+        newCode.setVersion(0L);
+        newCode.setIsDeleted(0);
+        newCode.setCreatedAt(nowUtc);
+        newCode.setCreatedBy(userId);
+        newCode.setUpdatedAt(nowUtc);
+        newCode.setUpdatedBy(userId);
+        try {
+            publicTraceCodeMapper.insert(newCode);
+        } catch (DuplicateKeyException e) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "PUBLIC_TRACE_CODE_GENERATION_FAILED",
+                    "公开码生成冲突",
+                    "终端订单生成公开追溯码时发生唯一性冲突，请重试"
+            );
+        }
+        return PublicTraceCodeResponse.fromEntity(newCode);
+    }
+
+    /**
+     * 将物理批次绑定到某个公开追溯码（一码可聚合多批）。
+     * <p>
+     * 业务规则：
+     * 1. 仅允许本组织 OPERATOR 操作员执行；
+     * 2. 公开码必须存在且处于 ACTIVE；
+     * 3. 目标批次必须存在且未逻辑删除；
+     * 4. 同一公开码与同一批次幂等绑定（重复绑定视为成功重放）；
+     * 5. 绑定后消费者即可在该码下看到该批次的完整溯源履历。
+     * </p>
+     *
+     * @param publicId 26 位 Base32 公开追溯标识
+     * @param batchId  待聚合的物理批次 ID
+     * @param bindRole 绑定环节角色（可空）
+     * @param principal 当前认证主体
+     * @return 公开码响应
+     */
+    @Transactional
+    public PublicTraceCodeResponse bindBatchToPublicCode(
+            String publicId, Long batchId, String bindRole, TraceSecurityPrincipal principal) {
+        checkOperatorRole(principal);
+        if (publicId == null || !PUBLIC_TRACE_ID_PATTERN.matcher(publicId).matches()) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
+                    "参数校验失败", "publicId 必须是 26 位 Base32 公开追溯标识");
+        }
+        if (batchId == null) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
+                    "参数校验失败", "batchId 不能为空");
+        }
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS);
+
+        PublicTraceCode code = publicTraceCodeMapper.selectByPublicIdForUpdate(publicId);
+        if (code == null || Objects.equals(code.getIsDeleted(), 1)) {
+            throw new ResourceNotFoundException("未找到公开追溯码或该码已失效");
+        }
+        if (!PublicTraceCodeStatus.ACTIVE.name().equals(code.getStatus())) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_STATE_TRANSITION",
+                    "追溯码状态不允许操作", "仅 ACTIVE 状态的公开追溯码允许聚合批次");
+        }
+
+        Batch batch = batchMapper.selectByIdIgnoreTenant(batchId);
+        if (batch == null || Objects.equals(batch.getIsDeleted(), 1)) {
+            throw new ResourceNotFoundException("未找到批次 ID " + batchId);
+        }
+
+        PublicTraceCodeBatch link = new PublicTraceCodeBatch();
+        link.setTraceCodeId(code.getId());
+        link.setBatchId(batchId);
+        link.setBatchOrgId(batch.getOrgId());
+        link.setBindRole(bindRole);
+        link.setBoundAt(nowUtc);
+        link.setBoundBy(principal.getUserId());
+        link.setCreatedAt(nowUtc);
+        try {
+            publicTraceCodeBatchMapper.insert(link);
+        } catch (DuplicateKeyException e) {
+            // 已绑定：幂等重放成功
+        }
+        return PublicTraceCodeResponse.fromEntity(code);
+    }
+
+    /**
      * 消费者匿名根据 26 位 Base32 公开标识查询追溯投影。
      * <p>
      * 业务规则：
@@ -352,18 +485,167 @@ public class PublicTraceApplicationService {
             throw notFoundException();
         }
 
-        Batch batch = batchMapper.selectByIdIgnoreTenant(code.getBatchId());
-        if (batch == null || Objects.equals(batch.getIsDeleted(), 1)) {
+        // 聚合该码下所有绑定的物理批次（一码多批）；无绑定次批次时回退到旧 batch_id
+        List<Long> batchIds = publicTraceCodeBatchMapper.selectBatchIdsByTraceCodeId(code.getId());
+        if (batchIds.isEmpty() && code.getBatchId() != null) {
+            batchIds = List.of(code.getBatchId());
+        }
+        if (batchIds.isEmpty()) {
+            // 终端下单刚生成、尚未聚合任何批次的码：返回空段，产品信息回退为通用占位
+            return new PublicTraceProjectionResponse(
+                    cleanPublicId,
+                    new PublicTraceProjectionResponse.ProductProjection(
+                            "冷冻水产品", "OTHER", "规格以到货包装标称为准"),
+                    null,
+                    List.of(),
+                    List.of(),
+                    null,
+                    new PublicTraceProjectionResponse.TemperatureSummaryProjection(
+                            "INSUFFICIENT_DATA", TEMPERATURE_INSUFFICIENT_NOTE),
+                    UnifiedBatchStatus.EMPTY,
+                    null,
+                    Instant.now().toString(),
+                    PUBLIC_DISCLOSURE_STATEMENT
+            );
+        }
+
+        List<Long> orderedBatchIds = new ArrayList<>(new LinkedHashSet<>(batchIds));
+
+        // 兼容单批主段：使用首段作为 product 与 batch/timeline 的来源
+        Batch primary = batchMapper.selectByIdIgnoreTenant(orderedBatchIds.get(0));
+        Batch first = primary != null ? primary : loadFirstExisting(orderedBatchIds);
+        if (first == null) {
             throw notFoundException();
         }
 
-        Product product = productMapper.selectById(batch.getProductId());
+        Product product = productMapper.selectById(first.getProductId());
         String prodName = product != null ? product.getPublicName() : "冷冻水产品";
         String prodCategory = product != null ? product.getCategory() : "OTHER";
         String prodSpec = product != null ? product.getSpecification() : "规格以包装标称为准";
-
         PublicTraceProjectionResponse.ProductProjection productProj =
                 new PublicTraceProjectionResponse.ProductProjection(prodName, prodCategory, prodSpec);
+
+        List<PublicTraceProjectionResponse.BatchSegment> segments = new ArrayList<>();
+        boolean anyRecalled = false;
+        for (Long batchId : orderedBatchIds) {
+            Batch b = batchMapper.selectByIdIgnoreTenant(batchId);
+            if (b == null || Objects.equals(b.getIsDeleted(), 1)) {
+                continue;
+            }
+            if (BatchStatus.RECALLED.name().equals(b.getStatus())) {
+                anyRecalled = true;
+            }
+            List<PublicTraceProjectionResponse.TimelineItem> segmentTimeline =
+                    traceEventMapper.selectEffectiveEventsByBatchId(batchId).stream()
+                            .map(this::toTimelineItem)
+                            .toList();
+            segments.add(new PublicTraceProjectionResponse.BatchSegment(
+                    TraceDataMasker.maskBatchNo(b.getBatchNo()),
+                    b.getOriginType(),
+                    TraceDataMasker.maskOriginText(b.getOriginText()),
+                    b.getProductionDate() != null ? b.getProductionDate().toString() : null,
+                    segmentTimeline
+            ));
+        }
+        if (segments.isEmpty()) {
+            throw notFoundException();
+        }
+
+        Batch statusRef = null;
+        for (Long batchId : orderedBatchIds) {
+            Batch b = batchMapper.selectByIdIgnoreTenant(batchId);
+            if (b != null && !Objects.equals(b.getIsDeleted(), 1)) {
+                statusRef = b;
+                break;
+            }
+        }
+
+        PublicTraceProjectionResponse.BatchProjection batchProj =
+                new PublicTraceProjectionResponse.BatchProjection(
+                        TraceDataMasker.maskBatchNo(statusRef.getBatchNo()),
+                        statusRef.getOriginType(),
+                        TraceDataMasker.maskOriginText(statusRef.getOriginText()),
+                        statusRef.getProductionDate() != null ? statusRef.getProductionDate().toString() : null
+                );
+
+        List<PublicTraceProjectionResponse.TimelineItem> timeline =
+                segments.stream()
+                        .flatMap(s -> s.timeline().stream())
+                        .sorted(java.util.Comparator.comparing(PublicTraceProjectionResponse.TimelineItem::occurredAt))
+                        .toList();
+
+        PublicTraceProjectionResponse.TemperatureSummaryProjection tempSummary =
+                new PublicTraceProjectionResponse.TemperatureSummaryProjection(
+                        "INSUFFICIENT_DATA", TEMPERATURE_INSUFFICIENT_NOTE);
+
+        String batchStatus = statusRef.getStatus();
+        String recallNotice = anyRecalled ? SIMULATED_RECALL_NOTICE : null;
+
+        String orderNo = null;
+        if (code.getSourceOrderId() != null) {
+            orderNo = "PURCHASE".equals(code.getSourceOrderType())
+                    ? ("PO#" + code.getSourceOrderId())
+                    : ("SO#" + code.getSourceOrderId());
+        }
+        PublicTraceProjectionResponse.TraceTree tree =
+                buildTraceTree(orderNo, orderedBatchIds);
+
+        String queriedAt = Instant.now().toString();
+
+        return new PublicTraceProjectionResponse(
+                cleanPublicId,
+                productProj,
+                batchProj,
+                timeline,
+                segments,
+                tree,
+                tempSummary,
+                batchStatus,
+                recallNotice,
+                queriedAt,
+                PUBLIC_DISCLOSURE_STATEMENT
+        );
+    }
+
+    /**
+     * 递归构建溯源树(从终端零售向下展开到捕捞源头)。
+     * <p>
+     * 以码下绑定的批次为根节点（终端环节），每个节点向下通过 batch_relation 谱系边查找上游来源批次。
+     * 同一批次可在多个分支重复出现（不去重），分支无上限。
+     * 用深度限制(≤20)防止数据环路导致无限递归。
+     * 环节 stage 由批次 batchType 映射：SOURCE→捕捞, PROCESSING→加工, DISTRIBUTION→批发, SALE→终端零售。
+     * </p>
+     */
+    private PublicTraceProjectionResponse.TraceTree buildTraceTree(
+            String orderNo, List<Long> rootBatchIds) {
+        List<PublicTraceProjectionResponse.TraceTreeNode> nodes = new ArrayList<>();
+        for (Long batchId : rootBatchIds) {
+            PublicTraceProjectionResponse.TraceTreeNode node = buildNode(batchId, 0);
+            if (node != null) {
+                nodes.add(node);
+            }
+        }
+        return new PublicTraceProjectionResponse.TraceTree(orderNo, nodes);
+    }
+
+    private static final int MAX_TREE_DEPTH = 20;
+
+    private PublicTraceProjectionResponse.TraceTreeNode buildNode(
+            Long batchId, int depth) {
+        if (batchId == null || depth > MAX_TREE_DEPTH) {
+            return null;
+        }
+        Batch batch = batchMapper.selectByIdIgnoreTenant(batchId);
+        if (batch == null || Objects.equals(batch.getIsDeleted(), 1)) {
+            return null;
+        }
+        com.example.traceability.identity.domain.Organization org = organizationMapper.selectById(batch.getOrgId());
+        String orgName = org != null ? org.getName() : "未知组织";
+
+        List<PublicTraceProjectionResponse.TimelineItem> timeline =
+                traceEventMapper.selectEffectiveEventsByBatchId(batchId).stream()
+                        .map(this::toTimelineItem)
+                        .toList();
 
         PublicTraceProjectionResponse.BatchProjection batchProj =
                 new PublicTraceProjectionResponse.BatchProjection(
@@ -373,33 +655,53 @@ public class PublicTraceApplicationService {
                         batch.getProductionDate() != null ? batch.getProductionDate().toString() : null
                 );
 
-        // 仅查询当前批次有效 SUBMITTED 事件 (排除 CORRECTED)，稳定升序排序
-        List<TraceEvent> events = traceEventMapper.selectEffectiveEventsByBatchId(batch.getId());
-        List<PublicTraceProjectionResponse.TimelineItem> timeline = events.stream()
-                .map(this::toTimelineItem)
-                .toList();
+        String stage = mapBatchTypeToStage(batch.getBatchType());
 
-        PublicTraceProjectionResponse.TemperatureSummaryProjection tempSummary =
-                new PublicTraceProjectionResponse.TemperatureSummaryProjection(
-                        "INSUFFICIENT_DATA",
-                        TEMPERATURE_INSUFFICIENT_NOTE
-                );
+        List<PublicTraceProjectionResponse.TraceTreeNode> children = new ArrayList<>();
+        List<BatchRelation> upstreamRelations = batchRelationMapper.selectByChildBatchId(batchId);
+        for (BatchRelation r : upstreamRelations) {
+            if (r.getParentBatchId() != null) {
+                PublicTraceProjectionResponse.TraceTreeNode child = buildNode(r.getParentBatchId(), depth + 1);
+                if (child != null) {
+                    children.add(child);
+                }
+            }
+        }
 
-        String batchStatus = batch.getStatus();
-        String recallNotice = BatchStatus.RECALLED.name().equals(batchStatus) ? SIMULATED_RECALL_NOTICE : null;
-        String queriedAt = Instant.now().toString();
-
-        return new PublicTraceProjectionResponse(
-                cleanPublicId,
-                productProj,
+        return new PublicTraceProjectionResponse.TraceTreeNode(
+                stage,
+                orgName,
+                batch.getQuantity() != null ? batch.getQuantity().toPlainString() : null,
                 batchProj,
                 timeline,
-                tempSummary,
-                batchStatus,
-                recallNotice,
-                queriedAt,
-                PUBLIC_DISCLOSURE_STATEMENT
+                children
         );
+    }
+
+    private String mapBatchTypeToStage(String batchType) {
+        if (batchType == null) return "UNKNOWN";
+        return switch (batchType) {
+            case "SOURCE" -> "SOURCE";
+            case "PROCESSING" -> "PROCESSING";
+            case "DISTRIBUTION" -> "DISTRIBUTION";
+            case "SALE" -> "RETAIL";
+            default -> "UNKNOWN";
+        };
+    }
+
+    private Batch loadFirstExisting(List<Long> orderedBatchIds) {
+        for (Long id : orderedBatchIds) {
+            Batch b = batchMapper.selectByIdIgnoreTenant(id);
+            if (b != null && !Objects.equals(b.getIsDeleted(), 1)) {
+                return b;
+            }
+        }
+        return null;
+    }
+
+    /** 内部枚举：空码（终端下单已生成、尚未聚合批次）的占位流转状态。 */
+    private static final class UnifiedBatchStatus {
+        static final String EMPTY = "EMPTY";
     }
 
     /**

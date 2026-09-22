@@ -58,7 +58,7 @@ export async function login(username: string, password: string): Promise<Current
 }
 
 export async function fetchCurrentUser(): Promise<CurrentUser | null> {
-  const res = await fetch('/api/v1/auth/me', { credentials: 'include' })
+  const res = await fetch('/api/v1/me', { credentials: 'include' })
   if (!res.ok) return null
   const payload = (await res.json()) as Envelope<CurrentUser>
   return payload.data ?? null

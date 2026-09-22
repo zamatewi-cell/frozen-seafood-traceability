@@ -23,6 +23,10 @@ public record PurchaseOrderCreateRequest(
 
         String note,
 
+        String buyerContactName,
+        String buyerContactPhone,
+        String buyerContactAddress,
+
         @Valid
         @NotEmpty(message = "采购明细不能为空")
         List<PurchaseItem> items

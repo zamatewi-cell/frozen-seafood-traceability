@@ -37,6 +37,9 @@ public class Product {
     @TableField("category")
     private String category;
 
+    @TableField("product_type")
+    private String productType;
+
     @TableField("specification")
     private String specification;
 
@@ -107,6 +110,14 @@ public class Product {
 
     public void setCategory(String category) {
         this.category = category;
+    }
+
+    public String getProductType() {
+        return productType;
+    }
+
+    public void setProductType(String productType) {
+        this.productType = productType;
     }
 
     public String getSpecification() {

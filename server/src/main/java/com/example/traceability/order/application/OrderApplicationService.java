@@ -3,24 +3,34 @@ package com.example.traceability.order.application;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
+import com.example.traceability.identity.mapper.OrganizationMapper;
 import com.example.traceability.masterdata.domain.Product;
 import com.example.traceability.masterdata.mapper.ProductMapper;
+import com.example.traceability.order.domain.OrderProgressNote;
+import com.example.traceability.order.domain.OrderBatchAllocation;
 import com.example.traceability.order.domain.OrderStatus;
 import com.example.traceability.order.domain.PurchaseOrder;
 import com.example.traceability.order.domain.PurchaseOrderItem;
 import com.example.traceability.order.domain.SalesOrder;
 import com.example.traceability.order.domain.SalesOrderItem;
+import com.example.traceability.order.dto.OrderDecisionRequest;
 import com.example.traceability.order.dto.OrderStatusUpdateRequest;
 import com.example.traceability.order.dto.PurchaseOrderCreateRequest;
 import com.example.traceability.order.dto.PurchaseOrderResponse;
 import com.example.traceability.order.dto.PurchaseOrderResponse.PurchaseItem;
 import com.example.traceability.order.dto.SalesOrderCreateRequest;
 import com.example.traceability.order.dto.SalesOrderResponse;
+import com.example.traceability.trace.application.PublicTraceApplicationService;
+import com.example.traceability.trace.dto.PublicTraceCodeResponse;
 import com.example.traceability.order.dto.SalesOrderResponse.SalesItem;
+import com.example.traceability.order.mapper.OrderBatchAllocationMapper;
+import com.example.traceability.order.mapper.OrderProgressNoteMapper;
 import com.example.traceability.order.mapper.PurchaseOrderItemMapper;
 import com.example.traceability.order.mapper.PurchaseOrderMapper;
 import com.example.traceability.order.mapper.SalesOrderItemMapper;
 import com.example.traceability.order.mapper.SalesOrderMapper;
+import com.example.traceability.quality.domain.QualityInspection;
+import com.example.traceability.quality.mapper.QualityInspectionMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -61,18 +71,34 @@ public class OrderApplicationService {
     private final SalesOrderMapper salesOrderMapper;
     private final SalesOrderItemMapper salesOrderItemMapper;
     private final ProductMapper productMapper;
+    private final PublicTraceApplicationService publicTraceService;
+    private final OrderProgressNoteMapper orderProgressNoteMapper;
+    private final OrderBatchAllocationMapper orderBatchAllocationMapper;
+    private final QualityInspectionMapper qualityInspectionMapper;
+    private final OrganizationMapper organizationMapper;
+    private final Map<Long, String> orgCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     public OrderApplicationService(
             PurchaseOrderMapper purchaseOrderMapper,
             PurchaseOrderItemMapper purchaseOrderItemMapper,
             SalesOrderMapper salesOrderMapper,
             SalesOrderItemMapper salesOrderItemMapper,
-            ProductMapper productMapper) {
+            ProductMapper productMapper,
+            PublicTraceApplicationService publicTraceService,
+            OrderProgressNoteMapper orderProgressNoteMapper,
+            OrderBatchAllocationMapper orderBatchAllocationMapper,
+            QualityInspectionMapper qualityInspectionMapper,
+            OrganizationMapper organizationMapper) {
         this.purchaseOrderMapper = purchaseOrderMapper;
         this.purchaseOrderItemMapper = purchaseOrderItemMapper;
         this.salesOrderMapper = salesOrderMapper;
         this.salesOrderItemMapper = salesOrderItemMapper;
         this.productMapper = productMapper;
+        this.publicTraceService = publicTraceService;
+        this.orderProgressNoteMapper = orderProgressNoteMapper;
+        this.orderBatchAllocationMapper = orderBatchAllocationMapper;
+        this.qualityInspectionMapper = qualityInspectionMapper;
+        this.organizationMapper = organizationMapper;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -92,6 +118,9 @@ public class OrderApplicationService {
         order.setOrderedAt(now);
         order.setExpectedDeliveryAt(request.expectedDeliveryAt());
         order.setNote(request.note());
+        order.setBuyerContactName(request.buyerContactName());
+        order.setBuyerContactPhone(request.buyerContactPhone());
+        order.setBuyerContactAddress(request.buyerContactAddress());
         order.setCurrencyCode("CNY");
         order.setCreatedBy(principal.getUserId());
         BigDecimal total = BigDecimal.ZERO;
@@ -119,8 +148,7 @@ public class OrderApplicationService {
 
     public List<PurchaseOrderResponse> listPurchaseOrders(TraceSecurityPrincipal principal) {
         return purchaseOrderMapper.selectList(new LambdaQueryWrapper<PurchaseOrder>()
-                        .and(w -> w.eq(PurchaseOrder::getBuyerOrgId, principal.getOrgId())
-                                .or().eq(PurchaseOrder::getSellerOrgId, principal.getOrgId()))
+                        .eq(PurchaseOrder::getBuyerOrgId, principal.getOrgId())
                         .orderByDesc(PurchaseOrder::getOrderedAt))
                 .stream().map(this::toPurchaseResponse).toList();
     }
@@ -145,6 +173,323 @@ public class OrderApplicationService {
         order.setStatus(request.status());
         order.setUpdatedBy(principal.getUserId());
         purchaseOrderMapper.updateById(order);
+        return getPurchaseOrder(orderId, principal);
+    }
+
+    /**
+     * 供货方审批接受采购单：仅下游采购单处于待审核(SUBMITTED)、当前组织为供货方时可由其操作员确认。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse approvePurchaseOrder(Long orderId, TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        requireSeller(order, principal);
+        requireOperator(principal);
+        if (!OrderStatus.PURCHASE_SUBMITTED.equals(order.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ORDER_INVALID_STATE",
+                    "采购单不可审核", "仅待审核(SUBMITTED)状态的采购单可审批，当前状态: " + order.getStatus());
+        }
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+        order.setStatus(OrderStatus.PURCHASE_CONFIRMED);
+        order.setApprovedBy(principal.getUserId());
+        order.setApprovedAt(now);
+        order.setUpdatedBy(principal.getUserId());
+        purchaseOrderMapper.updateById(order);
+        return getPurchaseOrder(orderId, principal);
+    }
+
+    /**
+     * 供货方驳回采购单：必填驳回原因；驳回后采购方可见原因。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse rejectPurchaseOrder(Long orderId, OrderDecisionRequest request,
+                                                     TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        requireSeller(order, principal);
+        requireOperator(principal);
+        if (request == null || request.reason() == null || request.reason().isBlank()) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "REJECT_REASON_REQUIRED",
+                    "驳回原因缺失", "驳回采购单必须说明原因");
+        }
+        if (!OrderStatus.PURCHASE_SUBMITTED.equals(order.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ORDER_INVALID_STATE",
+                    "采购单不可驳回", "仅待审核(SUBMITTED)状态的采购单可驳回，当前状态: " + order.getStatus());
+        }
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+        order.setStatus(OrderStatus.PURCHASE_REJECTED);
+        order.setApprovedBy(principal.getUserId());
+        order.setApprovedAt(now);
+        order.setRejectReason(request.reason().trim());
+        order.setUpdatedBy(principal.getUserId());
+        purchaseOrderMapper.updateById(order);
+        return getPurchaseOrder(orderId, principal);
+    }
+
+    /**
+     * 按单排产：供货方操作员对已确认(CONFIRMED)的采购单生成关联加工批次草稿。
+     * <p>批次归属供货方组织，来源描述挂接采购单号，形成"订单->批次->溯源"闭环。</p>
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse schedulePurchaseOrder(Long orderId, TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        requireSeller(order, principal);
+        requireOperator(principal);
+        if (!OrderStatus.PURCHASE_CONFIRMED.equals(order.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ORDER_INVALID_STATE",
+                    "采购单不可排产", "仅已确认(CONFIRMED)状态的采购单可排产，当前状态: " + order.getStatus());
+        }
+        order.setStatus(OrderStatus.PURCHASE_PROCESSING);
+        order.setHandlingStatus("IN_PROGRESS");
+        order.setUpdatedBy(principal.getUserId());
+        purchaseOrderMapper.updateById(order);
+
+        OrderProgressNote note = new OrderProgressNote();
+        note.setOrderId(orderId);
+        note.setOrderType("PURCHASE");
+        note.setNoteText("已接单，开始处理");
+        note.setStatusAt(OrderStatus.PURCHASE_PROCESSING);
+        note.setIsTerminalVisible(1);
+        note.setOrgId(principal.getOrgId());
+        note.setCreatedBy(principal.getUserId());
+        note.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        note.setVersion(0L);
+        note.setIsDeleted(0);
+        orderProgressNoteMapper.insert(note);
+
+        return getPurchaseOrder(orderId, principal);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse completePurchaseOrderDelivery(Long orderId, TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        requireSeller(order, principal);
+        requireOperator(principal);
+        if (!OrderStatus.PURCHASE_PROCESSING.equals(order.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ORDER_INVALID_STATE",
+                    "订单不可交付", "仅处理中(PROCESSING)状态的采购单可完成交付，当前状态: " + order.getStatus());
+        }
+        BigDecimal totalOrdered = purchaseOrderItemMapper.selectList(
+                new LambdaQueryWrapper<PurchaseOrderItem>().eq(PurchaseOrderItem::getOrderId, order.getId()))
+                .stream().map(PurchaseOrderItem::getQuantity)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal totalAllocated = orderBatchAllocationMapper.sumAllocatedByOrderId(orderId);
+        if (totalAllocated.compareTo(totalOrdered) < 0) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ALLOCATION_INSUFFICIENT",
+                    "分配量不足", "已分配 " + totalAllocated + " kg，订单需要 " + totalOrdered + " kg，请补充分配后再交付");
+        }
+        // 加工厂质检强制:每个分配批次必须有 PASS 质检单
+        List<OrderBatchAllocation> allocs = orderBatchAllocationMapper.selectByOrderId(orderId);
+        for (OrderBatchAllocation alloc : allocs) {
+            List<QualityInspection> inspections = qualityInspectionMapper.selectList(
+                    new LambdaQueryWrapper<QualityInspection>()
+                            .eq(QualityInspection::getBatchId, alloc.getBatchId())
+                            .eq(QualityInspection::getResult, "PASS")
+                            .eq(QualityInspection::getIsDeleted, 0));
+            if (inspections.isEmpty()) {
+                throw new BusinessException(HttpStatus.CONFLICT, "QUALITY_NOT_PASSED",
+                        "质检未通过", "批次 " + alloc.getBatchId() + " 尚无通过的质检单，不可交付");
+            }
+        }
+        order.setStatus(OrderStatus.PURCHASE_SHIPPED);
+        order.setHandlingStatus("COMPLETED");
+        order.setUpdatedBy(principal.getUserId());
+        purchaseOrderMapper.updateById(order);
+
+        OrderProgressNote note = new OrderProgressNote();
+        note.setOrderId(orderId);
+        note.setOrderType("PURCHASE");
+        note.setNoteText("已出货，等待买方收货");
+        note.setStatusAt(OrderStatus.PURCHASE_SHIPPED);
+        note.setIsTerminalVisible(1);
+        note.setOrgId(principal.getOrgId());
+        note.setCreatedBy(principal.getUserId());
+        note.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        note.setVersion(0L);
+        note.setIsDeleted(0);
+        orderProgressNoteMapper.insert(note);
+
+        return getPurchaseOrder(orderId, principal);
+    }
+
+    /**
+     * 买方收货入库:采购单 SHIPPED→RECEIVED,生成溯源码并绑定该订单分配的批次。
+     * 一码对应终端的一个采购订单。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse receivePurchaseOrder(Long orderId, TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        if (!order.getBuyerOrgId().equals(principal.getOrgId())) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ORDER_BUYER_ONLY",
+                    "仅买方可操作", "收货入库仅可由采购单买方执行");
+        }
+        requireOperator(principal);
+        if (!OrderStatus.PURCHASE_SHIPPED.equals(order.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ORDER_INVALID_STATE",
+                    "订单不可收货", "仅已出货(SHIPPED)状态的采购单可收货入库，当前状态: " + order.getStatus());
+        }
+        order.setStatus(OrderStatus.PURCHASE_RECEIVED);
+        order.setUpdatedBy(principal.getUserId());
+
+        // 生成溯源码(一码对应一终端采购订单),绑定该订单分配的批次
+        if (order.getTraceCodeId() == null) {
+            PublicTraceCodeResponse codeResp = publicTraceService.createPublicTraceCodeForSource(
+                    principal.getOrgId(), "PURCHASE", orderId, principal.getUserId());
+            if (codeResp != null && codeResp.publicId() != null) {
+                order.setTraceCodeId(codeResp.id());
+                order.setPublicTraceId(codeResp.publicId());
+                // 绑定该订单分配的所有批次
+                List<OrderBatchAllocation> allocs = orderBatchAllocationMapper.selectByOrderId(orderId);
+                for (OrderBatchAllocation alloc : allocs) {
+                    publicTraceService.bindBatchToPublicCode(
+                            codeResp.publicId(), alloc.getBatchId(), "RECEIPT", principal);
+                }
+            }
+        }
+        purchaseOrderMapper.updateById(order);
+
+        OrderProgressNote note = new OrderProgressNote();
+        note.setOrderId(orderId);
+        note.setOrderType("PURCHASE");
+        note.setNoteText("已收货入库，溯源码已生成: " + order.getPublicTraceId());
+        note.setStatusAt(OrderStatus.PURCHASE_RECEIVED);
+        note.setIsTerminalVisible(1);
+        note.setOrgId(principal.getOrgId());
+        note.setCreatedBy(principal.getUserId());
+        note.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        note.setVersion(0L);
+        note.setIsDeleted(0);
+        orderProgressNoteMapper.insert(note);
+
+        return getPurchaseOrder(orderId, principal);
+    }
+
+    /**
+     * 发起取消请求:买方或卖方可发起,状态置为 PENDING,等待对方或管理员审核。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse requestCancelOrder(Long orderId, String reason,
+                                                     TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        requireOperator(principal);
+        if (reason == null || reason.isBlank()) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "CANCEL_REASON_REQUIRED",
+                    "取消原因缺失", "发起取消必须说明原因");
+        }
+        if (OrderStatus.PURCHASE_RECEIVED.equals(order.getStatus())
+                || OrderStatus.PURCHASE_CANCELLED.equals(order.getStatus())
+                || OrderStatus.PURCHASE_REJECTED.equals(order.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ORDER_INVALID_STATE",
+                    "订单不可取消", "已收货/已取消/已驳回的订单不可再发起取消");
+        }
+        if (order.getCancelRequestStatus() != null
+                && "PENDING".equals(order.getCancelRequestStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "CANCEL_ALREADY_PENDING",
+                    "取消请求待审核", "该订单已有待审核的取消请求");
+        }
+        String role = order.getBuyerOrgId().equals(principal.getOrgId()) ? "BUYER" : "SELLER";
+        order.setCancelRequestRole(role);
+        order.setCancelRequestReason(reason.trim());
+        order.setCancelRequestStatus("PENDING");
+        order.setCancelRequestAt(LocalDateTime.now(ZoneOffset.UTC));
+        order.setUpdatedBy(principal.getUserId());
+        purchaseOrderMapper.updateById(order);
+
+        OrderProgressNote note = new OrderProgressNote();
+        note.setOrderId(orderId);
+        note.setOrderType("PURCHASE");
+        note.setNoteText(role.equals("BUYER") ? "买方发起取消请求: " + reason.trim()
+                : "卖方发起取消请求: " + reason.trim());
+        note.setStatusAt(order.getStatus());
+        note.setIsTerminalVisible(1);
+        note.setOrgId(principal.getOrgId());
+        note.setCreatedBy(principal.getUserId());
+        note.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        note.setVersion(0L);
+        note.setIsDeleted(0);
+        orderProgressNoteMapper.insert(note);
+
+        return getPurchaseOrder(orderId, principal);
+    }
+
+    /**
+     * 同意取消请求:对方(非发起方)或管理员可同意,订单置为 CANCELLED。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse approveCancelRequest(Long orderId, TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        if (order.getCancelRequestStatus() == null
+                || !"PENDING".equals(order.getCancelRequestStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "NO_PENDING_CANCEL",
+                    "无待审核取消请求", "该订单没有待审核的取消请求");
+        }
+        boolean isAdmin = principal.getRoles() != null && principal.getRoles().contains("ROLE_SYS_ADMIN");
+        if (!isAdmin) {
+            requireOperator(principal);
+            String requesterRole = order.getCancelRequestRole();
+            String myRole = order.getBuyerOrgId().equals(principal.getOrgId()) ? "BUYER" : "SELLER";
+            if (requesterRole.equals(myRole)) {
+                throw new BusinessException(HttpStatus.FORBIDDEN, "CANNOT_APPROVE_OWN",
+                        "不可审核自己的请求", "取消请求发起方不可自行同意，需对方或管理员审核");
+            }
+        }
+        order.setCancelRequestStatus("APPROVED");
+        order.setStatus(OrderStatus.PURCHASE_CANCELLED);
+        order.setUpdatedBy(principal.getUserId());
+        purchaseOrderMapper.updateById(order);
+
+        OrderProgressNote note = new OrderProgressNote();
+        note.setOrderId(orderId);
+        note.setOrderType("PURCHASE");
+        note.setNoteText("取消请求已同意，订单已取消");
+        note.setStatusAt(OrderStatus.PURCHASE_CANCELLED);
+        note.setIsTerminalVisible(1);
+        note.setOrgId(principal.getOrgId());
+        note.setCreatedBy(principal.getUserId());
+        note.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        note.setVersion(0L);
+        note.setIsDeleted(0);
+        orderProgressNoteMapper.insert(note);
+
+        return getPurchaseOrder(orderId, principal);
+    }
+
+    /**
+     * 拒绝取消请求:对方或管理员可拒绝,订单恢复原状态。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse rejectCancelRequest(Long orderId, TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        if (order.getCancelRequestStatus() == null
+                || !"PENDING".equals(order.getCancelRequestStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "NO_PENDING_CANCEL",
+                    "无待审核取消请求", "该订单没有待审核的取消请求");
+        }
+        boolean isAdmin = principal.getRoles() != null && principal.getRoles().contains("ROLE_SYS_ADMIN");
+        if (!isAdmin) {
+            requireOperator(principal);
+            String requesterRole = order.getCancelRequestRole();
+            String myRole = order.getBuyerOrgId().equals(principal.getOrgId()) ? "BUYER" : "SELLER";
+            if (requesterRole.equals(myRole)) {
+                throw new BusinessException(HttpStatus.FORBIDDEN, "CANNOT_REJECT_OWN",
+                        "不可审核自己的请求", "取消请求发起方不可自行拒绝，需对方或管理员审核");
+            }
+        }
+        order.setCancelRequestStatus("REJECTED");
+        order.setUpdatedBy(principal.getUserId());
+        purchaseOrderMapper.updateById(order);
+
+        OrderProgressNote note = new OrderProgressNote();
+        note.setOrderId(orderId);
+        note.setOrderType("PURCHASE");
+        note.setNoteText("取消请求已拒绝，订单继续执行");
+        note.setStatusAt(order.getStatus());
+        note.setIsTerminalVisible(1);
+        note.setOrgId(principal.getOrgId());
+        note.setCreatedBy(principal.getUserId());
+        note.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        note.setVersion(0L);
+        note.setIsDeleted(0);
+        orderProgressNoteMapper.insert(note);
+
         return getPurchaseOrder(orderId, principal);
     }
 
@@ -182,14 +527,51 @@ public class OrderApplicationService {
         }
         order.setAmountTotal(total);
         salesOrderMapper.updateById(order);
+
         return toSalesResponse(order);
     }
 
     public List<SalesOrderResponse> listSalesOrders(TraceSecurityPrincipal principal) {
-        return salesOrderMapper.selectList(new LambdaQueryWrapper<SalesOrder>()
+        List<SalesOrderResponse> result = new java.util.ArrayList<>();
+        // 1. 原有 B2C 销售单
+        salesOrderMapper.selectList(new LambdaQueryWrapper<SalesOrder>()
                         .eq(SalesOrder::getSellerOrgId, principal.getOrgId())
                         .orderByDesc(SalesOrder::getPlacedAt))
-                .stream().map(this::toSalesResponse).toList();
+                .forEach(so -> result.add(toSalesResponse(so)));
+        // 2. 下游发来的采购单(本组织作为卖方),映射为销售单视图
+        purchaseOrderMapper.selectList(new LambdaQueryWrapper<PurchaseOrder>()
+                        .eq(PurchaseOrder::getSellerOrgId, principal.getOrgId())
+                        .orderByDesc(PurchaseOrder::getOrderedAt))
+                .forEach(po -> result.add(toSalesResponseFromPurchase(po)));
+        return result;
+    }
+
+    /**
+     * 将下游采购单(本组织为卖方)映射为销售单响应,用于"销售单"tab 统一展示下游订单。
+     */
+    private SalesOrderResponse toSalesResponseFromPurchase(PurchaseOrder po) {
+        List<SalesItem> items = purchaseOrderItemMapper.selectList(
+                        new LambdaQueryWrapper<PurchaseOrderItem>().eq(PurchaseOrderItem::getOrderId, po.getId()))
+                .stream().map(item -> new SalesItem(item.getId(), item.getProductId(),
+                        productName(item.getProductId()), item.getQuantity(), item.getUnitCode(),
+                        item.getUnitPrice(), item.getRowAmount())).toList();
+        String buyerName = orgNameById(po.getBuyerOrgId());
+        String contactName = po.getBuyerContactName() != null ? po.getBuyerContactName() : buyerName;
+        String contactPhone = po.getBuyerContactPhone();
+        String contactAddr = po.getBuyerContactAddress() != null ? po.getBuyerContactAddress() : "下游采购订单";
+        return new SalesOrderResponse(po.getId(), po.getOrderNo(), po.getSellerOrgId(),
+                contactName, contactPhone, contactAddr, po.getStatus(), po.getTraceCodeId(),
+                po.getPublicTraceId(), po.getOrderedAt(), null, po.getNote(),
+                po.getAmountTotal(), po.getCurrencyCode(), items);
+    }
+
+    private String orgNameById(Long orgId) {
+        if (orgId == null) return "未知组织";
+        return orgCache.computeIfAbsent(orgId, id -> {
+            com.example.traceability.identity.domain.Organization org =
+                    organizationMapper.selectById(id);
+            return org != null ? org.getName() : "组织#" + id;
+        });
     }
 
     public SalesOrderResponse getSalesOrder(Long orderId, TraceSecurityPrincipal principal) {
@@ -212,6 +594,14 @@ public class OrderApplicationService {
         order.setStatus(request.status());
         if (OrderStatus.SALES_DELIVERED.equals(request.status())) {
             order.setDeliveredAt(LocalDateTime.now(ZoneOffset.UTC));
+            if (order.getTraceCodeId() == null) {
+                PublicTraceCodeResponse codeResp = publicTraceService.createPublicTraceCodeForSource(
+                        order.getSellerOrgId(), "SALES", order.getId(), principal.getUserId());
+                if (codeResp != null && codeResp.publicId() != null) {
+                    order.setTraceCodeId(codeResp.id());
+                    order.setPackedPackageNo(codeResp.publicId());
+                }
+            }
         }
         order.setUpdatedBy(principal.getUserId());
         salesOrderMapper.updateById(order);
@@ -243,6 +633,20 @@ public class OrderApplicationService {
         return order;
     }
 
+    private void requireSeller(PurchaseOrder order, TraceSecurityPrincipal principal) {
+        if (!order.getSellerOrgId().equals(principal.getOrgId())) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ORDER_SELLER_ONLY",
+                    "仅供货方操作", "审批/驳回/排产仅可由采购单供货方执行");
+        }
+    }
+
+    private void requireOperator(TraceSecurityPrincipal principal) {
+        if (principal.getRoles() == null || !principal.getRoles().contains("OPERATOR")) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ROLE_NOT_ALLOWED",
+                    "角色权限不足", "仅企业操作员 (OPERATOR) 可执行订单审批与排产");
+        }
+    }
+
     private PurchaseOrderResponse toPurchaseResponse(PurchaseOrder order) {
         List<PurchaseItem> items = purchaseOrderItemMapper.selectList(
                         new LambdaQueryWrapper<PurchaseOrderItem>().eq(PurchaseOrderItem::getOrderId, order.getId()))
@@ -251,7 +655,12 @@ public class OrderApplicationService {
                         item.getUnitPrice(), item.getRowAmount())).toList();
         return new PurchaseOrderResponse(order.getId(), order.getOrderNo(), order.getBuyerOrgId(),
                 order.getSellerOrgId(), order.getOrderType(), order.getStatus(), order.getOrderedAt(),
-                order.getExpectedDeliveryAt(), order.getNote(), order.getAmountTotal(),
+                order.getExpectedDeliveryAt(), order.getNote(),
+                order.getBuyerContactName(), order.getBuyerContactPhone(), order.getBuyerContactAddress(),
+                order.getApprovedBy(), order.getApprovedAt(),
+                order.getRejectReason(), order.getReceiptBatchId(), order.getTraceCodeId(),
+                order.getPublicTraceId(), order.getCancelRequestRole(), order.getCancelRequestReason(),
+                order.getCancelRequestStatus(), order.getAmountTotal(),
                 order.getCurrencyCode(), items);
     }
 

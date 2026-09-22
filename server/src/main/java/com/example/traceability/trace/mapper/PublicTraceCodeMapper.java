@@ -32,6 +32,12 @@ public interface PublicTraceCodeMapper extends BaseMapper<PublicTraceCode> {
     PublicTraceCode selectByPublicId(@Param("publicId") String publicId);
 
     /**
+     * 根据消费者公开标识 public_id 当前排他锁定读（供聚合批次绑定时避免并发竞态）。
+     */
+    @Select("SELECT * FROM public_trace_code WHERE public_id = #{publicId} AND is_deleted = 0 FOR UPDATE")
+    PublicTraceCode selectByPublicIdForUpdate(@Param("publicId") String publicId);
+
+    /**
      * 根据内部批次 ID 和组织 ID 查询关联的公开追溯码记录（企业端租户隔离读取）。
      *
      * @param batchId 批次 ID

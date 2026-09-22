@@ -27,13 +27,37 @@ export interface TemperatureSummary {
   ruleNote: string
 }
 
-export type BatchStatusType = 'ACTIVE' | 'FROZEN' | 'RECALLED' | 'CLOSED'
+export type BatchStatusType = 'ACTIVE' | 'FROZEN' | 'RECALLED' | 'CLOSED' | 'EMPTY'
+
+export interface BatchSegment {
+  publicBatchNo: string
+  originType: string
+  maskedOrigin: string
+  productionDate: string | null
+  timeline: TimelineItem[]
+}
+
+export interface TraceTreeNode {
+  stage: string
+  orgName: string
+  allocatedQuantity: string
+  batch: BatchProjection
+  timeline: TimelineItem[]
+  children: TraceTreeNode[]
+}
+
+export interface TraceTree {
+  orderNo: string | null
+  nodes: TraceTreeNode[]
+}
 
 export interface PublicTrace {
   publicTraceId: string
   product: ProductProjection
-  batch: BatchProjection
+  batch: BatchProjection | null
   timeline: TimelineItem[]
+  segments: BatchSegment[]
+  tree: TraceTree | null
   temperatureSummary: TemperatureSummary
   batchStatus: BatchStatusType
   recallNotice: string | null

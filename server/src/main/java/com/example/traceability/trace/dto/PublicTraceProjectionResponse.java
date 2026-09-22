@@ -12,8 +12,9 @@ import java.util.List;
  *
  * @param publicTraceId      消费者公开追溯编码 (26 位 Base32)
  * @param product            产品公开属性投影
- * @param batch              批次脱敏属性投影
- * @param timeline           仅包含 SUBMITTED 生效事件的时间线投影 (排除 CORRECTED 原事件)
+ * @param batch              首批次脱敏属性投影（兼容旧结构，等价于 segments 中的首段）
+ * @param timeline           首批次时间线投影（兼容旧结构）
+ * @param segments           一个码聚合的多批次履历段（每组为某一物理批次的脱敏信息+时间线）
  * @param temperatureSummary 温度摘要说明 (当前切片固定为 INSUFFICIENT_DATA 并带诚实说明)
  * @param batchStatus        真实批次流转状态 (ACTIVE/FROZEN/RECALLED/CLOSED)
  * @param recallNotice       模拟召回声明 (仅在 batchStatus=RECALLED 时非空返回系统演练提示，其余为 null)
@@ -27,12 +28,65 @@ public record PublicTraceProjectionResponse(
         ProductProjection product,
         BatchProjection batch,
         List<TimelineItem> timeline,
+        List<BatchSegment> segments,
+        TraceTree tree,
         TemperatureSummaryProjection temperatureSummary,
         String batchStatus,
         String recallNotice,
         String queriedAt,
         String disclosure
 ) {
+
+    /**
+     * 溯源树状结构（一个订单 → 多环节 → 每环节多批次分支）。
+     *
+     * @param orderId    终端订单ID（内部不暴露，仅调试用，可置 null）
+     * @param orderNo   终端订单号（脱敏后）
+     * @param nodes      根节点列表（终端环节的各批次分支）
+     */
+    public record TraceTree(
+            String orderNo,
+            List<TraceTreeNode> nodes
+    ) {
+    }
+
+    /**
+     * 树节点：某环节用某批次满足订单的一部分。
+     *
+     * @param stage              环节（SOURCE/PROCESSING/DISTRIBUTION/RETAIL）
+     * @param orgName           组织名（脱敏）
+     * @param allocatedQuantity 该批次分配数量
+     * @param batch              该批次脱敏信息
+     * @param timeline           该批次溯源时间线
+     * @param children           向上溯源的下一环节节点（多分支）
+     */
+    public record TraceTreeNode(
+            String stage,
+            String orgName,
+            String allocatedQuantity,
+            BatchProjection batch,
+            List<TimelineItem> timeline,
+            List<TraceTreeNode> children
+    ) {
+    }
+
+    /**
+     * 单个物理批次的公开履历段。
+     *
+     * @param publicBatchNo  掩码后的公开批次号
+     * @param originType     来源类型代码
+     * @param maskedOrigin   掩码后的产地文本
+     * @param productionDate 生产加工日期 (可为 null)
+     * @param timeline       该批次的追溯时间线
+     */
+    public record BatchSegment(
+            String publicBatchNo,
+            String originType,
+            String maskedOrigin,
+            String productionDate,
+            List<TimelineItem> timeline
+    ) {
+    }
 
     /**
      * 产品公开信息投影。
