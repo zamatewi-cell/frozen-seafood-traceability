@@ -3,11 +3,12 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import { getBatch, listBatchEvents, submitBatch } from '@/api/batches'
+import { listBatchOperations } from '@/api/batchOperations'
 import { listTransfers } from '@/api/transfers'
 import { ApiError } from '@/api/client'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
 import { useSession } from '@/stores/session'
-import type { Batch, TraceEvent, Transfer } from '@/types/enterprise'
+import type { Batch, BatchOperation, TraceEvent, Transfer } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import {
   formatBatchType,
@@ -15,6 +16,8 @@ import {
   formatDate,
   formatFlowStatus,
   formatIsoDateTime,
+  formatOperationStatus,
+  formatOperationType,
   formatOrgType,
   formatOriginType,
   formatProductCategory,
@@ -24,7 +27,7 @@ import {
   formatTraceEventType,
   formatTransferStatus
 } from '@/utils/formatters'
-import { canInitiateTransfer, canManageSourceBatches } from '@/utils/permissions'
+import { canInitiateTransfer, canManageSourceBatches, canOperateBatch } from '@/utils/permissions'
 import { takeBatchFlash, type BatchFlash } from './batchFlash'
 import { recalledBatchListQuery } from './batchQuery'
 
@@ -52,11 +55,25 @@ type TransferLoadState = 'loading' | 'loaded' | 'error'
 const transferState = ref<TransferLoadState>('loading')
 const transfers = ref<Transfer[]>([])
 
-/** 批次已转出（403）时，本组织作为历史参与组织仍可只读查看自己参与的交接与本组织记录的历史事件。 */
-const history = ref<{ transfers: Transfer[]; events: TraceEvent[] } | null>(null)
+/** 批次已转出（403）时，本组织作为历史参与组织仍可只读查看自己参与的交接、本组织的批次操作与本组织记录的历史事件。 */
+const history = ref<{ transfers: Transfer[]; events: TraceEvent[]; operations: BatchOperation[] } | null>(null)
+
+type OperationLoadState = 'loading' | 'loaded' | 'error'
+const operationState = ref<OperationLoadState>('loading')
+/** 本组织创建的、引用该批次（INPUT 或 OUTPUT）的批次操作；服务端不返回其他企业的内部单据 */
+const operations = ref<BatchOperation[]>([])
+const producedBy = computed(() => operations.value.find((op) => op.items.some((i) => i.role === 'OUTPUT' && i.batchId === batch.value?.id)) ?? null)
+const consumedBy = computed(() => operations.value.filter((op) => op.items.some((i) => i.role === 'INPUT' && i.batchId === batch.value?.id)))
+const remaining = computed(() => {
+  const b = batch.value
+  if (!b) return null
+  return b.remainingQuantity ?? (b.flowStatus === 'CLOSED' ? 0 : b.quantity)
+})
 
 const openTransfer = computed(() => transfers.value.find((t) => t.status === 'DRAFT' || t.status === 'PENDING') ?? null)
 const showInitiateTransfer = computed(() => canInitiateTransfer(user.value, batch.value) && transferState.value === 'loaded' && !openTransfer.value)
+/** 加工 / 拆分入口：PROCESSOR 操作员、本组织负责的 ACTIVE + NORMAL 批次、无未结束交接（服务端仍独立校验） */
+const showOperate = computed(() => canOperateBatch(user.value, batch.value) && transferState.value === 'loaded' && !openTransfer.value)
 const submitting = ref(false)
 const submitError = ref('')
 
@@ -66,6 +83,7 @@ const canSubmit = computed(() => {
   return Boolean(b && canManageSourceBatches(user.value)
     && b.orgId === user.value?.orgId
     && b.batchType === 'SOURCE'
+    && !b.producedByOperationId
     && b.flowStatus === 'DRAFT'
     && b.riskStatus === 'NORMAL')
 })
@@ -105,6 +123,28 @@ function eventShipmentId(event: TraceEvent): number | null {
   const raw = event.detailsJson?.shipmentId
   const id = typeof raw === 'number' ? raw : Number(raw)
   return Number.isInteger(id) && id > 0 ? id : null
+}
+
+/** PROCESS 由批次操作提交自动生成：展示可追溯到加工单的结构化事实。 */
+function processFacts(event: TraceEvent): Array<{ label: string; value: string }> {
+  const details = event.detailsJson ?? {}
+  const facts: Array<{ label: string; value: string }> = []
+  if (details.operationNo) facts.push({ label: '加工单号', value: String(details.operationNo) })
+  for (const [key, label] of [['lossQuantity', '损耗'], ['wasteQuantity', '废弃'], ['sampleQuantity', '留样']] as const) {
+    const raw = details[key]
+    if (raw !== undefined && raw !== null && Number(raw) > 0) facts.push({ label, value: formatQuantity(String(raw), 'kg') })
+  }
+  return facts
+}
+
+function eventOperationId(event: TraceEvent): number | null {
+  if (event.detailsJson?.sourceObjectType !== 'BATCH_OPERATION') return null
+  const id = Number(event.detailsJson?.sourceObjectId)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
+function counterpartBatches(op: BatchOperation, role: 'INPUT' | 'OUTPUT') {
+  return op.items.filter((i) => i.role === role && i.batchId)
 }
 
 function sourceFacts(event: TraceEvent): Array<{ label: string; value: string }> {
@@ -157,15 +197,35 @@ async function loadTransfers(batchId: number) {
 
 async function loadHistory(batchId: number, signal: AbortSignal) {
   try {
-    const [page, ownEvents] = await Promise.all([
+    const [page, ownEvents, ownOperations] = await Promise.all([
       listTransfers({ batchId, page: 1, size: 20 }, signal),
-      listBatchEvents(batchId, signal)
+      listBatchEvents(batchId, signal).catch(() => [] as TraceEvent[]),
+      listBatchOperations(batchId, signal).then((r) => r.items).catch(() => [] as BatchOperation[])
     ])
     if (signal.aborted) return
     directory.resolveOrganizations(page.items.flatMap((t) => [t.senderOrgId, t.receiverOrgId]))
-    history.value = { transfers: page.items, events: ownEvents }
+    history.value = { transfers: page.items, events: ownEvents, operations: ownOperations }
   } catch {
     history.value = null
+  }
+}
+
+let operationRequest: AbortController | null = null
+
+async function loadOperations(batchId: number) {
+  operationRequest?.abort()
+  const controller = new AbortController()
+  operationRequest = controller
+  operationState.value = 'loading'
+  try {
+    const page = await listBatchOperations(batchId, controller.signal)
+    if (controller.signal.aborted) return
+    operations.value = page.items
+    operationState.value = 'loaded'
+  } catch {
+    if (controller.signal.aborted) return
+    operations.value = []
+    operationState.value = 'error'
   }
 }
 
@@ -218,6 +278,7 @@ async function load() {
     directory.resolveOrganizations([result.orgId])
     loadEvents(result.id)
     loadTransfers(result.id)
+    loadOperations(result.id)
   } catch (err: unknown) {
     if (controller.signal.aborted) return
     if (err instanceof ApiError && err.status === 404) {
@@ -266,6 +327,7 @@ onBeforeUnmount(() => {
   activeRequest?.abort()
   eventRequest?.abort()
   transferRequest?.abort()
+  operationRequest?.abort()
 })
 </script>
 
@@ -285,7 +347,7 @@ onBeforeUnmount(() => {
       <div class="ent-card ent-state" role="alert" data-testid="batch-detail-forbidden">
         该批次当前不由本组织负责，无权查看批次详情，也不能再修改该批次。
       </div>
-      <section v-if="history && (history.transfers.length > 0 || history.events.length > 0)" class="ent-card" data-testid="batch-history">
+      <section v-if="history && (history.transfers.length > 0 || history.events.length > 0 || history.operations.length > 0)" class="ent-card" data-testid="batch-history">
         <h2 class="ent-card-title">本组织参与的历史记录（只读）</h2>
         <ul class="history-list">
           <li v-for="t in history.transfers" :key="`t-${t.id}`" data-testid="history-transfer">
@@ -293,6 +355,11 @@ onBeforeUnmount(() => {
             <StatusBadge :info="formatTransferStatus(t.status)" dimension="交接" />
             {{ directory.organizationLabel(t.senderOrgId) }} → {{ directory.organizationLabel(t.receiverOrgId) }}
             <RouterLink v-if="t.shipmentId" :to="`/app/shipments/${t.shipmentId}`" class="mono">运输任务 {{ t.shipmentNo }}</RouterLink>
+          </li>
+          <li v-for="op in history.operations" :key="`o-${op.id}`" data-testid="history-operation">
+            {{ formatOperationType(op.operationType) }}单
+            <RouterLink :to="`/app/batch-operations/${op.id}`" class="mono">{{ op.operationNo }}</RouterLink>
+            <StatusBadge :info="formatOperationStatus(op.status)" dimension="操作" />
           </li>
           <li v-for="event in history.events" :key="`e-${event.id}`" data-testid="history-event" :data-event-type="event.eventType">
             {{ formatTraceEventType(event.eventType) }} · {{ formatIsoDateTime(event.occurredAt) }} · {{ event.summary }}
@@ -317,6 +384,17 @@ onBeforeUnmount(() => {
           <span>风险 <StatusBadge :info="formatRiskStatus(batch.riskStatus)" dimension="风险" data-testid="detail-risk-status" /></span>
         </div>
       </div>
+
+      <p v-if="batch.producedByOperationId && batch.flowStatus === 'DRAFT'" class="ent-next-step" data-testid="operation-draft-output">
+        <strong>批次操作产出草稿：</strong>该批次由
+        <RouterLink :to="`/app/batch-operations/${batch.producedByOperationId}`">批次操作草稿</RouterLink>
+        产出，只能随该操作提交激活，不能单独修改或激活。
+      </p>
+      <p v-if="batch.consumedByOperationId" class="ent-next-step" data-testid="operation-consumed">
+        <strong>已全量消耗：</strong>该批次已被
+        <RouterLink :to="`/app/batch-operations/${batch.consumedByOperationId}`">批次操作</RouterLink>
+        全量消耗并关闭，不能再加工、拆分或交接；仍可查询追溯记录。
+      </p>
 
       <section v-if="canSubmit" class="ent-card activation-card" aria-labelledby="activation-title" data-testid="activation-card">
         <h2 id="activation-title" class="ent-card-title">提交激活</h2>
@@ -351,6 +429,8 @@ onBeforeUnmount(() => {
             <dd>{{ formatBatchType(batch.batchType) }}</dd>
             <dt>声明数量</dt>
             <dd data-testid="detail-quantity">{{ formatQuantity(batch.quantity, batch.unitCode) }}</dd>
+            <dt>剩余数量</dt>
+            <dd data-testid="detail-remaining-quantity">{{ formatQuantity(remaining, batch.unitCode) }}</dd>
           </dl>
         </section>
 
@@ -424,6 +504,46 @@ onBeforeUnmount(() => {
         </section>
       </div>
 
+      <section class="ent-card" aria-labelledby="lineage-title" data-testid="batch-lineage">
+        <h2 id="lineage-title" class="ent-card-title">加工与拆分谱系</h2>
+        <div v-if="operationState === 'loading'" class="ent-state">正在加载批次操作…</div>
+        <div v-else-if="operationState === 'error'" class="ent-state error" role="alert">
+          批次操作加载失败
+          <button type="button" class="ent-button" @click="loadOperations(batch.id)">重试</button>
+        </div>
+        <template v-else>
+          <div v-if="operations.length === 0" class="ent-muted section-note" data-testid="batch-lineage-empty">本组织暂无涉及该批次的加工或拆分记录。</div>
+          <ul v-else class="history-list">
+            <li v-if="producedBy" data-testid="lineage-produced-by">
+              由{{ formatOperationType(producedBy.operationType) }}单
+              <RouterLink :to="`/app/batch-operations/${producedBy.id}`" class="mono">{{ producedBy.operationNo }}</RouterLink>
+              <StatusBadge :info="formatOperationStatus(producedBy.status)" dimension="操作" />
+              产出；上游：
+              <template v-for="(item, index) in counterpartBatches(producedBy, 'INPUT')" :key="item.id">
+                <span v-if="index > 0">、</span>
+                <RouterLink :to="`/app/batches/${item.batchId}`" class="mono" data-testid="lineage-parent">{{ item.traceBatchNo }}</RouterLink>
+              </template>
+            </li>
+            <li v-for="op in consumedBy" :key="op.id" data-testid="lineage-consumed-by" :data-status="op.status">
+              {{ op.status === 'SUBMITTED' ? '已被' : '草稿' }}{{ formatOperationType(op.operationType) }}单
+              <RouterLink :to="`/app/batch-operations/${op.id}`" class="mono">{{ op.operationNo }}</RouterLink>
+              <StatusBadge :info="formatOperationStatus(op.status)" dimension="操作" />
+              {{ op.status === 'SUBMITTED' ? '全量消耗' : '计划投入' }}；下游：
+              <template v-for="(item, index) in counterpartBatches(op, 'OUTPUT')" :key="item.id">
+                <span v-if="index > 0">、</span>
+                <RouterLink :to="`/app/batches/${item.batchId}`" class="mono" data-testid="lineage-child">{{ item.traceBatchNo }}</RouterLink>
+                （{{ formatQuantity(item.quantity, item.unitCode) }}）
+              </template>
+            </li>
+          </ul>
+          <div v-if="showOperate" class="ent-actions" data-testid="operate-actions">
+            <RouterLink :to="{ path: `/app/batches/${batch.id}/operations/new`, query: { type: 'PROCESS' } }" class="ent-button ent-primary" data-testid="start-process">加工</RouterLink>
+            <RouterLink :to="{ path: `/app/batches/${batch.id}/operations/new`, query: { type: 'SPLIT' } }" class="ent-button" data-testid="start-split">拆分</RouterLink>
+            <small class="ent-muted">加工或拆分都会全量消耗剩余 {{ formatQuantity(remaining, batch.unitCode) }}；如需部分加工，请先拆分。</small>
+          </div>
+        </template>
+      </section>
+
       <section class="ent-card" aria-labelledby="handover-title" data-testid="batch-transfers">
         <h2 id="handover-title" class="ent-card-title">交接与运输</h2>
         <div v-if="transferState === 'loading'" class="ent-state">正在加载交接记录…</div>
@@ -480,7 +600,9 @@ onBeforeUnmount(() => {
           <button type="button" class="ent-button" @click="loadEvents(batch.id)">重试</button>
         </div>
         <div v-else-if="events.length === 0" class="ent-state" data-testid="events-empty">
-          {{ batch.flowStatus === 'DRAFT' ? '草稿尚未激活，暂无追溯事件；提交激活后将自动生成 SOURCE 事件。' : '暂无追溯事件。' }}
+          <template v-if="batch.flowStatus === 'DRAFT' && batch.producedByOperationId">批次操作产出草稿，暂无追溯事件。</template>
+          <template v-else-if="batch.flowStatus === 'DRAFT'">草稿尚未激活，暂无追溯事件；提交激活后将自动生成 SOURCE 事件。</template>
+          <template v-else>暂无追溯事件。</template>
         </div>
         <ol v-else class="event-list">
           <li
@@ -509,6 +631,15 @@ onBeforeUnmount(() => {
                 <template v-for="fact in sourceFacts(event)" :key="fact.label">
                   <dt>{{ fact.label }}</dt>
                   <dd>{{ fact.value }}</dd>
+                </template>
+              </template>
+              <template v-if="event.eventType === 'PROCESS' && eventOperationId(event)">
+                <template v-for="fact in processFacts(event)" :key="fact.label">
+                  <dt>{{ fact.label }}</dt>
+                  <dd :data-testid="`event-fact-${fact.label}`">
+                    <RouterLink v-if="fact.label === '加工单号'" :to="`/app/batch-operations/${eventOperationId(event)}`">{{ fact.value }}</RouterLink>
+                    <span v-else>{{ fact.value }}</span>
+                  </dd>
                 </template>
               </template>
               <template v-if="event.eventType === 'TRANSPORT' || event.eventType === 'ARRIVAL'">

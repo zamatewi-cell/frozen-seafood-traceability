@@ -102,6 +102,7 @@ function backend(world: ReturnType<typeof createWorld>, user: typeof sourceOpera
     'GET /api/v1/organizations/50': () => ok(orgs[2]),
     'GET /api/v1/organizations/40/sites': () => ok(sites[40]),
     'GET /api/v1/organizations/30/sites': () => ok(sites[30]),
+    'GET /api/v1/batch-operations': () => ({ status: 200, body: page([]) }),
     'GET /api/v1/batches/101': () => (world.batch.orgId === user.orgId
       ? ok(world.batch)
       : problem(403, 'ORG_SCOPE_DENIED', '无权访问其他组织的批次')),

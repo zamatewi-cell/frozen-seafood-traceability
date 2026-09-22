@@ -26,6 +26,7 @@ function json(route: Route, status: number, body: unknown) {
 }
 
 const meta = { requestId: 'req-e2e', timestamp: '2026-09-21T08:00:00Z' }
+const emptyPage = { ...meta, page: { number: 1, size: 20, totalElements: 0, totalPages: 0 } }
 
 async function installFakeAuthBackend(page: Page, currentUser: typeof user = user) {
   const state = { loggedIn: false, meCalls: 0, csrfHeaders: [] as (string | undefined)[] }
@@ -102,6 +103,7 @@ test.describe('Enterprise shell', () => {
     await page.route('**/api/v1/batches/12', (route) => json(route, 200, { data: batch, meta }))
     await page.route('**/api/v1/batches/12/events', (route) => json(route, 200, { data: [], meta }))
     await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: { ...meta, page: { number: 1, size: 20, totalElements: 0, totalPages: 0 } } }))
+    await page.route('**/api/v1/batch-operations?*', (route) => json(route, 200, { data: [], meta: emptyPage }))
     await page.route('**/api/v1/products/5', (route) => json(route, 200, {
       data: { id: 5, productCode: 'P-YELLOW', publicName: '冷冻大黄鱼', category: 'FISH', specification: '500g/条', sourceType: 'DOMESTIC_CAPTURE', baseUnitCode: 'kg', status: 'ACTIVE', version: 0 },
       meta
@@ -162,6 +164,7 @@ test.describe('Enterprise shell', () => {
     await page.route('**/api/v1/batches/101', (route) => json(route, 200, { data: batch, meta }))
     await page.route('**/api/v1/batches/101/events', (route) => json(route, 200, { data: events, meta }))
     await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: { ...meta, page: { number: 1, size: 20, totalElements: 0, totalPages: 0 } } }))
+    await page.route('**/api/v1/batch-operations?*', (route) => json(route, 200, { data: [], meta: emptyPage }))
     await page.route('**/api/v1/batches/101/submit', (route) => {
       const request = route.request()
       writes.push({ path: '/api/v1/batches/101/submit', body: request.postDataJSON(), csrf: request.headers()['x-csrf-token'] })
@@ -204,5 +207,99 @@ test.describe('Enterprise shell', () => {
     expect(Object.keys(creates[0].body as object).sort()).toEqual(['externalBatchNo', 'originText', 'originType', 'productId', 'quantity', 'unitCode'])
     const submits = writes.filter((w) => w.path === '/api/v1/batches/101/submit')
     expect(submits).toEqual([{ path: '/api/v1/batches/101/submit', body: { version: 0 }, csrf: 'e2e-csrf' }])
+  })
+
+  test('processor processes a batch through the wizard: full input, exact balance, lands on the activated output', async ({ page }) => {
+    const backend = await installFakeAuthBackend(page)
+    backend.loggedIn = true
+    const product = { id: 5, productCode: 'P-YELLOW', publicName: '冷冻大黄鱼', category: 'FISH', specification: '500g/条', sourceType: 'DOMESTIC_CAPTURE', baseUnitCode: 'kg', status: 'ACTIVE', version: 0 }
+    const input: Record<string, unknown> = {
+      id: 101, orgId: 30, productId: 5, traceBatchNo: 'TB-E2E-B0', batchType: 'SOURCE', quantity: 1000, remainingQuantity: 1000,
+      unitCode: 'kg', originType: 'DOMESTIC_CAPTURE', originText: '东海舟山渔场', flowStatus: 'ACTIVE', riskStatus: 'NORMAL', version: 3
+    }
+    const output: Record<string, unknown> = {
+      id: 201, orgId: 30, productId: 5, traceBatchNo: 'TB-E2E-B1', batchType: 'PROCESSING', quantity: 960, remainingQuantity: 960,
+      unitCode: 'kg', originType: 'DOMESTIC_CAPTURE', originText: '东海舟山渔场', flowStatus: 'DRAFT', riskStatus: 'NORMAL', version: 0, producedByOperationId: 701
+    }
+    const writes: { method: string; path: string; body: unknown; csrf?: string; idempotencyKey?: string }[] = []
+    let operation: Record<string, unknown> | null = null
+    let outputEvents: unknown[] = []
+
+    await page.route('**/api/v1/products?*', (route) => json(route, 200, { data: [product], meta: { ...meta, page: { number: 1, size: 100, totalElements: 1, totalPages: 1 } } }))
+    await page.route('**/api/v1/products/5', (route) => json(route, 200, { data: product, meta }))
+    await page.route('**/api/v1/organizations/30', (route) => json(route, 200, {
+      data: { id: 30, orgNo: 'ORG_PROC_01', name: '东海水产加工有限公司', orgType: 'PROCESSOR', status: 'ACTIVE' }, meta
+    }))
+    await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: emptyPage }))
+    await page.route('**/api/v1/batches/101', (route) => json(route, 200, { data: input, meta }))
+    await page.route('**/api/v1/batches/101/events', (route) => json(route, 200, { data: [], meta }))
+    await page.route('**/api/v1/batches/201', (route) => json(route, 200, { data: output, meta }))
+    await page.route('**/api/v1/batches/201/events', (route) => json(route, 200, { data: outputEvents, meta }))
+    await page.route('**/api/v1/batch-operations?*', (route) => {
+      const batchId = Number(new URL(route.request().url()).searchParams.get('batchId'))
+      const related = operation && (batchId === 101 || batchId === 201) ? [operation] : []
+      return json(route, 200, { data: related, meta: { ...meta, page: { number: 1, size: 20, totalElements: related.length, totalPages: related.length ? 1 : 0 } } })
+    })
+    const items = () => [
+      { id: 1, operationId: 701, role: 'INPUT', batchId: 101, quantity: 1000, unitCode: 'kg', normalizedQuantity: 1000, traceBatchNo: 'TB-E2E-B0', batchFlowStatus: input.flowStatus },
+      { id: 2, operationId: 701, role: 'OUTPUT', batchId: 201, quantity: 960, unitCode: 'kg', normalizedQuantity: 960, traceBatchNo: 'TB-E2E-B1', batchFlowStatus: output.flowStatus },
+      { id: 3, operationId: 701, role: 'LOSS', quantity: 30, unitCode: 'kg', normalizedQuantity: 30 },
+      { id: 4, operationId: 701, role: 'SAMPLE', quantity: 10, unitCode: 'kg', normalizedQuantity: 10 }
+    ]
+    await page.route('**/api/v1/batch-operations', (route) => {
+      const request = route.request()
+      writes.push({ method: request.method(), path: '/api/v1/batch-operations', body: request.postDataJSON(), csrf: request.headers()['x-csrf-token'], idempotencyKey: request.headers()['idempotency-key'] })
+      operation = { id: 701, orgId: 30, operationNo: 'OP-E2E-701', operationType: 'PROCESS', occurredAt: '2026-09-22T08:00:00.000Z', recordedAt: '2026-09-22T08:00:00.000Z',
+        status: 'DRAFT', balanced: true, version: 0, createdAt: '2026-09-22T08:00:00.000Z', updatedAt: '2026-09-22T08:00:00.000Z', items: items(), relations: [] }
+      return json(route, 201, { data: operation, meta })
+    })
+    await page.route('**/api/v1/batch-operations/701/submit', (route) => {
+      const request = route.request()
+      writes.push({ method: request.method(), path: '/api/v1/batch-operations/701/submit', body: request.postDataJSON(), csrf: request.headers()['x-csrf-token'], idempotencyKey: request.headers()['idempotency-key'] })
+      Object.assign(input, { flowStatus: 'CLOSED', remainingQuantity: 0, consumedByOperationId: 701 })
+      Object.assign(output, { flowStatus: 'ACTIVE' })
+      outputEvents = [{
+        id: 950, batchId: 201, orgId: 30, eventType: 'PROCESS', occurredAt: '2026-09-22T08:00:00.000Z', recordedAt: '2026-09-22T08:00:01.000Z',
+        dataSource: 'MANUAL', status: 'SUBMITTED', summary: '加工产出 960 kg（投入 1000 kg，损耗 30 kg，留样 10 kg）',
+        detailsJson: { sourceObjectType: 'BATCH_OPERATION', sourceObjectId: 701, operationNo: 'OP-E2E-701', lossQuantity: '30.000', wasteQuantity: '0', sampleQuantity: '10.000' }
+      }]
+      operation = { ...operation, status: 'SUBMITTED', version: 1, items: items(), relations: [{ id: 1, operationId: 701, parentBatchId: 101, childBatchId: 201, relationType: 'TRANSFORM', createdAt: '2026-09-22T08:00:01Z' }] }
+      return json(route, 200, { data: operation, meta })
+    })
+
+    await page.goto('/app/batches/101')
+    await expect(page.getByTestId('detail-remaining-quantity')).toContainText('1,000 kg')
+    await page.getByTestId('start-process').click()
+    await expect(page).toHaveURL(/\/app\/batches\/101\/operations\/new\?type=PROCESS$/)
+    await expect(page.getByTestId('wizard-input-quantity')).toContainText('1,000 kg')
+
+    await page.getByTestId('output-quantity-0').fill('960')
+    await page.getByTestId('loss-quantity').fill('30')
+    await expect(page.getByTestId('balance-indicator')).toHaveAttribute('data-balanced', 'false')
+    await expect(page.getByTestId('wizard-submit')).toBeDisabled()
+    await page.getByTestId('sample-quantity').fill('10')
+    await expect(page.getByTestId('balance-indicator')).toHaveAttribute('data-balanced', 'true')
+    await page.getByTestId('wizard-submit').dblclick()
+
+    await expect(page).toHaveURL(/\/app\/batches\/201$/)
+    await expect(page.getByTestId('batch-flash')).toContainText('PROCESS')
+    await expect(page.getByTestId('detail-flow-status')).toHaveText('可流转')
+    await expect(page.getByTestId('lineage-produced-by')).toContainText('OP-E2E-701')
+    await expect(page.getByTestId('trace-event')).toHaveAttribute('data-event-type', 'PROCESS')
+
+    expect(writes.map((w) => `${w.method} ${w.path}`)).toEqual(['POST /api/v1/batch-operations', 'POST /api/v1/batch-operations/701/submit'])
+    for (const w of writes) {
+      expect(w.csrf).toBe('e2e-csrf')
+      expect(w.idempotencyKey?.length).toBeGreaterThanOrEqual(16)
+    }
+    const created = writes[0].body as { operationType: string; items: Record<string, unknown>[] }
+    expect(created.operationType).toBe('PROCESS')
+    expect(created.items).toEqual([
+      { role: 'INPUT', batchId: 101, quantity: 1000, unitCode: 'kg' },
+      { role: 'OUTPUT', quantity: 960, unitCode: 'kg' },
+      { role: 'LOSS', quantity: 30, unitCode: 'kg' },
+      { role: 'SAMPLE', quantity: 10, unitCode: 'kg' }
+    ])
+    expect(writes[1].body).toEqual({ version: 0 })
   })
 })

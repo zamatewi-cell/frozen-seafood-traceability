@@ -43,6 +43,7 @@ function backend(overrides: Overrides = {}) {
     'GET /api/v1/products/6': () => ({ status: 200, body: envelope(products[6]) }),
     'GET /api/v1/organizations/30': () => ({ status: 200, body: envelope(organization) }),
     'GET /api/v1/transfers': () => ({ status: 200, body: envelope([], { number: 1, size: 20, totalElements: 0, totalPages: 0 }) }),
+    'GET /api/v1/batch-operations': () => ({ status: 200, body: envelope([], { number: 1, size: 20, totalElements: 0, totalPages: 0 }) }),
     ...overrides
   })
 }
