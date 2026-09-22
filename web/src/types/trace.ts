@@ -16,11 +16,24 @@ export interface BatchProjection {
   productionDate: string | null
 }
 
+export interface ChecklistItem {
+  itemName: string
+  passed: boolean
+}
+
+export interface QualityCheckDetails {
+  stage: string
+  inspectionNo?: string
+  itemCount?: number
+  items?: ChecklistItem[]
+}
+
 export interface TimelineItem {
   event: string
   occurredAt: string
   dataSourceLabel: string
   summary: string | null
+  details: string | null
 }
 
 export interface TemperatureSummary {

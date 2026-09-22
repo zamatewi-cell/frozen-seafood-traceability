@@ -125,12 +125,14 @@ public record PublicTraceProjectionResponse(
      * @param occurredAt      业务实际发生时间 (带明确 UTC 偏移的 ISO 8601 字符串)
      * @param dataSourceLabel 诚实的数据来源标签说明
      * @param summary         事件备注/详情 (如质检环节和清单项数、订单号等)
+     * @param details         事件结构化详情JSON (质检清单项等, 可为null)
      */
     public record TimelineItem(
             String event,
             String occurredAt,
             String dataSourceLabel,
-            String summary
+            String summary,
+            String details
     ) {
     }
 

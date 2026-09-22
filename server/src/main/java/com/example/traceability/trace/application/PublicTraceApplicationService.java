@@ -723,7 +723,23 @@ public class PublicTraceApplicationService {
         String eventLabel = resolveEventLabel(event.getEventType());
         String occurredAt = event.getOccurredAt().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
         String sourceLabel = resolveDataSourceLabel(event.getDataSource());
-        return new PublicTraceProjectionResponse.TimelineItem(eventLabel, occurredAt, sourceLabel, event.getSummary());
+        String details = sanitizeDetailsForPublic(event.getEventType(), event.getDetailsJson());
+        return new PublicTraceProjectionResponse.TimelineItem(eventLabel, occurredAt, sourceLabel, event.getSummary(), details);
+    }
+
+    /**
+     * 对事件详情做白名单过滤后返回公开JSON。
+     * 仅QUALITY_CHECK事件暴露details(质检清单项), 其他事件不暴露。
+     * details_json内容由V29迁移保证只含安全字段(stage/inspectionNo/itemCount/items)。
+     */
+    private String sanitizeDetailsForPublic(String eventType, String detailsJson) {
+        if (detailsJson == null || detailsJson.isBlank()) {
+            return null;
+        }
+        if (!"QUALITY_CHECK".equals(eventType)) {
+            return null;
+        }
+        return detailsJson;
     }
 
     private String resolveEventLabel(String eventType) {

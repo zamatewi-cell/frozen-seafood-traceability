@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import AppIcons from '@/components/icons/AppIcons.vue'
-import type { TimelineItem } from '@/types/trace'
+import type { TimelineItem, QualityCheckDetails } from '@/types/trace'
 import { formatIsoDateTime } from '@/utils/formatters'
 
 defineProps<{
@@ -13,6 +13,15 @@ function isSimulatedSource(label: string): boolean {
 
 function isDeviceSource(label: string): boolean {
   return label.includes('DEVICE')
+}
+
+function parseDetails(item: TimelineItem): QualityCheckDetails | null {
+  if (!item.details) return null
+  try {
+    return JSON.parse(item.details) as QualityCheckDetails
+  } catch {
+    return null
+  }
 }
 </script>
 
@@ -42,6 +51,13 @@ function isDeviceSource(label: string): boolean {
             <time class="item-time mono">{{ formatIsoDateTime(item.occurredAt) }}</time>
           </div>
           <p v-if="item.summary" class="item-summary">{{ item.summary }}</p>
+          <!-- 质检清单项列表 -->
+          <ul v-if="parseDetails(item)?.items?.length" class="checklist-list">
+            <li v-for="(ci, ciIdx) in parseDetails(item)!.items" :key="ciIdx" class="checklist-item">
+              <span class="check-icon" :class="{ passed: ci.passed }">{{ ci.passed ? '✓' : '×' }}</span>
+              <span class="check-name">{{ ci.itemName }}</span>
+            </li>
+          </ul>
           <div class="item-source-row">
             <span class="source-label-tag" :class="{ 'simulated-tag': isSimulatedSource(item.dataSourceLabel) }">
               {{ item.dataSourceLabel }}
@@ -149,6 +165,47 @@ function isDeviceSource(label: string): boolean {
   background: #f8fafc;
   border-left: 2px solid #cbd5e1;
   border-radius: 0 4px 4px 0;
+}
+.checklist-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.check-icon {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.check-icon.passed {
+  background: #16a34a;
+  color: #fff;
+}
+.check-icon:not(.passed) {
+  background: #dc2626;
+  color: #fff;
+}
+.check-name {
+  color: #15803d;
+  font-weight: 500;
 }
 .item-source-row {
   margin-top: 4px;
