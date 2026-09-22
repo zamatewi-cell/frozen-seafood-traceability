@@ -207,6 +207,58 @@ export function formatOrgType(orgType: string | null | undefined): string {
 }
 
 /**
+ * 企业间交接（Transfer）状态标签。
+ */
+export function formatTransferStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'DRAFT':
+      return { label: '草稿', tone: 'neutral', description: '尚未提交；提交前必须绑定计划中的运输任务' }
+    case 'PENDING':
+      return { label: '待接收', tone: 'warning', description: '已提交，等待运输任务到达后由接收方接受或拒收；责任组织仍为发送方' }
+    case 'ACCEPTED':
+      return { label: '已接受', tone: 'success', description: '接收方已接受，批次当前责任组织已转为接收方' }
+    case 'REJECTED':
+      return { label: '已拒收', tone: 'danger', description: '接收方已拒收，批次责任组织未改变' }
+    default:
+      return { label: status || '未知', tone: 'neutral', description: '未识别的交接状态' }
+  }
+}
+
+/**
+ * 冷链运输任务（Shipment）状态标签。
+ */
+export function formatShipmentStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'PLANNED':
+      return { label: '计划中', tone: 'neutral', description: '可增删交接；等待发货方提交交接与承运商确认装载' }
+    case 'IN_TRANSIT':
+      return { label: '运输中', tone: 'warning', description: '承运商已确认装载发运，装载清单已冻结；责任组织仍为发送方' }
+    case 'DELIVERED':
+      return { label: '已到达', tone: 'success', description: '承运商已确认物理到达；是否接受由接收方决定' }
+    case 'CANCELLED':
+      return { label: '已取消', tone: 'neutral', description: '运输任务已在发运前取消' }
+    default:
+      return { label: status || '未知', tone: 'neutral', description: '未识别的运输任务状态' }
+  }
+}
+
+/**
+ * 场所类型字典。
+ */
+export function formatSiteType(siteType: string | null | undefined): string {
+  if (!siteType) return '未标明'
+  const map: Record<string, string> = {
+    PORT: '港口码头',
+    FARM: '养殖场',
+    FACTORY: '加工厂',
+    COLD_STORE: '冷库',
+    LOGISTICS_HUB: '物流中心',
+    STORE: '门店'
+  }
+  return map[siteType] || siteType
+}
+
+/**
  * 声明数量与计量单位（最多保留 3 位小数，去除多余的 0）。
  */
 export function formatQuantity(quantity: number | string | null | undefined, unitCode: string | null | undefined): string {

@@ -101,6 +101,7 @@ test.describe('Enterprise shell', () => {
     })
     await page.route('**/api/v1/batches/12', (route) => json(route, 200, { data: batch, meta }))
     await page.route('**/api/v1/batches/12/events', (route) => json(route, 200, { data: [], meta }))
+    await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: { ...meta, page: { number: 1, size: 20, totalElements: 0, totalPages: 0 } } }))
     await page.route('**/api/v1/products/5', (route) => json(route, 200, {
       data: { id: 5, productCode: 'P-YELLOW', publicName: '冷冻大黄鱼', category: 'FISH', specification: '500g/条', sourceType: 'DOMESTIC_CAPTURE', baseUnitCode: 'kg', status: 'ACTIVE', version: 0 },
       meta
@@ -160,6 +161,7 @@ test.describe('Enterprise shell', () => {
     })
     await page.route('**/api/v1/batches/101', (route) => json(route, 200, { data: batch, meta }))
     await page.route('**/api/v1/batches/101/events', (route) => json(route, 200, { data: events, meta }))
+    await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: { ...meta, page: { number: 1, size: 20, totalElements: 0, totalPages: 0 } } }))
     await page.route('**/api/v1/batches/101/submit', (route) => {
       const request = route.request()
       writes.push({ path: '/api/v1/batches/101/submit', body: request.postDataJSON(), csrf: request.headers()['x-csrf-token'] })

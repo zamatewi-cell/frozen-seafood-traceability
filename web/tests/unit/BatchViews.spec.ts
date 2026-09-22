@@ -42,6 +42,7 @@ function backend(overrides: Overrides = {}) {
     'GET /api/v1/products/5': () => ({ status: 200, body: envelope(products[5]) }),
     'GET /api/v1/products/6': () => ({ status: 200, body: envelope(products[6]) }),
     'GET /api/v1/organizations/30': () => ({ status: 200, body: envelope(organization) }),
+    'GET /api/v1/transfers': () => ({ status: 200, body: envelope([], { number: 1, size: 20, totalElements: 0, totalPages: 0 }) }),
     ...overrides
   })
 }
@@ -211,6 +212,9 @@ describe('BatchDetailView', () => {
     // 非来源企业查看 ACTIVE 批次：不提供提交激活等写操作入口
     expect(view.find('[data-testid="submit-activation"]').exists()).toBe(false)
     expect(view.findAll('.enterprise-main button')).toHaveLength(0)
+    // 当前责任组织操作员查看 ACTIVE/NORMAL 批次且无未结束交接：提供“发起交接”入口（服务端仍独立校验）
+    expect(view.find('[data-testid="initiate-transfer"]').attributes('href')).toBe('/app/batches/12/transfers/new')
+    expect(view.find('[data-testid="batch-transfers-empty"]').exists()).toBe(true)
   })
 
   it('keeps the last list filters on the back link', async () => {

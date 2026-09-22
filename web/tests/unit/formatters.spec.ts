@@ -10,6 +10,10 @@ import {
   formatBatchType,
   formatOrgType,
   formatQuantity,
+  formatShipmentStatus,
+  formatSiteType,
+  formatTraceEventType,
+  formatTransferStatus,
   formatTemperatureResult
 } from '@/utils/formatters'
 
@@ -74,5 +78,22 @@ describe('Display Formatters', () => {
     expect(formatTemperatureResult('BREACH_RECORDED').tone).toBe('danger')
     expect(formatTemperatureResult('INSUFFICIENT_DATA').tone).toBe('warning')
     expect(formatTemperatureResult('INSUFFICIENT_DATA').label).toContain('暂无实时时序采集')
+  })
+})
+
+describe('Slice 2 transfer / shipment labels', () => {
+  it('labels transfer and shipment lifecycles without implying acceptance on arrival', () => {
+    expect(formatTransferStatus('PENDING').label).toBe('待接收')
+    expect(formatTransferStatus('ACCEPTED').description).toContain('责任组织已转为接收方')
+    expect(formatShipmentStatus('IN_TRANSIT').description).toContain('责任组织仍为发送方')
+    expect(formatShipmentStatus('DELIVERED').description).toContain('是否接受由接收方决定')
+    expect(formatShipmentStatus('LOST').label).toBe('LOST')
+    expect(formatSiteType('FACTORY')).toBe('加工厂')
+  })
+
+  it('names ARRIVAL as physical arrival, not acceptance', () => {
+    expect(formatTraceEventType('TRANSPORT')).toBe('冷链运输')
+    expect(formatTraceEventType('ARRIVAL')).toBe('运输到达')
+    expect(formatTraceEventType('ARRIVAL')).not.toContain('验收')
   })
 })

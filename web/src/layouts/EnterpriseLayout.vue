@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { RouterLink, RouterView, useRouter } from 'vue-router'
 import AppIcons from '@/components/icons/AppIcons.vue'
 import { logout, useSession } from '@/stores/session'
 
 const router = useRouter()
 const { user } = useSession()
+const isCarrier = computed(() => user.value?.orgType === 'CARRIER')
 const loggingOut = ref(false)
 const logoutError = ref('')
 
@@ -38,6 +39,8 @@ async function handleLogout() {
         <nav class="enterprise-nav" aria-label="企业端导航">
           <RouterLink to="/app" class="nav-link" exact-active-class="nav-link-active">工作台</RouterLink>
           <RouterLink to="/app/batches" class="nav-link" active-class="nav-link-active">批次</RouterLink>
+          <RouterLink to="/app/shipments" class="nav-link" active-class="nav-link-active" data-testid="nav-shipments">运输任务</RouterLink>
+          <RouterLink v-if="!isCarrier" to="/app/transfers/inbound" class="nav-link" active-class="nav-link-active" data-testid="nav-inbound">待接收交接</RouterLink>
         </nav>
 
         <div class="enterprise-user" data-testid="session-user">

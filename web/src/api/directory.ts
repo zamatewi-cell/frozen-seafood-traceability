@@ -1,11 +1,11 @@
 import { apiRequest, apiRequestPage } from './client'
-import type { OrganizationSummary, Product } from '@/types/enterprise'
+import type { OrganizationSummary, Product, SiteSummary } from '@/types/enterprise'
 
 /**
  * 最小只读目录：
  * - GET /api/v1/products/{productId}（产品为平台级主数据，任意登录用户可读）
  * - GET /api/v1/products?status=ACTIVE（建批表单的产品下拉，不缓存）
- * - GET /api/v1/organizations/{orgId}（企业用户仅可读本组织，PLATFORM 可读任意组织）
+ * - GET /api/v1/organizations/{orgId}（已认证用户可读任意组织的白名单摘要）
  *
  * 同一会话内按 ID 做内存缓存，避免列表页重复请求；登出时必须调用 clearDirectoryCache。
  */
@@ -42,6 +42,20 @@ export async function listActiveProducts(signal?: AbortSignal): Promise<Product[
 export function getOrganization(orgId: number): Promise<OrganizationSummary> {
   return cached(organizationCache, orgId, () =>
     apiRequest<OrganizationSummary>(`/api/v1/organizations/${encodeURIComponent(String(orgId))}`))
+}
+
+/**
+ * 启用组织目录（GET /api/v1/organizations?orgType=）：交接接收方与承运方下拉。不缓存，保证看到最新启用状态。
+ */
+export function listOrganizations(orgType?: string, signal?: AbortSignal): Promise<OrganizationSummary[]> {
+  return apiRequest<OrganizationSummary[]>('/api/v1/organizations', { query: { orgType }, signal })
+}
+
+/**
+ * 组织启用场所目录（GET /api/v1/organizations/{orgId}/sites）：运输任务起止场所下拉。
+ */
+export function listSites(orgId: number, signal?: AbortSignal): Promise<SiteSummary[]> {
+  return apiRequest<SiteSummary[]>(`/api/v1/organizations/${encodeURIComponent(String(orgId))}/sites`, { signal })
 }
 
 export function clearDirectoryCache(): void {
