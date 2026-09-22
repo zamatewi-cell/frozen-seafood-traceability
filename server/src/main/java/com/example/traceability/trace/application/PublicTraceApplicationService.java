@@ -732,6 +732,7 @@ public class PublicTraceApplicationService {
             case "TRANSPORT" -> "冷链干线运输";
             case "ARRIVAL" -> "冷链到货验收";
             case "SALE" -> "经销零售出库";
+            case "QUALITY_CHECK" -> "质检通过";
             default -> eventType;
         };
     }

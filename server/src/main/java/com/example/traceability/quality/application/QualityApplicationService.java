@@ -385,39 +385,41 @@ public class QualityApplicationService {
     }
 
     /**
-     * 为质检单的每个清单项生成溯源事件。
-     * 使用 PACK 事件类型，detailsJson 记录环节/清单项/通过时间。
+     * 为质检单生成一条质检通过溯源事件。
+     * 使用 QUALITY_CHECK 事件类型，detailsJson 记录环节/清单项/通过时间。
      */
     private void generateTraceEventsForChecklist(
             QualityInspection insp,
             List<Map<String, Object>> items,
             TraceSecurityPrincipal principal
     ) {
-        for (Map<String, Object> item : items) {
-            String itemName = (String) item.get("itemName");
-            String checkedBy = (String) item.getOrDefault("checkedBy", principal.getDisplayName());
-            LocalDateTime checkedAtUtc = item.get("checkedAt") != null
-                    ? LocalDateTime.parse(item.get("checkedAt").toString())
-                    .atOffset(ZoneOffset.UTC).toLocalDateTime()
-                    : LocalDateTime.now(ZoneOffset.UTC);
-            Map<String, Object> details = new HashMap<>();
-            details.put("stage", insp.getInspectionStage());
-            details.put("checklistItem", itemName);
-            details.put("checkedBy", checkedBy);
-            details.put("checkedAt", checkedAtUtc.toString());
-            details.put("inspectionNo", insp.getInspectionNo());
-            details.put("orderId", insp.getRelatedOrderId());
-            CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    TraceEventType.PACK.name(),
-                    checkedAtUtc.atOffset(ZoneOffset.UTC),
-                    null,
-                    "MANUAL",
-                    "质检通过: " + itemName + " (环节:" + insp.getInspectionStage() + ")",
-                    details
-            );
-            String idempotencyKey = "quality-checklist-" + insp.getId() + "-" + Math.abs(itemName.hashCode());
-            traceEventService.createEventForQuality(insp.getBatchId(), req, idempotencyKey, principal);
-        }
+        // 取最后一个清单项的通过时间作为质检通过时间
+        LocalDateTime checkedAtUtc = items.stream()
+                .map(i -> i.get("checkedAt"))
+                .filter(Objects::nonNull)
+                .map(v -> LocalDateTime.parse(v.toString()).atOffset(ZoneOffset.UTC).toLocalDateTime())
+                .max(LocalDateTime::compareTo)
+                .orElseGet(() -> LocalDateTime.now(ZoneOffset.UTC));
+        Map<String, Object> details = new HashMap<>();
+        details.put("stage", insp.getInspectionStage());
+        details.put("inspectionNo", insp.getInspectionNo());
+        details.put("orderId", insp.getRelatedOrderId());
+        details.put("itemCount", items.size());
+        details.put("items", items.stream().map(i -> Map.of(
+                "itemName", i.get("itemName"),
+                "passed", Boolean.TRUE.equals(i.get("passed")),
+                "checkedBy", i.getOrDefault("checkedBy", principal.getDisplayName())
+        )).toList());
+        CreateTraceEventRequest req = new CreateTraceEventRequest(
+                TraceEventType.QUALITY_CHECK.name(),
+                checkedAtUtc.atOffset(ZoneOffset.UTC),
+                null,
+                "MANUAL",
+                "质检通过: 环节" + insp.getInspectionStage() + ", " + items.size() + "项清单全部通过",
+                details
+        );
+        String idempotencyKey = "quality-qc-" + insp.getId();
+        traceEventService.createEventForQuality(insp.getBatchId(), req, idempotencyKey, principal);
     }
 
     /**
