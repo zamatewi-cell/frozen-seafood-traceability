@@ -11,6 +11,8 @@ import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.domain.Organization;
 import com.example.traceability.identity.mapper.OrganizationMapper;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
+import com.example.traceability.trace.domain.Shipment;
+import com.example.traceability.trace.domain.ShipmentStatus;
 import com.example.traceability.trace.domain.Transfer;
 import com.example.traceability.trace.domain.TransferIdempotency;
 import com.example.traceability.trace.domain.TransferStatus;
@@ -21,6 +23,7 @@ import com.example.traceability.trace.dto.TransferRejectRequest;
 import com.example.traceability.trace.dto.TransferResponse;
 import com.example.traceability.trace.dto.TransferSubmitRequest;
 import com.example.traceability.trace.mapper.PublicTraceCodeMapper;
+import com.example.traceability.trace.mapper.ShipmentMapper;
 import com.example.traceability.trace.mapper.TransferIdempotencyMapper;
 import com.example.traceability.trace.mapper.TransferMapper;
 import org.springframework.dao.DuplicateKeyException;
@@ -38,23 +41,32 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.TemporalAccessor;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * 企业间整批交接应用服务。
  * <p>
- * 负责整批交接生命周期（DRAFT -> PENDING -> ACCEPTED / REJECTED）业务编排：
+ * 负责整批交接生命周期（DRAFT -> PENDING -> ACCEPTED / REJECTED）业务编排。Transfer 只表达责任交接，
+ * 物理运输由 Shipment 承担（统一业务契约 v1.1 §7）：
  * <ul>
- *   <li>创建交接草稿：批次快照锁定，排他活跃校验，防已消耗批次流转，uk_transfer_open_batch 冲突安全捕获；</li>
- *   <li>修改与逻辑删除草稿：严格限制发送方与 DRAFT 阶段；</li>
- *   <li>发送方提交：双时间双主体记录，形成批次 PENDING 业务预留，锁定后当前读幂等恢复，校验批次归属人防篡改与 INPUT 消耗拦截；</li>
- *   <li>接收方接受：实收计量单位匹配与正数量校验，差异强制说明，原子转移批次及公开追溯码归属企业，追加 ARRIVAL 追溯事件；</li>
- *   <li>接收方拒收：保存拒收原因，不转移批次，不写追溯事件；</li>
+ *   <li>创建交接草稿：批次快照锁定，排他活跃校验，防已消耗批次流转，uk_transfer_open_batch 冲突安全捕获；
+ *       接收方必须为启用的非承运组织（承运商不会成为批次当前责任组织）；</li>
+ *   <li>修改与逻辑删除草稿：严格限制发送方与 DRAFT 阶段；已绑定运输任务的草稿禁止修改接收方，
+ *       删除已绑定草稿时按 shipment → transfer 顺序加锁并递增运输任务版本；</li>
+ *   <li>发送方提交：必须已绑定 PLANNED 运输任务，形成批次 PENDING 业务预留，校验批次归属人防篡改与 INPUT 消耗拦截；</li>
+ *   <li>接收方接受：关联运输任务必须已 DELIVERED；实收计量单位匹配与正数量校验，差异强制说明，
+ *       原子转移批次及公开追溯码当前责任组织；不生成 ARRIVAL（ARRIVAL 唯一来源为 Shipment 到达）；</li>
+ *   <li>接收方拒收：关联运输任务必须已 DELIVERED；保存拒收原因，不转移批次，不写追溯事件；</li>
+ *   <li>统一行锁顺序 shipment → transfer → batch，避免与运输任务发运 / 装载清单变更并发时死锁；</li>
  *   <li>多动作统一幂等：基于 SHA-256 规范化语义哈希（消除 BigDecimal 尾随零歧义），结合行级锁后当前读消除快照盲区；</li>
  *   <li>SQL 跨租户数据隔离防越权与审计 JSON 安全序列化。</li>
  * </ul>
@@ -75,9 +87,9 @@ public class TransferApplicationService {
     private final BatchMapper batchMapper;
     private final BatchOperationItemMapper batchOperationItemMapper;
     private final OrganizationMapper organizationMapper;
-    private final TraceEventApplicationService traceEventService;
     private final AuditApplicationService auditService;
     private final PublicTraceCodeMapper publicTraceCodeMapper;
+    private final ShipmentMapper shipmentMapper;
     private final ObjectMapper objectMapper;
 
     public TransferApplicationService(
@@ -86,9 +98,9 @@ public class TransferApplicationService {
             BatchMapper batchMapper,
             BatchOperationItemMapper batchOperationItemMapper,
             OrganizationMapper organizationMapper,
-            TraceEventApplicationService traceEventService,
             AuditApplicationService auditService,
             PublicTraceCodeMapper publicTraceCodeMapper,
+            ShipmentMapper shipmentMapper,
             ObjectMapper objectMapper
     ) {
         this.transferMapper = Objects.requireNonNull(transferMapper, "transferMapper 不能为空");
@@ -96,9 +108,9 @@ public class TransferApplicationService {
         this.batchMapper = Objects.requireNonNull(batchMapper, "batchMapper 不能为空");
         this.batchOperationItemMapper = Objects.requireNonNull(batchOperationItemMapper, "batchOperationItemMapper 不能为空");
         this.organizationMapper = Objects.requireNonNull(organizationMapper, "organizationMapper 不能为空");
-        this.traceEventService = Objects.requireNonNull(traceEventService, "traceEventService 不能为空");
         this.auditService = Objects.requireNonNull(auditService, "auditService 不能为空");
         this.publicTraceCodeMapper = Objects.requireNonNull(publicTraceCodeMapper, "publicTraceCodeMapper 不能为空");
+        this.shipmentMapper = Objects.requireNonNull(shipmentMapper, "shipmentMapper 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
     }
 
@@ -129,7 +141,7 @@ public class TransferApplicationService {
             if (Objects.equals(existingIdem.getAction(), action) && Objects.equals(existingIdem.getRequestHash(), requestHash)) {
                 Transfer existingTransfer = transferMapper.selectById(existingIdem.getTransferId());
                 if (existingTransfer != null) {
-                    return TransferResponse.fromEntity(existingTransfer);
+                    return toResponse(existingTransfer);
                 }
             }
             throw new BusinessException(
@@ -159,6 +171,7 @@ public class TransferApplicationService {
                     "接收方企业组织不存在或已被停用"
             );
         }
+        checkReceiverOrgType(receiverOrg);
 
         // 2. 锁定关联批次并校验归属与状态
         Batch batch = batchMapper.selectByIdForUpdate(req.batchId());
@@ -232,7 +245,7 @@ public class TransferApplicationService {
             if (dup != null && Objects.equals(dup.getAction(), action) && Objects.equals(dup.getRequestHash(), requestHash)) {
                 Transfer existingTransfer = transferMapper.selectById(dup.getTransferId());
                 if (existingTransfer != null) {
-                    return TransferResponse.fromEntity(existingTransfer);
+                    return toResponse(existingTransfer);
                 }
             }
             throw new BusinessException(
@@ -264,7 +277,7 @@ public class TransferApplicationService {
                 serializeSummary(auditSummary)
         );
 
-        return TransferResponse.fromEntity(transfer);
+        return toResponse(transfer);
     }
 
     /**
@@ -299,6 +312,14 @@ public class TransferApplicationService {
                     "仅 DRAFT 草稿状态允许修改，当前状态为: " + transfer.getStatus()
             );
         }
+        if (transfer.getShipmentId() != null) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "TRANSFER_BOUND_TO_SHIPMENT",
+                    "交接已绑定运输任务",
+                    "交接草稿已绑定运输任务，接收方必须与运输任务一致；如需更换接收方请先从运输任务解绑"
+            );
+        }
         if (Objects.equals(orgId, req.receiverOrgId())) {
             throw new BusinessException(
                     HttpStatus.UNPROCESSABLE_ENTITY,
@@ -325,6 +346,7 @@ public class TransferApplicationService {
                     "接收方企业组织不存在或已被停用"
             );
         }
+        checkReceiverOrgType(receiverOrg);
 
         Long expectedSenderOrgId = transfer.getSenderOrgId();
         Long expectedReceiverOrgId = transfer.getReceiverOrgId();
@@ -366,7 +388,7 @@ public class TransferApplicationService {
 
         transfer.setVersion(req.expectedVersion() + 1);
         Transfer updatedTransfer = transferMapper.selectById(transferId);
-        return TransferResponse.fromEntity(updatedTransfer != null ? updatedTransfer : transfer);
+        return toResponse(updatedTransfer != null ? updatedTransfer : transfer);
     }
 
     /**
@@ -381,10 +403,10 @@ public class TransferApplicationService {
         checkOperatorRole(principal);
         Long orgId = principal.getOrgId();
 
-        Transfer transfer = transferMapper.selectByIdForUpdate(transferId);
-        if (transfer == null) {
-            throw new ResourceNotFoundException("未找到 ID 为 " + transferId + " 的交接凭单");
-        }
+        // 装载清单变更统一遵循 shipment → transfer → batch 锁顺序：已绑定草稿先锁运输任务，再锁交接
+        LockedTransfer locked = lockShipmentThenTransfer(transferId, true);
+        Transfer transfer = locked.transfer();
+        Shipment boundShipment = locked.shipment();
         if (!Objects.equals(transfer.getSenderOrgId(), orgId)) {
             throw new BusinessException(
                     HttpStatus.FORBIDDEN,
@@ -414,7 +436,17 @@ public class TransferApplicationService {
         Long expectedReceiverOrgId = transfer.getReceiverOrgId();
         String expectedStatus = TransferStatus.DRAFT.name();
 
+        if (boundShipment != null && boundShipment.getStatus() != ShipmentStatus.PLANNED) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "SHIPMENT_NOT_PLANNED",
+                    "运输任务已不可变更装载清单",
+                    "交接已绑定的运输任务当前状态为 " + boundShipment.getStatus() + "，仅 PLANNED 运输任务允许变更装载清单"
+            );
+        }
+
         transfer.setIsDeleted(1);
+        transfer.setShipmentId(null);
         transfer.setUpdatedBy(principal.getUserId());
 
         int updated = transferMapper.updateByIdAndVersion(
@@ -432,10 +464,16 @@ public class TransferApplicationService {
                     "交接凭单删除发生并发版本冲突"
             );
         }
+        if (boundShipment != null) {
+            bumpShipmentManifestVersion(boundShipment.getId(), principal.getUserId());
+        }
 
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
         Map<String, Object> auditSummary = new LinkedHashMap<>();
         auditSummary.put("deletedTransferNo", transfer.getTransferNo());
+        if (boundShipment != null) {
+            auditSummary.put("unboundShipmentId", boundShipment.getId());
+        }
 
         auditService.recordAudit(
                 principal.getUserId(),
@@ -464,7 +502,7 @@ public class TransferApplicationService {
         Long orgId = principal.getOrgId();
 
         String action = "SUBMIT";
-        String requestHash = computeHash(action, transferId, req.shippedAt().toInstant().toString(), req.expectedVersion());
+        String requestHash = computeHash(action, transferId, req.expectedVersion());
 
         // 1. 幂等普通读预检
         TransferIdempotency existingIdem = idempotencyMapper.selectByOrgIdAndKey(orgId, cleanKey);
@@ -472,7 +510,7 @@ public class TransferApplicationService {
             if (Objects.equals(existingIdem.getAction(), action) && Objects.equals(existingIdem.getRequestHash(), requestHash)) {
                 Transfer existingTransfer = transferMapper.selectById(existingIdem.getTransferId());
                 if (existingTransfer != null) {
-                    return TransferResponse.fromEntity(existingTransfer);
+                    return toResponse(existingTransfer);
                 }
             }
             throw new BusinessException(
@@ -483,18 +521,17 @@ public class TransferApplicationService {
             );
         }
 
-        // 2. 锁定交接记录 (SELECT ... FOR UPDATE)
-        Transfer transfer = transferMapper.selectByIdForUpdate(transferId);
-        if (transfer == null) {
-            throw new ResourceNotFoundException("未找到 ID 为 " + transferId + " 的交接凭单");
-        }
+        // 2. 按 shipment → transfer 顺序锁定绑定的运输任务与交接记录 (SELECT ... FOR UPDATE)
+        LockedTransfer locked = lockShipmentThenTransfer(transferId, true);
+        Transfer transfer = locked.transfer();
+        Shipment shipment = locked.shipment();
 
         // 3. 锁定后当前读排他幂等检查（关键：消除快照盲区，慢并发线程安全恢复）
         TransferIdempotency lockedIdem = idempotencyMapper.selectByOrgIdAndKeyForUpdate(orgId, cleanKey);
         if (lockedIdem != null) {
             if (Objects.equals(lockedIdem.getAction(), action) && Objects.equals(lockedIdem.getRequestHash(), requestHash)) {
                 Transfer existingTransfer = transferMapper.selectById(transferId);
-                return TransferResponse.fromEntity(existingTransfer != null ? existingTransfer : transfer);
+                return toResponse(existingTransfer != null ? existingTransfer : transfer);
             }
             throw new BusinessException(
                     HttpStatus.CONFLICT,
@@ -527,6 +564,22 @@ public class TransferApplicationService {
                     "VERSION_CONFLICT",
                     "资源版本冲突",
                     "交接凭单版本已发生变化，请刷新后重试"
+            );
+        }
+        if (shipment == null) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "SHIPMENT_NOT_BOUND",
+                    "交接未绑定运输任务",
+                    "交接提交为 PENDING 前必须先绑定一个 PLANNED 运输任务"
+            );
+        }
+        if (shipment.getStatus() != ShipmentStatus.PLANNED) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "SHIPMENT_NOT_PLANNED",
+                    "运输任务状态不允许提交交接",
+                    "交接绑定的运输任务当前状态为 " + shipment.getStatus() + "，仅 PLANNED 运输任务允许提交交接"
             );
         }
 
@@ -562,13 +615,11 @@ public class TransferApplicationService {
         }
 
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
-        LocalDateTime shippedAtUtc = req.shippedAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
 
         Long expectedSenderOrgId = transfer.getSenderOrgId();
         Long expectedReceiverOrgId = transfer.getReceiverOrgId();
         String expectedStatus = TransferStatus.DRAFT.name();
 
-        transfer.setShippedAt(shippedAtUtc);
         transfer.setSubmittedRecordedAt(nowUtc);
         transfer.setSubmittedBy(principal.getUserId());
         transfer.setStatus(TransferStatus.PENDING);
@@ -593,7 +644,8 @@ public class TransferApplicationService {
         saveIdempotencyRecord(orgId, cleanKey, action, transfer.getId(), requestHash, nowUtc);
 
         Map<String, Object> auditSummary = new LinkedHashMap<>();
-        auditSummary.put("shippedAt", shippedAtUtc.toString());
+        auditSummary.put("shipmentId", shipment.getId());
+        auditSummary.put("shipmentNo", shipment.getShipmentNo());
 
         auditService.recordAudit(
                 principal.getUserId(),
@@ -608,7 +660,7 @@ public class TransferApplicationService {
 
         transfer.setVersion(req.expectedVersion() + 1);
         Transfer updatedTransfer = transferMapper.selectById(transferId);
-        return TransferResponse.fromEntity(updatedTransfer != null ? updatedTransfer : transfer);
+        return toResponse(updatedTransfer != null ? updatedTransfer : transfer);
     }
 
     /**
@@ -653,7 +705,7 @@ public class TransferApplicationService {
             if (Objects.equals(existingIdem.getAction(), action) && Objects.equals(existingIdem.getRequestHash(), requestHash)) {
                 Transfer existingTransfer = transferMapper.selectById(existingIdem.getTransferId());
                 if (existingTransfer != null) {
-                    return TransferResponse.fromEntity(existingTransfer);
+                    return toResponse(existingTransfer);
                 }
             }
             throw new BusinessException(
@@ -664,18 +716,17 @@ public class TransferApplicationService {
             );
         }
 
-        // 3. 锁定交接记录 (SELECT ... FOR UPDATE)
-        Transfer transfer = transferMapper.selectByIdForUpdate(transferId);
-        if (transfer == null) {
-            throw new ResourceNotFoundException("未找到 ID 为 " + transferId + " 的交接凭单");
-        }
+        // 3. 按 shipment(FOR SHARE) → transfer(FOR UPDATE) 顺序锁定运输任务与交接记录
+        LockedTransfer locked = lockShipmentThenTransfer(transferId, false);
+        Transfer transfer = locked.transfer();
+        Shipment shipment = locked.shipment();
 
         // 4. 锁定后当前读排他幂等检查
         TransferIdempotency lockedIdem = idempotencyMapper.selectByOrgIdAndKeyForUpdate(receiverOrgId, cleanKey);
         if (lockedIdem != null) {
             if (Objects.equals(lockedIdem.getAction(), action) && Objects.equals(lockedIdem.getRequestHash(), requestHash)) {
                 Transfer existingTransfer = transferMapper.selectById(transferId);
-                return TransferResponse.fromEntity(existingTransfer != null ? existingTransfer : transfer);
+                return toResponse(existingTransfer != null ? existingTransfer : transfer);
             }
             throw new BusinessException(
                     HttpStatus.CONFLICT,
@@ -711,7 +762,10 @@ public class TransferApplicationService {
             );
         }
 
-        // 6. 计量单位一致性校验
+        // 6. 关联运输任务必须已物理到达 (DELIVERED)；Shipment 到达不代表接收方已验收
+        requireDeliveredShipment(shipment, "接受");
+
+        // 7. 计量单位一致性校验
         if (!Objects.equals(req.unitCode(), transfer.getUnitCode())) {
             throw new BusinessException(
                     HttpStatus.BAD_REQUEST,
@@ -839,25 +893,7 @@ public class TransferApplicationService {
             }
         }
 
-        // 13. 追加一条且仅一条 ARRIVAL 追溯事件
-        try {
-            traceEventService.appendArrivalEvent(
-                    batch.getId(),
-                    receiverOrgId,
-                    principal.getUserId(),
-                    req.occurredAt(),
-                    nowUtc.atOffset(ZoneOffset.UTC),
-                    transferId,
-                    diffReason
-            );
-        } catch (DuplicateKeyException e) {
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "IDEMPOTENCY_CONFLICT",
-                    "追溯事件写入冲突",
-                    "交接追溯到货事件写入发生唯一冲突，操作已回滚"
-            );
-        }
+        // 13. 不生成 ARRIVAL：ARRIVAL 唯一自动来源为 Shipment IN_TRANSIT → DELIVERED（统一业务契约 v1.1 §11）
 
         // 14. 记录幂等并写审计
         saveIdempotencyRecord(receiverOrgId, cleanKey, action, transfer.getId(), requestHash, nowUtc);
@@ -879,7 +915,7 @@ public class TransferApplicationService {
 
         transfer.setVersion(req.expectedVersion() + 1);
         Transfer latestTransfer = transferMapper.selectById(transferId);
-        return TransferResponse.fromEntity(latestTransfer != null ? latestTransfer : transfer);
+        return toResponse(latestTransfer != null ? latestTransfer : transfer);
     }
 
     /**
@@ -915,7 +951,7 @@ public class TransferApplicationService {
             if (Objects.equals(existingIdem.getAction(), action) && Objects.equals(existingIdem.getRequestHash(), requestHash)) {
                 Transfer existingTransfer = transferMapper.selectById(existingIdem.getTransferId());
                 if (existingTransfer != null) {
-                    return TransferResponse.fromEntity(existingTransfer);
+                    return toResponse(existingTransfer);
                 }
             }
             throw new BusinessException(
@@ -926,18 +962,17 @@ public class TransferApplicationService {
             );
         }
 
-        // 2. 锁定交接记录 (SELECT ... FOR UPDATE)
-        Transfer transfer = transferMapper.selectByIdForUpdate(transferId);
-        if (transfer == null) {
-            throw new ResourceNotFoundException("未找到 ID 为 " + transferId + " 的交接凭单");
-        }
+        // 2. 按 shipment(FOR SHARE) → transfer(FOR UPDATE) 顺序锁定运输任务与交接记录
+        LockedTransfer locked = lockShipmentThenTransfer(transferId, false);
+        Transfer transfer = locked.transfer();
+        Shipment shipment = locked.shipment();
 
         // 3. 锁定后当前读排他幂等检查
         TransferIdempotency lockedIdem = idempotencyMapper.selectByOrgIdAndKeyForUpdate(receiverOrgId, cleanKey);
         if (lockedIdem != null) {
             if (Objects.equals(lockedIdem.getAction(), action) && Objects.equals(lockedIdem.getRequestHash(), requestHash)) {
                 Transfer existingTransfer = transferMapper.selectById(transferId);
-                return TransferResponse.fromEntity(existingTransfer != null ? existingTransfer : transfer);
+                return toResponse(existingTransfer != null ? existingTransfer : transfer);
             }
             throw new BusinessException(
                     HttpStatus.CONFLICT,
@@ -972,6 +1007,8 @@ public class TransferApplicationService {
                     "交接凭单版本已发生变化，请刷新后重试"
             );
         }
+
+        requireDeliveredShipment(shipment, "拒收");
 
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
         LocalDateTime rejectedAtUtc = req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
@@ -1021,7 +1058,7 @@ public class TransferApplicationService {
 
         transfer.setVersion(req.expectedVersion() + 1);
         Transfer updatedTransfer = transferMapper.selectById(transferId);
-        return TransferResponse.fromEntity(updatedTransfer != null ? updatedTransfer : transfer);
+        return toResponse(updatedTransfer != null ? updatedTransfer : transfer);
     }
 
     /**
@@ -1042,15 +1079,19 @@ public class TransferApplicationService {
                     "无权查看其他企业之间的交接记录"
             );
         }
-        return TransferResponse.fromEntity(transfer);
+        return enrich(List.of(transfer)).get(0);
     }
 
     /**
      * 分页查询当前组织相关交接列表 (GET /api/v1/transfers)。
+     * <p>
+     * 发送方与接收方在交接结束（包括批次已转出）后仍可只读查询本组织参与过的历史交接。
+     * </p>
      */
     public List<TransferResponse> listTransfers(
             String direction,
             String status,
+            Long batchId,
             long page,
             int size,
             TraceSecurityPrincipal principal
@@ -1063,17 +1104,129 @@ public class TransferApplicationService {
                 principal.getOrgId(),
                 direction,
                 status,
+                batchId,
                 offset,
                 safeSize
         );
-        return transfers.stream().map(TransferResponse::fromEntity).toList();
+        return enrich(transfers);
     }
 
     /**
      * 统计当前组织相关交接总数。
      */
-    public long countTransfers(String direction, String status, TraceSecurityPrincipal principal) {
-        return transferMapper.countTransfers(principal.getOrgId(), direction, status);
+    public long countTransfers(String direction, String status, Long batchId, TraceSecurityPrincipal principal) {
+        return transferMapper.countTransfers(principal.getOrgId(), direction, status, batchId);
+    }
+
+    /**
+     * 单条交接响应：补全关联运输任务编号 / 状态与追溯批次号（调用方已完成交接组织范围校验）。
+     */
+    private TransferResponse toResponse(Transfer transfer) {
+        return enrich(List.of(transfer)).get(0);
+    }
+
+    /**
+     * 以关联运输任务与批次补全交接响应展示字段（调用方已完成交接组织范围校验）。
+     */
+    private List<TransferResponse> enrich(List<Transfer> transfers) {
+        if (transfers.isEmpty()) {
+            return List.of();
+        }
+        Set<Long> shipmentIds = new HashSet<>();
+        Set<Long> batchIds = new HashSet<>();
+        for (Transfer t : transfers) {
+            if (t.getShipmentId() != null) {
+                shipmentIds.add(t.getShipmentId());
+            }
+            batchIds.add(t.getBatchId());
+        }
+        Map<Long, Shipment> shipments = shipmentIds.isEmpty()
+                ? Map.of()
+                : shipmentMapper.selectByIdsIgnoreTenant(shipmentIds).stream()
+                        .collect(Collectors.toMap(Shipment::getId, Function.identity()));
+        Map<Long, Batch> batches = batchMapper.selectByIdsIgnoreTenant(batchIds).stream()
+                .collect(Collectors.toMap(Batch::getId, Function.identity()));
+        return transfers.stream()
+                .map(t -> TransferResponse.fromEntity(
+                        t,
+                        t.getShipmentId() != null ? shipments.get(t.getShipmentId()) : null,
+                        batches.get(t.getBatchId())))
+                .toList();
+    }
+
+    /**
+     * 已锁定的交接及其绑定运输任务（未绑定时 shipment 为 null）。
+     */
+    private record LockedTransfer(Transfer transfer, Shipment shipment) {
+    }
+
+    /**
+     * 按统一行锁顺序 shipment → transfer 锁定交接及其绑定运输任务。
+     * <p>
+     * 先以普通读获知 shipment_id，再锁运输任务（exclusive 为 true 时 FOR UPDATE，否则 FOR SHARE），最后锁交接；
+     * 若加锁期间绑定关系被并发改变（普通读与锁定读的 shipment_id 不一致），返回 409 VERSION_CONFLICT 要求刷新重试，
+     * 从而绝不在持有交接锁时反向等待运输任务锁。
+     * </p>
+     */
+    private LockedTransfer lockShipmentThenTransfer(Long transferId, boolean exclusive) {
+        Transfer snapshot = transferMapper.selectById(transferId);
+        if (snapshot == null || Objects.equals(snapshot.getIsDeleted(), 1)) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + transferId + " 的交接凭单");
+        }
+        Shipment shipment = null;
+        if (snapshot.getShipmentId() != null) {
+            shipment = exclusive
+                    ? shipmentMapper.selectByIdForUpdate(snapshot.getShipmentId())
+                    : shipmentMapper.selectByIdForShare(snapshot.getShipmentId());
+        }
+        Transfer transfer = transferMapper.selectByIdForUpdate(transferId);
+        if (transfer == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + transferId + " 的交接凭单");
+        }
+        if (!Objects.equals(transfer.getShipmentId(), snapshot.getShipmentId())) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "VERSION_CONFLICT",
+                    "资源版本冲突",
+                    "交接的运输任务绑定关系已被并发修改，请刷新后重试"
+            );
+        }
+        return new LockedTransfer(transfer, shipment);
+    }
+
+    private void requireDeliveredShipment(Shipment shipment, String actionLabel) {
+        if (shipment == null || shipment.getStatus() != ShipmentStatus.DELIVERED) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "SHIPMENT_NOT_DELIVERED",
+                    "运输任务尚未到达",
+                    "关联运输任务当前状态为 " + (shipment == null ? "未绑定" : shipment.getStatus())
+                            + "，仅运输任务已到达 (DELIVERED) 后接收方才能" + actionLabel + "交接"
+            );
+        }
+    }
+
+    private void bumpShipmentManifestVersion(Long shipmentId, Long userId) {
+        if (shipmentMapper.bumpManifestVersion(shipmentId, userId) != 1) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "SHIPMENT_NOT_PLANNED",
+                    "运输任务已不可变更装载清单",
+                    "运输任务已非 PLANNED，装载清单变更已回滚"
+            );
+        }
+    }
+
+    private void checkReceiverOrgType(Organization receiverOrg) {
+        // 承运商只负责物理运输，不会成为 Batch 当前责任组织（统一业务契约 v1.1 §3.3），因此不能作为交接接收方
+        if ("CARRIER".equalsIgnoreCase(receiverOrg.getOrgType())) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "RECEIVER_ORG_TYPE_NOT_ALLOWED",
+                    "接收组织类型不允许",
+                    "承运组织只负责物理运输，不能作为交接接收方成为批次当前责任组织"
+            );
+        }
     }
 
     // =========================================================================

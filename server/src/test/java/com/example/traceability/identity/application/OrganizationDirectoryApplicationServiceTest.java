@@ -4,7 +4,10 @@ import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.domain.Organization;
 import com.example.traceability.identity.dto.OrganizationSummaryResponse;
+import com.example.traceability.identity.domain.Site;
+import com.example.traceability.identity.dto.SiteSummaryResponse;
 import com.example.traceability.identity.mapper.OrganizationMapper;
+import com.example.traceability.identity.mapper.SiteMapper;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -31,6 +34,9 @@ class OrganizationDirectoryApplicationServiceTest {
 
     @Mock
     private OrganizationMapper organizationMapper;
+
+    @Mock
+    private SiteMapper siteMapper;
 
     @InjectMocks
     private OrganizationDirectoryApplicationService service;
@@ -90,17 +96,57 @@ class OrganizationDirectoryApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("企业用户读取其他组织 - 查询数据库前直接返回 403 ORG_SCOPE_DENIED")
-    void otherOrganization_ForbiddenWithoutLookup() {
-        assertThatThrownBy(() -> service.getOrganization(20L, operatorPrincipal))
-                .isInstanceOf(BusinessException.class)
-                .satisfies(ex -> {
-                    BusinessException be = (BusinessException) ex;
-                    assertThat(be.getStatus()).isEqualTo(HttpStatus.FORBIDDEN);
-                    assertThat(be.getCode()).isEqualTo("ORG_SCOPE_DENIED");
-                });
+    @DisplayName("企业用户读取交易对手组织 - 返回同一白名单摘要（交接与运输页面展示对手名称）")
+    void otherOrganization_ReturnsWhitelistSummary() {
+        when(organizationMapper.selectById(20L)).thenReturn(organization(20L));
 
-        verify(organizationMapper, never()).selectById(any());
+        OrganizationSummaryResponse response = service.getOrganization(20L, operatorPrincipal);
+
+        assertThat(response.id()).isEqualTo(20L);
+        assertThat(response.name()).isEqualTo("组织20");
+    }
+
+    @Test
+    @DisplayName("启用组织目录：按类型筛选并返回白名单摘要")
+    void listActiveOrganizations_filtersByType() {
+        Organization carrier = organization(30L);
+        carrier.setOrgType("CARRIER");
+        when(organizationMapper.selectActive("CARRIER")).thenReturn(List.of(carrier));
+
+        List<OrganizationSummaryResponse> result = service.listActiveOrganizations(" carrier ", operatorPrincipal);
+
+        assertThat(result).extracting(OrganizationSummaryResponse::orgType).containsExactly("CARRIER");
+    }
+
+    @Test
+    @DisplayName("启用组织目录：非法组织类型返回 400 INVALID_REQUEST")
+    void listActiveOrganizations_invalidType() {
+        assertThatThrownBy(() -> service.listActiveOrganizations("PLATFORM", operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getStatus()).isEqualTo(HttpStatus.BAD_REQUEST));
+        verify(organizationMapper, never()).selectActive(any());
+    }
+
+    @Test
+    @DisplayName("场所目录：返回组织启用场所白名单摘要，不暴露详细地址")
+    void listActiveSites_returnsWhitelist() {
+        when(organizationMapper.selectById(20L)).thenReturn(organization(20L));
+        Site site = new Site();
+        site.setId(7L);
+        site.setOrgId(20L);
+        site.setSiteNo("S-7");
+        site.setName("加工厂");
+        site.setSiteType("FACTORY");
+        site.setStatus("ACTIVE");
+        site.setAddressText("保密地址");
+        when(siteMapper.selectActiveByOrgId(20L)).thenReturn(List.of(site));
+
+        List<SiteSummaryResponse> result = service.listActiveSites(20L, operatorPrincipal);
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).name()).isEqualTo("加工厂");
+        assertThat(Arrays.stream(SiteSummaryResponse.class.getRecordComponents()).map(java.lang.reflect.RecordComponent::getName))
+                .doesNotContain("addressText");
     }
 
     @Test

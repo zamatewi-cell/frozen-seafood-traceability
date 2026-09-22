@@ -1,5 +1,8 @@
 package com.example.traceability.trace.dto;
 
+import com.example.traceability.batch.domain.Batch;
+import com.example.traceability.trace.domain.Shipment;
+import com.example.traceability.trace.domain.ShipmentStatus;
 import com.example.traceability.trace.domain.Transfer;
 import com.example.traceability.trace.domain.TransferStatus;
 import com.fasterxml.jackson.annotation.JsonFormat;
@@ -11,7 +14,8 @@ import java.time.ZoneOffset;
 /**
  * 企业间整批交接响应 DTO。
  * <p>
- * 严格白名单结构，屏蔽 isDeleted、idempotencyKey、requestHash、openBatchId 等底层持久化细节。
+ * 严格白名单结构，屏蔽 isDeleted、idempotencyKey、requestHash、openBatchId 等底层持久化细节；
+ * 附带绑定运输任务 (shipmentId / shipmentNo / shipmentStatus) 与追溯批次号，便于接收方在取得批次权限前识别货物。
  * 时间字段统一以 UTC 带时区 ISO 8601 输出。
  * </p>
  *
@@ -22,6 +26,10 @@ public record TransferResponse(
         Long id,
         String transferNo,
         Long batchId,
+        String traceBatchNo,
+        Long shipmentId,
+        String shipmentNo,
+        ShipmentStatus shipmentStatus,
         Long senderOrgId,
         Long receiverOrgId,
         BigDecimal quantity,
@@ -48,13 +56,26 @@ public record TransferResponse(
 ) {
 
     public static TransferResponse fromEntity(Transfer t) {
+        return fromEntity(t, null, null);
+    }
+
+    /**
+     * 以交接实体及可选的关联运输任务、批次补全展示字段（shipmentNo / shipmentStatus / traceBatchNo）。
+     */
+    public static TransferResponse fromEntity(Transfer t, Shipment shipment, Batch batch) {
         if (t == null) {
             return null;
         }
+        boolean shipmentMatches = shipment != null && shipment.getId() != null
+                && shipment.getId().equals(t.getShipmentId());
         return new TransferResponse(
                 t.getId(),
                 t.getTransferNo(),
                 t.getBatchId(),
+                batch != null ? batch.getTraceBatchNo() : null,
+                t.getShipmentId(),
+                shipmentMatches ? shipment.getShipmentNo() : null,
+                shipmentMatches ? shipment.getStatus() : null,
                 t.getSenderOrgId(),
                 t.getReceiverOrgId(),
                 t.getQuantity(),

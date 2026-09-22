@@ -13,6 +13,7 @@ import com.example.traceability.identity.mapper.RoleMapper;
 import com.example.traceability.identity.mapper.UserRoleMapper;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.trace.application.TransferApplicationService;
+import com.example.traceability.trace.domain.ShipmentStatus;
 import com.example.traceability.trace.domain.TransferStatus;
 import com.example.traceability.trace.dto.TransferAcceptRequest;
 import com.example.traceability.trace.dto.TransferCreateRequest;
@@ -199,7 +200,7 @@ class TransferControllerTest {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         TransferResponse expected = new TransferResponse(
-                5001L, "TRF-20260914-001", 1001L, 10L, 20L,
+                5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.DRAFT,
                 null, null, null, null, null, null,
                 null, null, null, 0L, now, now
@@ -231,15 +232,15 @@ class TransferControllerTest {
     void listTransfers_success() throws Exception {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         TransferResponse item = new TransferResponse(
-                5001L, "TRF-20260914-001", 1001L, 10L, 20L,
+                5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.PENDING,
                 now, now, 101L, null, null, null,
                 null, null, null, 1L, now, now
         );
 
-        when(transferService.listTransfers(eq("SENT"), eq("PENDING"), eq(1L), eq(20), any()))
+        when(transferService.listTransfers(eq("SENT"), eq("PENDING"), eq(null), eq(1L), eq(20), any()))
                 .thenReturn(List.of(item));
-        when(transferService.countTransfers(eq("SENT"), eq("PENDING"), any()))
+        when(transferService.countTransfers(eq("SENT"), eq("PENDING"), eq(null), any()))
                 .thenReturn(1L);
 
         mockMvc.perform(get("/api/v1/transfers")
@@ -266,11 +267,36 @@ class TransferControllerTest {
     }
 
     @Test
+    @DisplayName("查询参数类型不匹配（batchId=abc）时返回 400 INVALID_REQUEST 而不是 500")
+    void listTransfers_nonNumericBatchId_returnsBadRequest() throws Exception {
+        mockMvc.perform(get("/api/v1/transfers")
+                        .with(user(senderOperator))
+                        .param("batchId", "abc"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+    }
+
+    @Test
+    @DisplayName("列表查询支持 batchId 筛选（批次详情页交接记录）")
+    void listTransfers_withBatchIdFilter() throws Exception {
+        when(transferService.listTransfers(eq(null), eq(null), eq(1001L), eq(1L), eq(20), any()))
+                .thenReturn(List.of());
+        when(transferService.countTransfers(eq(null), eq(null), eq(1001L), any()))
+                .thenReturn(0L);
+
+        mockMvc.perform(get("/api/v1/transfers")
+                        .with(user(senderOperator))
+                        .param("batchId", "1001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.meta.page.totalElements").value(0));
+    }
+
+    @Test
     @DisplayName("列表查询将大小写无关的合法筛选值规范化后传给 SQL 层")
     void listTransfers_normalizesSupportedFilters() throws Exception {
-        when(transferService.listTransfers(eq("SENT"), eq("PENDING"), eq(1L), eq(20), any()))
+        when(transferService.listTransfers(eq("SENT"), eq("PENDING"), eq(null), eq(1L), eq(20), any()))
                 .thenReturn(List.of());
-        when(transferService.countTransfers(eq("SENT"), eq("PENDING"), any()))
+        when(transferService.countTransfers(eq("SENT"), eq("PENDING"), eq(null), any()))
                 .thenReturn(0L);
 
         mockMvc.perform(get("/api/v1/transfers")
@@ -279,8 +305,8 @@ class TransferControllerTest {
                         .param("status", " pending "))
                 .andExpect(status().isOk());
 
-        verify(transferService).listTransfers(eq("SENT"), eq("PENDING"), eq(1L), eq(20), any());
-        verify(transferService).countTransfers(eq("SENT"), eq("PENDING"), any());
+        verify(transferService).listTransfers(eq("SENT"), eq("PENDING"), eq(null), eq(1L), eq(20), any());
+        verify(transferService).countTransfers(eq("SENT"), eq("PENDING"), eq(null), any());
     }
 
     @Test
@@ -288,7 +314,7 @@ class TransferControllerTest {
     void getTransferDetail_success() throws Exception {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         TransferResponse item = new TransferResponse(
-                5001L, "TRF-20260914-001", 1001L, 10L, 20L,
+                5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.DRAFT,
                 null, null, null, null, null, null,
                 null, null, null, 0L, now, now
@@ -309,7 +335,7 @@ class TransferControllerTest {
         TransferPatchRequest req = new TransferPatchRequest(25L, 0L);
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         TransferResponse item = new TransferResponse(
-                5001L, "TRF-20260914-001", 1001L, 10L, 25L,
+                5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 25L,
                 new BigDecimal("500.000"), "kg", TransferStatus.DRAFT,
                 null, null, null, null, null, null,
                 null, null, null, 1L, now, now
@@ -341,14 +367,13 @@ class TransferControllerTest {
     @Test
     @DisplayName("提交交接返回 200 OK 并流转为 PENDING")
     void submitTransfer_success() throws Exception {
-        OffsetDateTime shippedAt = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
-        TransferSubmitRequest req = new TransferSubmitRequest(shippedAt, 0L);
+        TransferSubmitRequest req = new TransferSubmitRequest(0L);
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         TransferResponse item = new TransferResponse(
-                5001L, "TRF-20260914-001", 1001L, 10L, 20L,
+                5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.PENDING,
-                shippedAt, now, 101L, null, null, null,
+                null, now, 101L, null, null, null,
                 null, null, null, 1L, now, now
         );
 
@@ -362,7 +387,9 @@ class TransferControllerTest {
                         .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("PENDING"))
-                .andExpect(jsonPath("$.data.submittedBy").value(101));
+                .andExpect(jsonPath("$.data.submittedBy").value(101))
+                .andExpect(jsonPath("$.data.shipmentId").value(9001))
+                .andExpect(jsonPath("$.data.shipmentStatus").value("PLANNED"));
     }
 
     @Test
@@ -375,7 +402,7 @@ class TransferControllerTest {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         TransferResponse item = new TransferResponse(
-                5001L, "TRF-20260914-001", 1001L, 10L, 20L,
+                5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.ACCEPTED,
                 receivedAt.minusHours(2), now.minusHours(2), 101L, receivedAt, now, 201L,
                 new BigDecimal("495.000"), "冷链干耗5kg", null, 2L, now, now
@@ -404,7 +431,7 @@ class TransferControllerTest {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         TransferResponse item = new TransferResponse(
-                5001L, "TRF-20260914-001", 1001L, 10L, 20L,
+                5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.REJECTED,
                 rejectedAt.minusHours(2), now.minusHours(2), 101L, rejectedAt, now, 201L,
                 null, null, "货物温度偏高解冻", 2L, now, now
@@ -509,7 +536,7 @@ class TransferControllerTest {
     @Test
     @DisplayName("提交交接：expectedVersion 为负数时拒绝进入应用服务")
     void submitTransfer_withNegativeExpectedVersion_returnsBadRequest() throws Exception {
-        TransferSubmitRequest req = new TransferSubmitRequest(OffsetDateTime.now(ZoneOffset.UTC), -1L);
+        TransferSubmitRequest req = new TransferSubmitRequest(-1L);
 
         mockMvc.perform(post("/api/v1/transfers/5001/submit")
                         .with(user(senderOperator))

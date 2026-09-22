@@ -1,6 +1,5 @@
 package com.example.traceability.identity.web;
 
-import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.GlobalExceptionHandler;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.common.filter.RequestIdFilter;
@@ -10,6 +9,7 @@ import com.example.traceability.identity.domain.AppUser;
 import com.example.traceability.identity.domain.Organization;
 import com.example.traceability.identity.domain.Role;
 import com.example.traceability.identity.dto.OrganizationSummaryResponse;
+import com.example.traceability.identity.dto.SiteSummaryResponse;
 import com.example.traceability.identity.mapper.AppUserMapper;
 import com.example.traceability.identity.mapper.OrganizationMapper;
 import com.example.traceability.identity.mapper.RoleMapper;
@@ -21,7 +21,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
-import org.springframework.http.HttpStatus;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -152,14 +151,46 @@ class OrganizationDirectoryControllerTest {
     }
 
     @Test
-    @DisplayName("读取其他组织返回 403 ORG_SCOPE_DENIED")
-    void otherOrganization_Forbidden() throws Exception {
+    @DisplayName("读取交易对手组织返回同一白名单摘要")
+    void otherOrganization_ReturnsWhitelistedSummary() throws Exception {
         when(organizationDirectoryService.getOrganization(eq(20L), any(TraceSecurityPrincipal.class)))
-                .thenThrow(new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权", "无权访问其他组织的目录信息"));
+                .thenReturn(new OrganizationSummaryResponse(20L, "ORG_PROC_01", "东海加工", "PROCESSOR", "ACTIVE"));
 
         mockMvc.perform(get("/api/v1/organizations/20").with(user(operatorPrincipal)))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value("ORG_SCOPE_DENIED"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.name").value("东海加工"))
+                .andExpect(jsonPath("$.data.creditCode").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("启用组织目录按类型筛选")
+    void listOrganizations_ByType() throws Exception {
+        when(organizationDirectoryService.listActiveOrganizations(eq("CARRIER"), any(TraceSecurityPrincipal.class)))
+                .thenReturn(List.of(new OrganizationSummaryResponse(30L, "ORG_CAR_01", "冷链承运", "CARRIER", "ACTIVE")));
+
+        mockMvc.perform(get("/api/v1/organizations").param("orgType", "CARRIER").with(user(operatorPrincipal)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value(30))
+                .andExpect(jsonPath("$.data[0].orgType").value("CARRIER"));
+    }
+
+    @Test
+    @DisplayName("组织启用场所目录返回白名单摘要且不含详细地址")
+    void listSites_ReturnsWhitelistedSummary() throws Exception {
+        when(organizationDirectoryService.listActiveSites(eq(20L), any(TraceSecurityPrincipal.class)))
+                .thenReturn(List.of(new SiteSummaryResponse(7L, 20L, "S-7", "加工厂", "FACTORY", "ACTIVE")));
+
+        mockMvc.perform(get("/api/v1/organizations/20/sites").with(user(operatorPrincipal)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].name").value("加工厂"))
+                .andExpect(jsonPath("$.data[0].addressText").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("匿名读取场所目录返回 401")
+    void listSites_Anonymous_Unauthorized() throws Exception {
+        mockMvc.perform(get("/api/v1/organizations/20/sites"))
+                .andExpect(status().isUnauthorized());
     }
 
     @Test

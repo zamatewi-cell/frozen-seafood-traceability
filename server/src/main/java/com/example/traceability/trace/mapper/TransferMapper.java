@@ -87,6 +87,7 @@ public interface TransferMapper extends BaseMapper<Transfer> {
     @Update("""
             UPDATE `transfer`
             SET receiver_org_id = #{entity.receiverOrgId},
+                shipment_id = #{entity.shipmentId},
                 shipped_at = #{entity.shippedAt},
                 submitted_recorded_at = #{entity.submittedRecordedAt},
                 submitted_by = #{entity.submittedBy},
@@ -132,11 +133,13 @@ public interface TransferMapper extends BaseMapper<Transfer> {
             "  <otherwise> AND (sender_org_id = #{orgId} OR receiver_org_id = #{orgId}) </otherwise>" +
             "</choose>" +
             "<if test='status != null and status != \"\"'> AND status = #{status} </if>" +
+            "<if test='batchId != null'> AND batch_id = #{batchId} </if>" +
             "</script>")
     long countTransfers(
             @Param("orgId") Long orgId,
             @Param("direction") String direction,
-            @Param("status") String status
+            @Param("status") String status,
+            @Param("batchId") Long batchId
     );
 
     /**
@@ -157,13 +160,55 @@ public interface TransferMapper extends BaseMapper<Transfer> {
             "  <otherwise> AND (sender_org_id = #{orgId} OR receiver_org_id = #{orgId}) </otherwise>" +
             "</choose>" +
             "<if test='status != null and status != \"\"'> AND status = #{status} </if>" +
+            "<if test='batchId != null'> AND batch_id = #{batchId} </if>" +
             "ORDER BY updated_at DESC, id DESC LIMIT #{offset}, #{size}" +
             "</script>")
     List<Transfer> selectTransfersPage(
             @Param("orgId") Long orgId,
             @Param("direction") String direction,
             @Param("status") String status,
+            @Param("batchId") Long batchId,
             @Param("offset") long offset,
             @Param("size") int size
     );
+
+    /**
+     * 将 DRAFT 交接绑定到运输任务（调用方已按 shipment → transfer 顺序持有两行排他锁）。
+     *
+     * @return 影响行数 (1: 成功, 0: 已非 DRAFT / 已绑定 / 版本冲突)
+     */
+    @Update("UPDATE `transfer` SET shipment_id = #{shipmentId}, version = version + 1, updated_at = NOW(6), updated_by = #{updatedBy} " +
+            "WHERE id = #{id} AND status = 'DRAFT' AND shipment_id IS NULL AND version = #{expectedVersion} AND is_deleted = 0")
+    int bindShipment(
+            @Param("id") Long id,
+            @Param("shipmentId") Long shipmentId,
+            @Param("expectedVersion") Long expectedVersion,
+            @Param("updatedBy") Long updatedBy
+    );
+
+    /**
+     * 将 DRAFT 交接从运输任务解绑（调用方已按 shipment → transfer 顺序持有两行排他锁）。
+     *
+     * @return 影响行数 (1: 成功, 0: 已非 DRAFT / 未绑定该运输任务 / 版本冲突)
+     */
+    @Update("UPDATE `transfer` SET shipment_id = NULL, version = version + 1, updated_at = NOW(6), updated_by = #{updatedBy} " +
+            "WHERE id = #{id} AND shipment_id = #{shipmentId} AND status = 'DRAFT' AND version = #{expectedVersion} AND is_deleted = 0")
+    int unbindShipment(
+            @Param("id") Long id,
+            @Param("shipmentId") Long shipmentId,
+            @Param("expectedVersion") Long expectedVersion,
+            @Param("updatedBy") Long updatedBy
+    );
+
+    /**
+     * 按主键顺序排他锁定运输任务装载清单中的全部交接 (FOR UPDATE)。
+     */
+    @Select("SELECT * FROM `transfer` WHERE shipment_id = #{shipmentId} AND is_deleted = 0 ORDER BY id ASC FOR UPDATE")
+    List<Transfer> selectByShipmentIdForUpdate(@Param("shipmentId") Long shipmentId);
+
+    /**
+     * 查询运输任务装载清单中的全部交接（普通读，按主键排序）。
+     */
+    @Select("SELECT * FROM `transfer` WHERE shipment_id = #{shipmentId} AND is_deleted = 0 ORDER BY id ASC")
+    List<Transfer> selectByShipmentId(@Param("shipmentId") Long shipmentId);
 }

@@ -287,4 +287,14 @@ public interface BatchMapper extends BaseMapper<Batch> {
             @Param("expectedVersion") Long expectedVersion,
             @Param("updatedBy") Long updatedBy
     );
+
+    /**
+     * 按主键批量读取批次（仅供已完成交接/运输参与方权限校验的调用方补全追溯批次号等展示字段）。
+     *
+     * @param ids 批次 ID 集合
+     * @return 批次列表
+     */
+    @Select("<script>SELECT * FROM batch WHERE is_deleted = 0 AND id IN " +
+            "<foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach></script>")
+    List<Batch> selectByIdsIgnoreTenant(@Param("ids") java.util.Collection<Long> ids);
 }

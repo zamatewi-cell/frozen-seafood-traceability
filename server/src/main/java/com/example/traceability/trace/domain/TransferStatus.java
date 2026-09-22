@@ -13,12 +13,12 @@ public enum TransferStatus {
     DRAFT,
 
     /**
-     * 待处理状态 (发货已锁定，待接收方接受或拒收)。
+     * 待处理状态 (已绑定 PLANNED Shipment 并由发送方提交，待 Shipment 到达后由接收方接受或拒收)。
      */
     PENDING,
 
     /**
-     * 已接受终态 (已转移持有权，已写入 ARRIVAL 追溯事件，只读)。
+     * 已接受终态 (前提为关联 Shipment 已 DELIVERED；已转移当前责任组织，不生成 ARRIVAL 追溯事件，只读)。
      */
     ACCEPTED,
 

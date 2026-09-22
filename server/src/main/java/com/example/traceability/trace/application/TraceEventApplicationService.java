@@ -66,8 +66,15 @@ public class TraceEventApplicationService {
     /** 服务端自动事件保留的幂等键前缀；人工事件接口不得使用。 */
     static final String RESERVED_IDEMPOTENCY_PREFIX = "SYS:";
 
-    /** 只能由结构化业务对象自动投影、人工普通事件接口不得伪造的事件类型（本切片落地 SOURCE）。 */
-    private static final Set<String> AUTO_ONLY_EVENT_TYPES = Set.of(TraceEventType.SOURCE.name());
+    /**
+     * 只能由结构化业务对象自动投影、人工普通事件接口不得伪造的事件类型（统一业务契约 v1.1 §11）：
+     * SOURCE 由来源批次激活产生；TRANSPORT / ARRIVAL 由 Shipment 发运 / 到达产生。
+     */
+    private static final Set<String> AUTO_ONLY_EVENT_TYPES = Set.of(
+            TraceEventType.SOURCE.name(),
+            TraceEventType.TRANSPORT.name(),
+            TraceEventType.ARRIVAL.name()
+    );
 
     private static final Set<String> FORBIDDEN_DETAIL_KEYS = Set.of(
             "id", "batchid", "batch_id", "orgid", "org_id", "siteid", "site_id",
@@ -99,7 +106,13 @@ public class TraceEventApplicationService {
     /**
      * 查询指定批次下的追溯事件列表（按 occurred_at ASC, recorded_at ASC, id ASC 稳定排序）。
      * <p>
-     * 组织数据范围隔离在 Mapper SQL 层强制执行。企业端只能查看本组织批次的追溯事件；平台管理员可只读查看。
+     * 读取范围（统一业务契约 v1.1 §14）：
+     * <ul>
+     *   <li>当前责任组织与平台只读角色：该批次完整时间线（含其他组织在前序环节记录的 SOURCE / TRANSPORT / ARRIVAL 等事件）；</li>
+     *   <li>历史参与组织（批次已转出，但本组织曾在该批次记录过事件）：仅本组织记录的历史事件，只读；</li>
+     *   <li>其他组织：403 ORG_SCOPE_DENIED。</li>
+     * </ul>
+     * 写入与更正仍严格限定当前责任组织，历史参与组织不能修改已转出的批次。
      * </p>
      *
      * @param batchId   批次 ID
@@ -112,8 +125,12 @@ public class TraceEventApplicationService {
             throw new ResourceNotFoundException("未找到 ID 为 " + batchId + " 的批次");
         }
 
-        boolean isPlatform = isPlatformScope(principal);
-        if (!isPlatform && !Objects.equals(batch.getOrgId(), principal.getOrgId())) {
+        List<TraceEvent> events;
+        if (isPlatformScope(principal) || Objects.equals(batch.getOrgId(), principal.getOrgId())) {
+            events = traceEventMapper.selectByBatchId(batchId);
+        } else if (traceEventMapper.countByBatchIdAndOrgId(batchId, principal.getOrgId()) > 0) {
+            events = traceEventMapper.selectByBatchIdAndOrgId(batchId, principal.getOrgId());
+        } else {
             throw new BusinessException(
                     HttpStatus.FORBIDDEN,
                     "ORG_SCOPE_DENIED",
@@ -121,9 +138,6 @@ public class TraceEventApplicationService {
                     "无权访问其他组织的批次追溯事件"
             );
         }
-
-        Long targetOrgId = isPlatform ? batch.getOrgId() : principal.getOrgId();
-        List<TraceEvent> events = traceEventMapper.selectByBatchIdAndOrgId(batchId, targetOrgId);
 
         return events.stream()
                 .map(e -> TraceEventResponse.fromEntity(e, parseDetails(e.getDetailsJson())))
@@ -513,7 +527,7 @@ public class TraceEventApplicationService {
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "EVENT_TYPE_NOT_MANUAL",
                     "事件类型不允许人工录入",
-                    "事件类型 " + normalizedEventType + " 只能由业务单据自动生成（SOURCE 由来源批次提交激活自动产生），人工事件接口不得创建或更正为该类型"
+                    "事件类型 " + normalizedEventType + " 只能由业务单据自动生成（SOURCE 由来源批次提交激活自动产生，TRANSPORT / ARRIVAL 由运输任务发运 / 到达自动产生），人工事件接口不得创建或更正为该类型"
             );
         }
     }
@@ -909,70 +923,199 @@ public class TraceEventApplicationService {
     }
 
     /**
-     * 接收方接受企业交接时，在同一事务内追加一条 ARRIVAL 追溯事件。
+     * 运输任务从 PLANNED 进入 IN_TRANSIT 时，在调用方事务内为装载清单中的一个 Batch 自动投影唯一一条 TRANSPORT 事件。
+     * <p>
+     * 唯一可靠触发源：Shipment PLANNED → IN_TRANSIT（统一业务契约 v1.1 §11）。
+     * 事件记录组织为运输期间仍承担责任的发送方；操作人为确认装载的承运商用户；
+     * 业务发生时间为 shipment.loaded_at，场所为启运场所。
+     * 幂等身份由 {@link #shipmentTransportEventIdempotencyKey(Long, Long)} 决定，并由唯一约束
+     * {@code uk_trace_event_org_idempotency} 保证同一 Shipment 同一 Batch 至多一条 TRANSPORT。
+     * </p>
      *
-     * @param batchId            批次 ID
-     * @param receiverOrgId      接收组织 ID
-     * @param decidedBy          接收决定操作人 ID
-     * @param receivedAt         收货业务发生时间
-     * @param decisionRecordedAt 接收决定系统记录时间
-     * @param transferId         关联交接凭证 ID
-     * @param differenceReason   数量差异原因说明（可空）
+     * @param projection     运输任务投影上下文
+     * @param batchId        装载批次 ID
+     * @param traceBatchNo   装载批次追溯批次号
+     * @param transferId     对应交接 ID
+     * @param operatorId     确认发运的承运商操作人 ID
+     * @param recordedAtUtc  系统登记时间 (UTC)
      */
-    @Transactional
-    public void appendArrivalEvent(
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void appendShipmentTransportEvent(
+            ShipmentProjection projection,
             Long batchId,
-            Long receiverOrgId,
-            Long decidedBy,
-            OffsetDateTime receivedAt,
-            OffsetDateTime decisionRecordedAt,
+            String traceBatchNo,
             Long transferId,
-            String differenceReason
+            Long operatorId,
+            LocalDateTime recordedAtUtc
     ) {
-        LocalDateTime occurredAtUtc = receivedAt != null
-                ? receivedAt.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime()
-                : LocalDateTime.now(ZoneOffset.UTC);
-        LocalDateTime recordedAtUtc = decisionRecordedAt != null
-                ? decisionRecordedAt.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime()
-                : LocalDateTime.now(ZoneOffset.UTC);
+        Map<String, Object> details = shipmentDetails(projection, traceBatchNo, transferId, "SHIPMENT_LOADED");
+        insertShipmentEvent(
+                projection,
+                batchId,
+                TraceEventType.TRANSPORT,
+                projection.loadedAtUtc(),
+                projection.originSiteId(),
+                shipmentTransportEventIdempotencyKey(projection.shipmentId(), batchId),
+                "冷链运输发运：" + projection.originSiteName() + " → " + projection.destinationSiteName(),
+                details,
+                operatorId,
+                recordedAtUtc
+        );
+    }
 
-        Map<String, Object> details = new java.util.LinkedHashMap<>();
+    /**
+     * 运输任务从 IN_TRANSIT 进入 DELIVERED 时，在调用方事务内为装载清单中的一个 Batch 自动投影唯一一条 ARRIVAL 事件。
+     * <p>
+     * 唯一可靠触发源：Shipment IN_TRANSIT → DELIVERED（统一业务契约 v1.1 §11）。ARRIVAL 只表示物理到达，
+     * 不表示接收方接受；Transfer ACCEPTED 不再生成 ARRIVAL。业务发生时间为 shipment.unloaded_at，场所为目的场所。
+     * </p>
+     *
+     * @param projection     运输任务投影上下文
+     * @param batchId        装载批次 ID
+     * @param traceBatchNo   装载批次追溯批次号
+     * @param transferId     对应交接 ID
+     * @param operatorId     确认到达的承运商操作人 ID
+     * @param recordedAtUtc  系统登记时间 (UTC)
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void appendShipmentArrivalEvent(
+            ShipmentProjection projection,
+            Long batchId,
+            String traceBatchNo,
+            Long transferId,
+            Long operatorId,
+            LocalDateTime recordedAtUtc
+    ) {
+        Map<String, Object> details = shipmentDetails(projection, traceBatchNo, transferId, "SHIPMENT_UNLOADED");
+        insertShipmentEvent(
+                projection,
+                batchId,
+                TraceEventType.ARRIVAL,
+                projection.unloadedAtUtc(),
+                projection.destinationSiteId(),
+                shipmentArrivalEventIdempotencyKey(projection.shipmentId(), batchId),
+                "冷链运输到达：" + projection.destinationSiteName(),
+                details,
+                operatorId,
+                recordedAtUtc
+        );
+    }
+
+    /**
+     * 运输任务 TRANSPORT 事件的服务端幂等身份（保留前缀 {@code SYS:}，人工接口不可使用）。
+     */
+    public static String shipmentTransportEventIdempotencyKey(Long shipmentId, Long batchId) {
+        return RESERVED_IDEMPOTENCY_PREFIX + "TRANSPORT:SHIPMENT:" + shipmentId + ":BATCH:" + batchId;
+    }
+
+    /**
+     * 运输任务 ARRIVAL 事件的服务端幂等身份（保留前缀 {@code SYS:}，人工接口不可使用）。
+     */
+    public static String shipmentArrivalEventIdempotencyKey(Long shipmentId, Long batchId) {
+        return RESERVED_IDEMPOTENCY_PREFIX + "ARRIVAL:SHIPMENT:" + shipmentId + ":BATCH:" + batchId;
+    }
+
+    /**
+     * 运输任务自动事件投影所需的结构化事实快照。
+     *
+     * @param shipmentId           运输任务 ID
+     * @param shipmentNo           运输单号
+     * @param senderOrgId          发送方组织 ID（运输期间仍为当前责任组织，作为事件记录组织）
+     * @param carrierOrgId         承运组织 ID
+     * @param carrierOrgName       承运组织名称
+     * @param vehicleOrContainerNo 车辆或容器编号
+     * @param originSiteId         启运场所 ID
+     * @param originSiteName       启运场所名称
+     * @param destinationSiteId    目的场所 ID
+     * @param destinationSiteName  目的场所名称
+     * @param loadedAtUtc          装载发运业务时间 (UTC)
+     * @param unloadedAtUtc        到达卸货业务时间 (UTC，发运时为 null)
+     */
+    public record ShipmentProjection(
+            Long shipmentId,
+            String shipmentNo,
+            Long senderOrgId,
+            Long carrierOrgId,
+            String carrierOrgName,
+            String vehicleOrContainerNo,
+            Long originSiteId,
+            String originSiteName,
+            Long destinationSiteId,
+            String destinationSiteName,
+            LocalDateTime loadedAtUtc,
+            LocalDateTime unloadedAtUtc
+    ) {
+    }
+
+    private Map<String, Object> shipmentDetails(
+            ShipmentProjection p,
+            String traceBatchNo,
+            Long transferId,
+            String occurredAtBasis
+    ) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("sourceObjectType", "SHIPMENT");
+        details.put("sourceObjectId", p.shipmentId());
+        details.put("shipmentId", p.shipmentId());
+        details.put("shipmentNo", p.shipmentNo());
         details.put("transferId", transferId);
-        if (differenceReason != null && !differenceReason.isBlank()) {
-            details.put("differenceReason", differenceReason.trim());
-        }
+        details.put("traceBatchNo", traceBatchNo);
+        details.put("carrierOrgId", p.carrierOrgId());
+        details.put("carrierOrgName", p.carrierOrgName());
+        details.put("vehicleOrContainerNo", p.vehicleOrContainerNo());
+        details.put("originSiteId", p.originSiteId());
+        details.put("originSiteName", p.originSiteName());
+        details.put("destinationSiteId", p.destinationSiteId());
+        details.put("destinationSiteName", p.destinationSiteName());
+        details.put("occurredAtBasis", occurredAtBasis);
+        return details;
+    }
 
-        String serializedDetails;
-        try {
-            serializedDetails = objectMapper.writeValueAsString(details);
-        } catch (Exception ex) {
-            serializedDetails = "{\"transferId\":" + transferId + "}";
-        }
-
-        String idempotencyKey = "TRANSFER_ARRIVAL_" + transferId;
-
+    private void insertShipmentEvent(
+            ShipmentProjection p,
+            Long batchId,
+            TraceEventType type,
+            LocalDateTime occurredAtUtc,
+            Long siteId,
+            String idempotencyKey,
+            String summary,
+            Map<String, Object> details,
+            Long operatorId,
+            LocalDateTime recordedAtUtc
+    ) {
         TraceEvent event = new TraceEvent();
         event.setBatchId(batchId);
-        event.setOrgId(receiverOrgId);
-        event.setSiteId(null);
-        event.setEventType(TraceEventType.ARRIVAL.name());
+        event.setOrgId(p.senderOrgId());
+        event.setSiteId(siteId);
+        event.setEventType(type.name());
         event.setOccurredAt(occurredAtUtc);
         event.setRecordedAt(recordedAtUtc);
-        event.setOperatorId(decidedBy);
+        event.setOperatorId(operatorId);
+        // 承运商在页面人工确认装载 / 到达，沿用既有 MANUAL 语义
         event.setDataSource(DataSource.MANUAL.name());
         event.setStatus(TraceEventStatus.SUBMITTED.name());
         event.setIdempotencyKey(idempotencyKey);
         event.setCorrectsEventId(null);
         event.setCorrectionReason(null);
-        event.setSummary("完成企业间整批交接并确认到货验收");
-        event.setDetailsJson(serializedDetails);
+        event.setSummary(summary.length() > 500 ? summary.substring(0, 500) : summary);
+        event.setDetailsJson(objectMapper.writeValueAsString(details));
         event.setVersion(0L);
         event.setIsDeleted(0);
         event.setCreatedAt(recordedAtUtc);
-        event.setCreatedBy(decidedBy);
+        event.setCreatedBy(operatorId);
         event.setUpdatedAt(recordedAtUtc);
-        event.setUpdatedBy(decidedBy);
+        event.setUpdatedBy(operatorId);
 
-        traceEventMapper.insert(event);
+        try {
+            traceEventMapper.insert(event);
+        } catch (DuplicateKeyException e) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "SHIPMENT_EVENT_CONFLICT",
+                    "运输追溯事件冲突",
+                    "运输任务 " + p.shipmentNo() + " 对批次 " + batchId + " 的 " + type.name()
+                            + " 追溯事件身份已被占用，运输状态变更已回滚"
+            );
+        }
     }
 }

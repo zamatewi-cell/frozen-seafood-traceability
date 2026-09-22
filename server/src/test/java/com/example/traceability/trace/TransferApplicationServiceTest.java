@@ -11,8 +11,9 @@ import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.domain.Organization;
 import com.example.traceability.identity.mapper.OrganizationMapper;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
-import com.example.traceability.trace.application.TraceEventApplicationService;
 import com.example.traceability.trace.application.TransferApplicationService;
+import com.example.traceability.trace.domain.Shipment;
+import com.example.traceability.trace.domain.ShipmentStatus;
 import com.example.traceability.trace.domain.Transfer;
 import com.example.traceability.trace.domain.TransferIdempotency;
 import com.example.traceability.trace.domain.TransferStatus;
@@ -22,6 +23,7 @@ import com.example.traceability.trace.dto.TransferPatchRequest;
 import com.example.traceability.trace.dto.TransferRejectRequest;
 import com.example.traceability.trace.dto.TransferResponse;
 import com.example.traceability.trace.dto.TransferSubmitRequest;
+import com.example.traceability.trace.mapper.ShipmentMapper;
 import com.example.traceability.trace.mapper.TransferIdempotencyMapper;
 import com.example.traceability.trace.mapper.TransferMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,9 +56,11 @@ import static org.mockito.Mockito.when;
  * 1. 创建仅限本组织 ACTIVE 批次，快照数量/单位，阻止已消耗批次，同组织幂等防重；
  * 2. 仅发送方 OPERATOR 可修改/删除/提交草稿；
  * 3. 仅接收方 OPERATOR / QUALITY_MANAGER 可接受/拒绝；
- * 4. 接受时差异数量必填 differenceReason，更新批次持有人（externalBatchNo 重复不再拦截接收），追加 ARRIVAL 事件与写审计；
- * 5. 拒绝时不转移持有人，不追加追溯事件，写审计；
- * 6. 跨组织数据隔离与权限越界拦截。
+ * 4. 提交前必须绑定 PLANNED 运输任务；接受 / 拒收前运输任务必须已 DELIVERED；
+ * 5. 接受时差异数量必填 differenceReason，更新批次当前责任组织（externalBatchNo 重复不再拦截接收）并写审计；
+ *    接受不再生成 ARRIVAL（ARRIVAL 唯一来源为 Shipment 到达，TransferApplicationService 不再依赖追溯事件服务）；
+ * 6. 拒绝时不转移持有人，不追加追溯事件，写审计；
+ * 7. 跨组织数据隔离与权限越界拦截；装载清单变更遵循 shipment → transfer 锁顺序。
  * </p>
  */
 @ExtendWith(MockitoExtension.class)
@@ -78,7 +82,7 @@ class TransferApplicationServiceTest {
     private OrganizationMapper organizationMapper;
 
     @Mock
-    private TraceEventApplicationService traceEventService;
+    private ShipmentMapper shipmentMapper;
 
     @Mock
     private AuditApplicationService auditService;
@@ -103,9 +107,9 @@ class TransferApplicationServiceTest {
                 batchMapper,
                 batchOperationItemMapper,
                 organizationMapper,
-                traceEventService,
                 auditService,
                 publicTraceCodeMapper,
+                shipmentMapper,
                 objectMapper
         );
 
@@ -159,6 +163,44 @@ class TransferApplicationServiceTest {
         batch.setVersion(0L);
         batch.setIsDeleted(0);
         return batch;
+    }
+
+    private static final Long SHIPMENT_ID = 9001L;
+
+    private Shipment shipment(ShipmentStatus status) {
+        Shipment s = new Shipment();
+        s.setId(SHIPMENT_ID);
+        s.setShipmentNo("SHP-TEST-0001");
+        s.setSenderOrgId(10L);
+        s.setReceiverOrgId(20L);
+        s.setCarrierOrgId(40L);
+        s.setStatus(status);
+        s.setVersion(1L);
+        return s;
+    }
+
+    /**
+     * 按服务端锁顺序 (shipment → transfer) 布置交接锁定读：DRAFT 交接绑定 PLANNED 运输任务，
+     * PENDING 交接绑定已 DELIVERED 运输任务。未显式设置 shipmentId 的交接默认绑定 {@link #SHIPMENT_ID}。
+     */
+    private void stubLockedTransfer(Transfer transfer) {
+        ShipmentStatus shipmentStatus = transfer.getStatus() == TransferStatus.DRAFT
+                ? ShipmentStatus.PLANNED
+                : ShipmentStatus.DELIVERED;
+        stubLockedTransfer(transfer, shipment(shipmentStatus));
+    }
+
+    private void stubLockedTransfer(Transfer transfer, Shipment boundShipment) {
+        transfer.setShipmentId(boundShipment != null ? boundShipment.getId() : null);
+        if (transfer.getIsDeleted() == null) {
+            transfer.setIsDeleted(0);
+        }
+        lenient().when(transferMapper.selectById(transfer.getId())).thenReturn(transfer);
+        lenient().when(transferMapper.selectByIdForUpdate(transfer.getId())).thenReturn(transfer);
+        if (boundShipment != null) {
+            lenient().when(shipmentMapper.selectByIdForUpdate(boundShipment.getId())).thenReturn(boundShipment);
+            lenient().when(shipmentMapper.selectByIdForShare(boundShipment.getId())).thenReturn(boundShipment);
+        }
     }
 
     private Batch createTestBatch(Long batchId, Long orgId, String batchNo) {
@@ -238,11 +280,10 @@ class TransferApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("提交交接：保存发货业务时间与提交系统时间，更新为PENDING状态")
+    @DisplayName("提交交接：已绑定 PLANNED 运输任务时更新为 PENDING，记录提交系统时间，不再写入 shippedAt")
     void submitTransfer_success() {
         Long transferId = 5002L;
         String idempotencyKey = "idem-submit-0000001";
-        OffsetDateTime shippedAt = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
 
         Transfer transfer = new Transfer();
         transfer.setId(transferId);
@@ -254,16 +295,17 @@ class TransferApplicationServiceTest {
 
         Batch batch = createTestBatch(1004L, 10L, "BATCH-2026-004");
 
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(1004L)).thenReturn(batch);
         when(idempotencyMapper.selectByOrgIdAndKey(10L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("DRAFT"), eq(0L))).thenReturn(1);
 
-        TransferSubmitRequest req = new TransferSubmitRequest(shippedAt, 0L);
+        TransferSubmitRequest req = new TransferSubmitRequest(0L);
         TransferResponse resp = transferService.submitTransfer(transferId, req, idempotencyKey, senderOperator);
 
         assertThat(resp.status()).isEqualTo(TransferStatus.PENDING);
-        assertThat(resp.shippedAt()).isNotNull();
+        assertThat(resp.shippedAt()).isNull();
+        assertThat(resp.shipmentId()).isEqualTo(SHIPMENT_ID);
         assertThat(resp.submittedRecordedAt()).isNotNull();
         assertThat(resp.submittedBy()).isEqualTo(101L);
 
@@ -272,7 +314,7 @@ class TransferApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("接收方接受：实收数量不一致强制填写differenceReason，更新batch.org_id，追加ARRIVAL追溯事件")
+    @DisplayName("接收方接受：运输任务已到达；实收数量不一致强制填写differenceReason，更新batch.org_id，不生成ARRIVAL")
     void acceptTransfer_quantityDifference_requiresReason_andUpdatesBatchOrg() {
         Long transferId = 5003L;
         Long batchId = 1005L;
@@ -291,7 +333,7 @@ class TransferApplicationServiceTest {
 
         Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-005");
 
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
@@ -318,10 +360,9 @@ class TransferApplicationServiceTest {
         assertThat(resp.differenceReason()).isEqualTo("冷链运输解冻微量干耗损耗5kg");
         assertThat(resp.decidedBy()).isEqualTo(201L);
 
-        // 验证持有企业更新、公开追溯码归属转移与追溯事件写入
+        // 验证当前责任组织更新与公开追溯码归属转移
         verify(batchMapper).updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L);
         verify(publicTraceCodeMapper).transferOrgScopeByBatchId(eq(batchId), eq(10L), eq(20L), any(), eq(201L));
-        verify(traceEventService).appendArrivalEvent(eq(batchId), eq(20L), eq(201L), eq(receivedAt), any(), eq(transferId), eq("冷链运输解冻微量干耗损耗5kg"));
         verify(auditService).recordAudit(eq(201L), eq(20L), eq("ACCEPT"), eq("TRANSFER"), eq(transferId), any(), eq("SUCCESS"), any());
     }
 
@@ -345,7 +386,7 @@ class TransferApplicationServiceTest {
 
         Batch batch = createTestBatch(batchId, 10L, "BATCH-EXISTING");
 
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
@@ -359,7 +400,6 @@ class TransferApplicationServiceTest {
 
         assertThat(resp).isNotNull();
         assertThat(resp.status()).isEqualTo(TransferStatus.ACCEPTED);
-        verify(traceEventService).appendArrivalEvent(eq(batchId), eq(20L), eq(201L), eq(receivedAt), any(), eq(transferId), any());
     }
 
     @Test
@@ -380,7 +420,7 @@ class TransferApplicationServiceTest {
 
         Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-REJECT");
 
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
 
@@ -393,7 +433,6 @@ class TransferApplicationServiceTest {
 
         // 绝不转移所有权，不追加正式追溯事件
         verify(batchMapper, never()).updateOrgIdByIdAndVersion(any(), any(), any(), any(), any());
-        verify(traceEventService, never()).appendArrivalEvent(any(), any(), any(), any(), any(), any(), any());
         verify(auditService).recordAudit(eq(201L), eq(20L), eq("REJECT"), eq("TRANSFER"), eq(transferId), any(), eq("SUCCESS"), any());
     }
 
@@ -434,11 +473,11 @@ class TransferApplicationServiceTest {
         Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-CONSUMED");
 
         when(idempotencyMapper.selectByOrgIdAndKey(10L, idempotencyKey)).thenReturn(null);
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(batchOperationItemMapper.countSubmittedInputUsageByBatchId(batchId)).thenReturn(1);
 
-        TransferSubmitRequest req = new TransferSubmitRequest(OffsetDateTime.now(ZoneOffset.UTC), 0L);
+        TransferSubmitRequest req = new TransferSubmitRequest(0L);
 
         assertThatThrownBy(() -> transferService.submitTransfer(transferId, req, idempotencyKey, senderOperator))
                 .isInstanceOf(BusinessException.class)
@@ -467,10 +506,10 @@ class TransferApplicationServiceTest {
         Batch batch = createTestBatch(batchId, 99L, "BATCH-2026-ORG-99"); // 被并发篡改或归属不同
 
         when(idempotencyMapper.selectByOrgIdAndKey(10L, idempotencyKey)).thenReturn(null);
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
 
-        TransferSubmitRequest req = new TransferSubmitRequest(OffsetDateTime.now(ZoneOffset.UTC), 0L);
+        TransferSubmitRequest req = new TransferSubmitRequest(0L);
 
         assertThatThrownBy(() -> transferService.submitTransfer(transferId, req, idempotencyKey, senderOperator))
                 .isInstanceOf(BusinessException.class)
@@ -501,7 +540,7 @@ class TransferApplicationServiceTest {
         Batch batch = createTestBatch(batchId, 99L, "BATCH-2026-ORG-99"); // 非原发货方
 
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
 
         TransferAcceptRequest req = new TransferAcceptRequest(new BigDecimal("100.000"), "kg", OffsetDateTime.now(ZoneOffset.UTC), null, 1L);
@@ -535,7 +574,7 @@ class TransferApplicationServiceTest {
         Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-UNIT");
 
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
 
         TransferAcceptRequest req = new TransferAcceptRequest(new BigDecimal("100.000"), "box", OffsetDateTime.now(ZoneOffset.UTC), null, 1L);
 
@@ -569,7 +608,6 @@ class TransferApplicationServiceTest {
     void submitTransfer_concurrentSameKeyAfterStateChanged_returnsExistingTransferViaSelectForUpdate() {
         Long transferId = 6006L;
         String idempotencyKey = "idem-submit-concurrent-same-key";
-        OffsetDateTime shippedAt = OffsetDateTime.parse("2026-09-14T10:00:00Z");
 
         // 模拟普通快照预检未查出（穿透前为null）
         when(idempotencyMapper.selectByOrgIdAndKey(10L, idempotencyKey)).thenReturn(null);
@@ -581,7 +619,7 @@ class TransferApplicationServiceTest {
         transferInDb.setReceiverOrgId(20L);
         transferInDb.setStatus(TransferStatus.PENDING);
         transferInDb.setVersion(1L);
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transferInDb);
+        stubLockedTransfer(transferInDb);
 
         // 锁定后当前读查出了前一线程落库的幂等记录，且语义哈希完全一致
         TransferIdempotency concurrentIdem = new TransferIdempotency();
@@ -589,11 +627,11 @@ class TransferApplicationServiceTest {
         concurrentIdem.setIdempotencyKey(idempotencyKey);
         concurrentIdem.setAction("SUBMIT");
         concurrentIdem.setTransferId(transferId);
-        concurrentIdem.setRequestHash(computeHashForTest("SUBMIT", transferId, shippedAt.toInstant().toString(), 0L));
+        concurrentIdem.setRequestHash(computeHashForTest("SUBMIT", transferId, 0L));
         when(idempotencyMapper.selectByOrgIdAndKeyForUpdate(10L, idempotencyKey)).thenReturn(concurrentIdem);
         when(transferMapper.selectById(transferId)).thenReturn(transferInDb);
 
-        TransferSubmitRequest req = new TransferSubmitRequest(shippedAt, 0L);
+        TransferSubmitRequest req = new TransferSubmitRequest(0L);
 
         // 预期直接返回，不抛出 INVALID_STATE_TRANSITION
         TransferResponse resp = transferService.submitTransfer(transferId, req, idempotencyKey, senderOperator);
@@ -680,7 +718,7 @@ class TransferApplicationServiceTest {
         Batch batch = createTestBatch(batchId, 10L, "BATCH-CONFLICT-001");
 
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L))
@@ -721,7 +759,7 @@ class TransferApplicationServiceTest {
         transfer.setVersion(1L);
 
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
 
         String trickyReason = "温度超标: \"-12℃\"，出现解冻；\n批注: \\特殊测试/\\";
@@ -770,7 +808,7 @@ class TransferApplicationServiceTest {
                     savedIdem.set(e);
                     return 1;
                 });
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L)).thenReturn(1);
@@ -819,7 +857,7 @@ class TransferApplicationServiceTest {
                     savedIdem.set(e);
                     return 1;
                 });
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(transferMapper.selectById(transferId)).thenReturn(transfer);
 
@@ -841,8 +879,8 @@ class TransferApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("接收方接受：同Key同完整语义（含expectedVersion）重放返回原结果且不重复追加ARRIVAL事件")
-    void acceptTransfer_whenSameKeyWithSameSemantics_replaysOriginalResponseAndNoDuplicateArrival() {
+    @DisplayName("接收方接受：同Key同完整语义（含expectedVersion）重放返回原结果且只转移一次责任组织")
+    void acceptTransfer_whenSameKeyWithSameSemantics_replaysOriginalResponseAndTransfersOnce() {
         Long transferId = 7003L;
         Long batchId = 3003L;
         String idempotencyKey = "idem-accept-same-semantic-01";
@@ -872,13 +910,14 @@ class TransferApplicationServiceTest {
                     savedIdem.set(e);
                     return 1;
                 });
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
         when(batchMapper.updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L)).thenReturn(1);
 
         Transfer acceptedTransfer = new Transfer();
         acceptedTransfer.setId(transferId);
+        acceptedTransfer.setShipmentId(SHIPMENT_ID);
         acceptedTransfer.setStatus(TransferStatus.ACCEPTED);
         acceptedTransfer.setVersion(2L);
         when(transferMapper.selectById(transferId)).thenReturn(acceptedTransfer);
@@ -893,11 +932,8 @@ class TransferApplicationServiceTest {
         TransferResponse resp2 = transferService.acceptTransfer(transferId, req, idempotencyKey, receiverOperator);
         assertThat(resp2).isNotNull();
         assertThat(resp2.id()).isEqualTo(transferId);
+        verify(batchMapper, org.mockito.Mockito.times(1)).updateOrgIdByIdAndVersion(batchId, 10L, 20L, 0L, 201L);
 
-        // 验证 ARRIVAL 事件仅在首次调用时追加了 1 次，重放时没有追加第 2 次
-        verify(traceEventService, org.mockito.Mockito.times(1)).appendArrivalEvent(
-                eq(batchId), eq(20L), eq(201L), eq(receivedAt), any(), eq(transferId), eq(diffReason)
-        );
     }
 
     @Test
@@ -972,7 +1008,7 @@ class TransferApplicationServiceTest {
 
         Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-CODE-MISMATCH");
 
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
@@ -994,8 +1030,7 @@ class TransferApplicationServiceTest {
                     assertThat(be.getCode()).isEqualTo("TRACE_CODE_ORG_CONFLICT");
                 });
 
-        // 验证决不写入 ARRIVAL 事件和审计记录
-        verify(traceEventService, never()).appendArrivalEvent(any(), any(), any(), any(), any(), any(), any());
+        verify(auditService, never()).recordAudit(any(), any(), eq("ACCEPT"), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1018,7 +1053,7 @@ class TransferApplicationServiceTest {
 
         Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-NO-CODE");
 
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
@@ -1036,7 +1071,6 @@ class TransferApplicationServiceTest {
         assertThat(resp).isNotNull();
         assertThat(resp.status()).isEqualTo(TransferStatus.ACCEPTED);
 
-        verify(traceEventService).appendArrivalEvent(eq(batchId), eq(20L), eq(201L), eq(receivedAt), any(), eq(transferId), any());
     }
 
     @Test
@@ -1059,7 +1093,7 @@ class TransferApplicationServiceTest {
 
         Batch batch = createTestBatch(batchId, 10L, "BATCH-2026-ORG-DIFF");
 
-        when(transferMapper.selectByIdForUpdate(transferId)).thenReturn(transfer);
+        stubLockedTransfer(transfer);
         when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
         when(idempotencyMapper.selectByOrgIdAndKey(20L, idempotencyKey)).thenReturn(null);
         when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("PENDING"), eq(1L))).thenReturn(1);
@@ -1109,6 +1143,188 @@ class TransferApplicationServiceTest {
                     assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
                     assertThat(be.getCode()).isEqualTo("VERSION_CONFLICT");
                 });
+    }
+
+    // =========================================================================
+    // Slice 2：Transfer 与 Shipment 协作契约
+    // =========================================================================
+
+    private Transfer transfer(Long id, Long batchId, TransferStatus status, long version) {
+        Transfer t = new Transfer();
+        t.setId(id);
+        t.setTransferNo("TRF-" + id);
+        t.setBatchId(batchId);
+        t.setSenderOrgId(10L);
+        t.setReceiverOrgId(20L);
+        t.setQuantity(new BigDecimal("500.000"));
+        t.setUnitCode("kg");
+        t.setStatus(status);
+        t.setVersion(version);
+        t.setIsDeleted(0);
+        return t;
+    }
+
+    @Test
+    @DisplayName("创建交接草稿：接收方为承运组织时拒绝，承运商不会成为批次当前责任组织")
+    void createDraft_receiverIsCarrier_rejected() {
+        Organization carrier = new Organization();
+        carrier.setId(40L);
+        carrier.setStatus("ACTIVE");
+        carrier.setOrgType("CARRIER");
+        when(organizationMapper.selectById(40L)).thenReturn(carrier);
+
+        assertThatThrownBy(() -> transferService.createDraft(new TransferCreateRequest(1L, 40L), "idem-create-carrier-01", senderOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("RECEIVER_ORG_TYPE_NOT_ALLOWED");
+        verify(transferMapper, never()).insert(any(Transfer.class));
+    }
+
+    @Test
+    @DisplayName("提交交接：未绑定运输任务时拒绝进入 PENDING，抛出 409 SHIPMENT_NOT_BOUND")
+    void submitTransfer_withoutShipment_rejected() {
+        Transfer t = transfer(8001L, 4001L, TransferStatus.DRAFT, 0L);
+        stubLockedTransfer(t, null);
+
+        assertThatThrownBy(() -> transferService.submitTransfer(8001L, new TransferSubmitRequest(0L), "idem-submit-unbound-01", senderOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("SHIPMENT_NOT_BOUND");
+        verify(transferMapper, never()).updateByIdAndVersion(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("提交交接：绑定的运输任务已非 PLANNED 时拒绝，抛出 409 SHIPMENT_NOT_PLANNED")
+    void submitTransfer_withNonPlannedShipment_rejected() {
+        Transfer t = transfer(8002L, 4002L, TransferStatus.DRAFT, 1L);
+        stubLockedTransfer(t, shipment(ShipmentStatus.CANCELLED));
+
+        assertThatThrownBy(() -> transferService.submitTransfer(8002L, new TransferSubmitRequest(1L), "idem-submit-cancelled-1", senderOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("SHIPMENT_NOT_PLANNED");
+    }
+
+    @Test
+    @DisplayName("提交交接：先锁运输任务再锁交接 (shipment → transfer)")
+    void submitTransfer_locksShipmentBeforeTransfer() {
+        Transfer t = transfer(8003L, 4003L, TransferStatus.DRAFT, 1L);
+        stubLockedTransfer(t);
+        when(batchMapper.selectByIdForUpdate(4003L)).thenReturn(createTestBatch(4003L, 10L, "B-8003"));
+        when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("DRAFT"), eq(1L))).thenReturn(1);
+
+        transferService.submitTransfer(8003L, new TransferSubmitRequest(1L), "idem-submit-lock-order", senderOperator);
+
+        org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(shipmentMapper, transferMapper, batchMapper);
+        inOrder.verify(shipmentMapper).selectByIdForUpdate(SHIPMENT_ID);
+        inOrder.verify(transferMapper).selectByIdForUpdate(8003L);
+        inOrder.verify(batchMapper).selectByIdForUpdate(4003L);
+    }
+
+    @Test
+    @DisplayName("接受交接：运输任务仍在途 (IN_TRANSIT) 时拒绝，抛出 409 SHIPMENT_NOT_DELIVERED，不转移责任组织")
+    void acceptTransfer_whenShipmentInTransit_rejected() {
+        Transfer t = transfer(8004L, 4004L, TransferStatus.PENDING, 1L);
+        stubLockedTransfer(t, shipment(ShipmentStatus.IN_TRANSIT));
+
+        TransferAcceptRequest req = new TransferAcceptRequest(new BigDecimal("500.000"), "kg", OffsetDateTime.now(ZoneOffset.UTC), null, 1L);
+        assertThatThrownBy(() -> transferService.acceptTransfer(8004L, req, "idem-accept-in-transit", receiverOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("SHIPMENT_NOT_DELIVERED");
+        verify(batchMapper, never()).updateOrgIdByIdAndVersion(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("拒收交接：运输任务仍为 PLANNED 时拒绝，抛出 409 SHIPMENT_NOT_DELIVERED")
+    void rejectTransfer_whenShipmentPlanned_rejected() {
+        Transfer t = transfer(8005L, 4005L, TransferStatus.PENDING, 1L);
+        stubLockedTransfer(t, shipment(ShipmentStatus.PLANNED));
+
+        TransferRejectRequest req = new TransferRejectRequest("未到货", OffsetDateTime.now(ZoneOffset.UTC), 1L);
+        assertThatThrownBy(() -> transferService.rejectTransfer(8005L, req, "idem-reject-planned-01", receiverOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("SHIPMENT_NOT_DELIVERED");
+        verify(transferMapper, never()).updateByIdAndVersion(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("接受交接：加锁期间绑定关系被并发修改时返回 409 VERSION_CONFLICT，绝不反向等待运输任务锁")
+    void acceptTransfer_whenBindingChangedDuringLock_versionConflict() {
+        Transfer snapshot = transfer(8006L, 4006L, TransferStatus.PENDING, 1L);
+        snapshot.setShipmentId(SHIPMENT_ID);
+        Transfer locked = transfer(8006L, 4006L, TransferStatus.PENDING, 1L);
+        locked.setShipmentId(SHIPMENT_ID + 1);
+        when(transferMapper.selectById(8006L)).thenReturn(snapshot);
+        when(shipmentMapper.selectByIdForShare(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.DELIVERED));
+        when(transferMapper.selectByIdForUpdate(8006L)).thenReturn(locked);
+
+        TransferAcceptRequest req = new TransferAcceptRequest(new BigDecimal("500.000"), "kg", OffsetDateTime.now(ZoneOffset.UTC), null, 1L);
+        assertThatThrownBy(() -> transferService.acceptTransfer(8006L, req, "idem-accept-rebound-01", receiverOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("VERSION_CONFLICT");
+    }
+
+    @Test
+    @DisplayName("修改草稿：已绑定运输任务的草稿禁止修改接收方，抛出 409 TRANSFER_BOUND_TO_SHIPMENT")
+    void patchDraft_whenBound_rejected() {
+        Transfer t = transfer(8007L, 4007L, TransferStatus.DRAFT, 1L);
+        t.setShipmentId(SHIPMENT_ID);
+        when(transferMapper.selectByIdForUpdate(8007L)).thenReturn(t);
+
+        assertThatThrownBy(() -> transferService.patchDraft(8007L, new TransferPatchRequest(20L, 1L), senderOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("TRANSFER_BOUND_TO_SHIPMENT");
+    }
+
+    @Test
+    @DisplayName("删除已绑定草稿：先锁 PLANNED 运输任务再锁交接，清除绑定并递增运输任务版本")
+    void deleteDraft_whenBound_locksShipmentFirstAndBumpsManifestVersion() {
+        Transfer t = transfer(8008L, 4008L, TransferStatus.DRAFT, 2L);
+        stubLockedTransfer(t);
+        when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("DRAFT"), eq(2L))).thenReturn(1);
+        when(shipmentMapper.bumpManifestVersion(SHIPMENT_ID, 101L)).thenReturn(1);
+
+        transferService.deleteDraft(8008L, 2L, senderOperator);
+
+        org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(shipmentMapper, transferMapper);
+        inOrder.verify(shipmentMapper).selectByIdForUpdate(SHIPMENT_ID);
+        inOrder.verify(transferMapper).selectByIdForUpdate(8008L);
+        org.mockito.ArgumentCaptor<Transfer> captor = org.mockito.ArgumentCaptor.forClass(Transfer.class);
+        inOrder.verify(transferMapper).updateByIdAndVersion(captor.capture(), eq(10L), eq(20L), eq("DRAFT"), eq(2L));
+        inOrder.verify(shipmentMapper).bumpManifestVersion(SHIPMENT_ID, 101L);
+        assertThat(captor.getValue().getIsDeleted()).isEqualTo(1);
+        assertThat(captor.getValue().getShipmentId()).isNull();
+    }
+
+    @Test
+    @DisplayName("删除已绑定草稿：运输任务已发运后禁止变更装载清单，抛出 409 SHIPMENT_NOT_PLANNED")
+    void deleteDraft_whenShipmentInTransit_rejected() {
+        Transfer t = transfer(8009L, 4009L, TransferStatus.DRAFT, 2L);
+        stubLockedTransfer(t, shipment(ShipmentStatus.IN_TRANSIT));
+
+        assertThatThrownBy(() -> transferService.deleteDraft(8009L, 2L, senderOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("SHIPMENT_NOT_PLANNED");
+        verify(transferMapper, never()).updateByIdAndVersion(any(), any(), any(), any(), any());
+        verify(shipmentMapper, never()).bumpManifestVersion(any(), any());
+    }
+
+    @Test
+    @DisplayName("删除未绑定草稿：不锁运输任务、不递增运输任务版本")
+    void deleteDraft_whenUnbound_doesNotTouchShipment() {
+        Transfer t = transfer(8010L, 4010L, TransferStatus.DRAFT, 0L);
+        stubLockedTransfer(t, null);
+        when(transferMapper.updateByIdAndVersion(any(Transfer.class), eq(10L), eq(20L), eq("DRAFT"), eq(0L))).thenReturn(1);
+
+        transferService.deleteDraft(8010L, 0L, senderOperator);
+
+        verify(shipmentMapper, never()).selectByIdForUpdate(any());
+        verify(shipmentMapper, never()).bumpManifestVersion(any(), any());
     }
 
     private String computeHashForTest(String action, Object... params) {

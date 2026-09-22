@@ -144,4 +144,23 @@ public interface TraceEventMapper extends BaseMapper<TraceEvent> {
      */
     @Select("SELECT * FROM trace_event WHERE batch_id = #{batchId} AND status = 'SUBMITTED' AND is_deleted = 0 ORDER BY occurred_at ASC, recorded_at ASC, id ASC")
     List<TraceEvent> selectEffectiveEventsByBatchId(@Param("batchId") Long batchId);
+
+    /**
+     * 查询指定批次下全部追溯事件（含已更正历史版本），供当前责任组织读取完整时间线。
+     *
+     * @param batchId 批次 ID
+     * @return 稳定排序的追溯事件列表
+     */
+    @Select("SELECT * FROM trace_event WHERE batch_id = #{batchId} AND is_deleted = 0 ORDER BY occurred_at ASC, recorded_at ASC, id ASC")
+    List<TraceEvent> selectByBatchId(@Param("batchId") Long batchId);
+
+    /**
+     * 统计某组织在指定批次下记录的追溯事件数（历史参与组织只读判定）。
+     *
+     * @param batchId 批次 ID
+     * @param orgId   组织 ID
+     * @return 事件数
+     */
+    @Select("SELECT COUNT(*) FROM trace_event WHERE batch_id = #{batchId} AND org_id = #{orgId} AND is_deleted = 0")
+    int countByBatchIdAndOrgId(@Param("batchId") Long batchId, @Param("orgId") Long orgId);
 }
