@@ -430,27 +430,24 @@ class BatchOperationMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT
 
         AtomicReference<MvcResult> submitResult = new AtomicReference<>();
         AtomicReference<Throwable> submitError = new AtomicReference<>();
-        try (java.sql.Connection holder = dataSource.getConnection()) {
+        Thread submitter = new Thread(() -> {
+            try {
+                submitResult.set(perform(submitOperationRequest(receiverSession, draft.get("id").asLong(), 0L, key("idem-ti-o"))));
+            } catch (Throwable t) {
+                submitError.set(t);
+            }
+        }, "slice3-operation-submitter");
+        // holder 使用被测应用自身的数据源（trace_user），模拟 Transfer 新建路径：锁定批次行 → 插入交接 → 提交
+        java.sql.Connection holder = dataSource.getConnection();
+        try {
             holder.setAutoCommit(false);
-            // 模拟 Transfer 新建路径：先锁定批次行（与 TransferApplicationService 相同的 FOR UPDATE）
             try (var ps = holder.prepareStatement("SELECT id FROM batch WHERE id = ? FOR UPDATE")) {
                 ps.setLong(1, b0);
                 ps.executeQuery().close();
             }
-            Thread submitter = new Thread(() -> {
-                try {
-                    submitResult.set(perform(submitOperationRequest(receiverSession, draft.get("id").asLong(), 0L, key("idem-ti-o"))));
-                } catch (Throwable t) {
-                    submitError.set(t);
-                }
-            });
             submitter.start();
-            // 等待操作提交事务确实阻塞在批次行锁上（此时它已完成锁前的一致性读）
-            long deadline = System.currentTimeMillis() + 15_000;
-            while (count("SELECT count(*) FROM performance_schema.data_lock_waits") == 0) {
-                assertThat(System.currentTimeMillis()).as("operation submit never waited on the batch row lock").isLessThan(deadline);
-                Thread.sleep(50);
-            }
+            // 确定性同步点：操作提交事务已完成锁前读取，正阻塞在本 schema 的 batch 行锁上
+            awaitRowLockWaitOnBatchTable(submitter);
             try (var ps = holder.prepareStatement(
                     "INSERT INTO transfer (transfer_no, batch_id, sender_org_id, receiver_org_id, quantity, unit_code, status, idempotency_key) "
                             + "VALUES (?, ?, ?, ?, 500.000, 'kg', 'DRAFT', ?)")) {
@@ -462,7 +459,19 @@ class BatchOperationMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT
                 ps.executeUpdate();
             }
             holder.commit();
-            submitter.join(20_000);
+        } finally {
+            // 无论探针或断言是否失败：释放行锁，并等待提交线程结束后再交给 teardown 清理，避免与清理并发写入
+            try {
+                if (!holder.getAutoCommit()) {
+                    holder.rollback();
+                }
+            } finally {
+                holder.close();
+            }
+            if (submitter.getState() != Thread.State.NEW) {
+                submitter.join(30_000);
+                assertThat(submitter.isAlive()).as("operation submit thread did not finish").isFalse();
+            }
         }
         if (submitError.get() != null) {
             throw new AssertionError("operation submit failed", submitError.get());
@@ -473,6 +482,43 @@ class BatchOperationMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT
         assertBatch(b0, "ACTIVE", "NORMAL", "500.000", "SOURCE");
         assertThat(count("SELECT count(*) FROM transfer WHERE batch_id = ? AND status = 'DRAFT'", b0)).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM batch_relation WHERE operation_id = ?", draft.get("id").asLong())).isZero();
+    }
+
+    /**
+     * 等待本 schema 的 batch 表上出现 InnoDB 行锁等待（即操作提交已阻塞在批次行锁上）。
+     * <p>
+     * performance_schema 的锁视图需要管理员权限：被测应用数据源（CI 中为非 root 的 trace_user）不能也不应读取，
+     * 因此仅这一诊断探针沿用 V9 / V10 迁移测试的约定，通过 DB_ROOT_USERNAME / DB_ROOT_PASSWORD 单独建立管理连接；
+     * 应用数据源、权限与业务行为均不变。若提交线程在出现锁等待前就已结束，说明未经过同步点，立即失败。
+     * </p>
+     */
+    private void awaitRowLockWaitOnBatchTable(Thread submitter) throws Exception {
+        String baseUrl = ((com.zaxxer.hikari.HikariDataSource) dataSource).getJdbcUrl();
+        String rootUser = System.getenv().getOrDefault("DB_ROOT_USERNAME", "root");
+        if (rootUser.isBlank()) {
+            rootUser = "root";
+        }
+        String rootPassword = System.getenv().getOrDefault("DB_ROOT_PASSWORD", "");
+        String schema = jdbcTemplate.queryForObject("SELECT DATABASE()", String.class);
+        String probe = "SELECT COUNT(*) FROM performance_schema.data_lock_waits w "
+                + "JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID "
+                + "WHERE l.OBJECT_SCHEMA = ? AND l.OBJECT_NAME = 'batch'";
+        long deadline = System.currentTimeMillis() + 15_000;
+        try (java.sql.Connection admin = java.sql.DriverManager.getConnection(baseUrl, rootUser, rootPassword);
+             java.sql.PreparedStatement ps = admin.prepareStatement(probe)) {
+            ps.setString(1, schema);
+            while (true) {
+                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                    rs.next();
+                    if (rs.getLong(1) > 0) {
+                        return;
+                    }
+                }
+                assertThat(submitter.isAlive()).as("operation submit finished without waiting on the batch row lock").isTrue();
+                assertThat(System.currentTimeMillis()).as("operation submit never waited on the batch row lock").isLessThan(deadline);
+                Thread.sleep(20);
+            }
+        }
     }
 
     @Test
