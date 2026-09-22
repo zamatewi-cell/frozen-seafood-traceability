@@ -6,6 +6,7 @@ import LoginView from '@/views/LoginView.vue'
 import WorkbenchView from '@/views/enterprise/WorkbenchView.vue'
 import BatchListView from '@/views/enterprise/BatchListView.vue'
 import BatchDetailView from '@/views/enterprise/BatchDetailView.vue'
+import SourceBatchCreateView from '@/views/enterprise/SourceBatchCreateView.vue'
 import { installAuthGuard } from './guards'
 
 declare module 'vue-router' {
@@ -62,6 +63,12 @@ export const routes: RouteRecordRaw[] = [
         name: 'BatchList',
         component: BatchListView,
         meta: { title: '批次列表' }
+      },
+      {
+        path: 'batches/new',
+        name: 'SourceBatchCreate',
+        component: SourceBatchCreateView,
+        meta: { title: '新建来源批次' }
       },
       {
         path: 'batches/:id',

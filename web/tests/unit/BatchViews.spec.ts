@@ -38,6 +38,7 @@ function backend(overrides: Overrides = {}) {
     'GET /api/v1/me': () => ({ status: 200, body: envelope(sampleUser) }),
     'GET /api/v1/batches': () => ({ status: 200, body: envelope(batches, { number: 1, size: 20, totalElements: 2, totalPages: 1 }) }),
     'GET /api/v1/batches/12': () => ({ status: 200, body: envelope(batches[0]) }),
+    'GET /api/v1/batches/12/events': () => ({ status: 200, body: envelope([]) }),
     'GET /api/v1/products/5': () => ({ status: 200, body: envelope(products[5]) }),
     'GET /api/v1/products/6': () => ({ status: 200, body: envelope(products[6]) }),
     'GET /api/v1/organizations/30': () => ({ status: 200, body: envelope(organization) }),
@@ -207,7 +208,8 @@ describe('BatchDetailView', () => {
     expect(view.text()).toContain('P-YELLOW')
     expect(view.text()).toContain('2026-08-30')
     expect(view.text()).toContain('365 天')
-    // 只读页面：不提供任何写操作入口
+    // 非来源企业查看 ACTIVE 批次：不提供提交激活等写操作入口
+    expect(view.find('[data-testid="submit-activation"]').exists()).toBe(false)
     expect(view.findAll('.enterprise-main button')).toHaveLength(0)
   })
 

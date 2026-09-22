@@ -18,6 +18,7 @@ import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.masterdata.domain.Product;
 import com.example.traceability.masterdata.mapper.ProductMapper;
+import com.example.traceability.trace.application.TraceEventApplicationService;
 import com.example.traceability.trace.dto.PublicTraceProjectionResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -36,12 +37,15 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -67,12 +71,17 @@ class BatchApplicationServiceTest {
     @Spy
     private TraceBatchNoGenerator traceBatchNoGenerator = new TraceBatchNoGenerator();
 
+    @Mock
+    private TraceEventApplicationService traceEventApplicationService;
+
     @InjectMocks
     private BatchApplicationService batchService;
 
     private TraceSecurityPrincipal operatorPrincipal;
     private TraceSecurityPrincipal adminPrincipal;
     private TraceSecurityPrincipal otherOrgOperatorPrincipal;
+    private TraceSecurityPrincipal processorOperatorPrincipal;
+    private TraceSecurityPrincipal sourceViewerPrincipal;
 
     private Product activeProduct;
     private Product inactiveProduct;
@@ -97,6 +106,18 @@ class BatchApplicationServiceTest {
                 202L, "operator2", "第二企业操作员", "{noop}pwd",
                 20L, "ORG_FISHERY_02", "第二远洋捕捞公司", "SOURCE",
                 List.of("OPERATOR"), List.of("ORG_ONLY"), true, true
+        );
+
+        processorOperatorPrincipal = new TraceSecurityPrincipal(
+                303L, "processor1", "加工企业操作员", "{noop}pwd",
+                30L, "ORG_PROC_01", "东海水产加工有限公司", "PROCESSOR",
+                List.of("OPERATOR"), List.of("ORG_ONLY"), true, true
+        );
+
+        sourceViewerPrincipal = new TraceSecurityPrincipal(
+                404L, "viewer1", "来源企业质检员", "{noop}pwd",
+                10L, "ORG_FISHERY_01", "第一远洋捕捞公司", "SOURCE",
+                List.of("QUALITY_MANAGER"), List.of("ORG_ONLY"), true, true
         );
 
         activeProduct = new Product();
@@ -159,7 +180,7 @@ class BatchApplicationServiceTest {
     @DisplayName("创建批次草稿 - creationOrgId 与 orgId 初始一致，且由服务端强制写入（客户端不可指定）")
     void createDraftBatch_SetsCreationOrgIdEqualToCurrentOrg() {
         BatchCreateRequest req = new BatchCreateRequest(
-                "EXT-CREATION-ORG", 500L, "SOURCE", new BigDecimal("100.000"), "kg",
+                "EXT-CREATION-ORG", 500L, new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "东海舟山渔场3号海域", LocalDate.of(2026, 9, 1), null, null, 180
         );
 
@@ -186,7 +207,7 @@ class BatchApplicationServiceTest {
     @DisplayName("创建幂等作用域为不可变 creationOrgId - 批次已交接转出后重放原始创建请求命中原批次而不重复建批")
     void createDraftBatch_ReplayAfterTransfer_HitsOriginalBatchAndNeverInsertsAgain() {
         BatchCreateRequest req = new BatchCreateRequest(
-                "EXT-REPLAY-001", 500L, "SOURCE", new BigDecimal("300.000"), "kg",
+                "EXT-REPLAY-001", 500L, new BigDecimal("300.000"), "kg",
                 "DOMESTIC_CAPTURE", "东海舟山渔场3号海域", LocalDate.of(2026, 9, 1), null, null, 180
         );
 
@@ -225,7 +246,7 @@ class BatchApplicationServiceTest {
     @DisplayName("创建幂等作用域 - 同 creationOrgId 同 key 但载荷不同仍返回 409 IDEMPOTENCY_KEY_REUSED")
     void createDraftBatch_ReplayAfterTransferWithDifferentPayload_StillConflicts() {
         BatchCreateRequest req = new BatchCreateRequest(
-                "EXT-REPLAY-DIFFERENT", 500L, "SOURCE", new BigDecimal("777.000"), "kg",
+                "EXT-REPLAY-DIFFERENT", 500L, new BigDecimal("777.000"), "kg",
                 "DOMESTIC_CAPTURE", "东海舟山渔场3号海域", LocalDate.of(2026, 9, 1), null, null, 180
         );
 
@@ -257,7 +278,6 @@ class BatchApplicationServiceTest {
         BatchCreateRequest req = new BatchCreateRequest(
                 "   ", // 空白 externalBatchNo，应规范化为 null
                 500L,
-                "SOURCE",
                 new BigDecimal("100.500"),
                 "kg",
                 "DOMESTIC_CAPTURE",
@@ -304,11 +324,11 @@ class BatchApplicationServiceTest {
     @DisplayName("创建批次两次返回由服务端生成的独立 traceBatchNo")
     void createDraftBatch_ServerGeneratesDifferentTraceBatchNos() {
         BatchCreateRequest req1 = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("10.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("10.000"), "kg",
                 "DOMESTIC_CAPTURE", "海域1", null, null, null, null
         );
         BatchCreateRequest req2 = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("10.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("10.000"), "kg",
                 "DOMESTIC_CAPTURE", "海域1", null, null, null, null
         );
 
@@ -331,7 +351,7 @@ class BatchApplicationServiceTest {
     @DisplayName("创建批次草稿失败 - 非 OPERATOR 角色抛出 403 ACCESS_DENIED")
     void createDraftBatch_DeniedForNonOperator() {
         BatchCreateRequest req = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("10.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("10.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
 
@@ -343,14 +363,66 @@ class BatchApplicationServiceTest {
                     assertThat(be.getCode()).isEqualTo("ACCESS_DENIED");
                 });
 
+        // 来源组织内非 OPERATOR 角色同样拒绝
+        assertThatThrownBy(() -> batchService.createDraftBatch(req, VALID_IDEMPOTENCY_KEY, sourceViewerPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("ACCESS_DENIED"));
+
         verify(batchMapper, never()).insert(any(Batch.class));
+    }
+
+    @Test
+    @DisplayName("创建来源批次失败 - 非 SOURCE 组织的 OPERATOR 返回 403 ORG_TYPE_NOT_ALLOWED，且不做幂等查询与落库")
+    void createDraftBatch_DeniedForNonSourceOrganization() {
+        BatchCreateRequest req = new BatchCreateRequest(
+                "EXT-001", 500L, new BigDecimal("10.000"), "kg",
+                "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
+        );
+
+        assertThatThrownBy(() -> batchService.createDraftBatch(req, VALID_IDEMPOTENCY_KEY, processorOperatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(be.getCode()).isEqualTo("ORG_TYPE_NOT_ALLOWED");
+                });
+
+        verify(batchMapper, never()).selectByCreationOrgIdAndIdempotencyKey(anyLong(), anyString());
+        verify(batchMapper, never()).insert(any(Batch.class));
+    }
+
+    @Test
+    @DisplayName("创建来源批次 - batchType 由服务端固定为 SOURCE，初始 DRAFT+NORMAL，单位固定 kg")
+    void createDraftBatch_ServerFixesSourceTypeAndDraftNormal() {
+        BatchCreateRequest req = new BatchCreateRequest(
+                "SRC-2026-001", 500L, new BigDecimal("1000"), "KG",
+                "IMPORT", "  进口原料  ", null, null, null, null
+        );
+        when(batchMapper.selectByCreationOrgIdAndIdempotencyKey(10L, VALID_IDEMPOTENCY_KEY)).thenReturn(null);
+        when(productMapper.selectByIdForUpdate(500L)).thenReturn(activeProduct);
+
+        BatchResponse resp = batchService.createDraftBatch(req, VALID_IDEMPOTENCY_KEY, operatorPrincipal);
+
+        ArgumentCaptor<Batch> captor = ArgumentCaptor.forClass(Batch.class);
+        verify(batchMapper).insert(captor.capture());
+        Batch inserted = captor.getValue();
+        assertThat(inserted.getBatchType()).isEqualTo(BatchType.SOURCE.name());
+        assertThat(inserted.getFlowStatus()).isEqualTo("DRAFT");
+        assertThat(inserted.getRiskStatus()).isEqualTo("NORMAL");
+        assertThat(inserted.getUnitCode()).isEqualTo("kg");
+        assertThat(inserted.getOriginText()).isEqualTo("进口原料");
+        assertThat(inserted.getOrgId()).isEqualTo(10L);
+        assertThat(inserted.getCreationOrgId()).isEqualTo(10L);
+        assertThat(resp.batchType()).isEqualTo("SOURCE");
+        // 创建草稿不产生任何追溯事件
+        verify(traceEventApplicationService, never()).appendSourceEvent(any(), anyLong(), any());
     }
 
     @Test
     @DisplayName("创建批次草稿失败 - 幂等键格式错误返回 400 INVALID_REQUEST")
     void createDraftBatch_InvalidIdempotencyKey() {
         BatchCreateRequest req = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("10.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("10.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
 
@@ -364,20 +436,28 @@ class BatchApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("创建批次草稿失败 - 非法 batchType / originType / unitCode / 数量及保质期返回 400 INVALID_REQUEST")
+    @DisplayName("创建批次草稿失败 - 夹带服务端字段 / 非法 originType / unitCode / 数量及保质期返回 400 INVALID_REQUEST")
     void createDraftBatch_InvalidEnumsOrUnit() {
-        // 非法 batchType
-        BatchCreateRequest reqInvalidBatchType = new BatchCreateRequest(
-                "EXT-001", 500L, "UNKNOWN_TYPE", new BigDecimal("10.000"), "kg",
-                "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
-        );
-        assertThatThrownBy(() -> batchService.createDraftBatch(reqInvalidBatchType, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
-                .isInstanceOf(BusinessException.class)
-                .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("INVALID_REQUEST"));
+        // 客户端夹带 batchType / traceBatchNo / orgId / flowStatus 等服务端字段 -> 400，且不落库
+        for (String forbidden : List.of("batchType", "traceBatchNo", "orgId", "creationOrgId", "flowStatus", "riskStatus", "status")) {
+            BatchCreateRequest reqWithServerField = new BatchCreateRequest(
+                    "EXT-001", 500L, new BigDecimal("10.000"), "kg",
+                    "DOMESTIC_CAPTURE", "来源说明", null, null, null, null,
+                    Map.of(forbidden, "PROCESSING")
+            );
+            assertThatThrownBy(() -> batchService.createDraftBatch(reqWithServerField, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(ex -> {
+                        BusinessException be = (BusinessException) ex;
+                        assertThat(be.getCode()).isEqualTo("INVALID_REQUEST");
+                        assertThat(be.getMessage()).contains(forbidden);
+                    });
+        }
+        verify(batchMapper, never()).insert(any(Batch.class));
 
         // 非法 originType
         BatchCreateRequest reqInvalidOriginType = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("10.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("10.000"), "kg",
                 "UNKNOWN_ORIGIN", "来源说明", null, null, null, null
         );
         assertThatThrownBy(() -> batchService.createDraftBatch(reqInvalidOriginType, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
@@ -386,7 +466,7 @@ class BatchApplicationServiceTest {
 
         // 非法 unitCode (非 kg)
         BatchCreateRequest reqInvalidUnit = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("10.000"), "g",
+                "EXT-001", 500L, new BigDecimal("10.000"), "g",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
         assertThatThrownBy(() -> batchService.createDraftBatch(reqInvalidUnit, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
@@ -395,7 +475,7 @@ class BatchApplicationServiceTest {
 
         // 数量 <= 0
         BatchCreateRequest reqZeroQty = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", BigDecimal.ZERO, "kg",
+                "EXT-001", 500L, BigDecimal.ZERO, "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
         assertThatThrownBy(() -> batchService.createDraftBatch(reqZeroQty, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
@@ -404,7 +484,7 @@ class BatchApplicationServiceTest {
 
         // 数量小数位超过 3 位
         BatchCreateRequest reqScaleQty = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("10.1234"), "kg",
+                "EXT-001", 500L, new BigDecimal("10.1234"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
         assertThatThrownBy(() -> batchService.createDraftBatch(reqScaleQty, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
@@ -413,7 +493,7 @@ class BatchApplicationServiceTest {
 
         // 保质期天数 <= 0
         BatchCreateRequest reqInvalidShelfLife = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("10.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("10.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, 0
         );
         assertThatThrownBy(() -> batchService.createDraftBatch(reqInvalidShelfLife, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
@@ -425,7 +505,7 @@ class BatchApplicationServiceTest {
     @DisplayName("创建批次草稿失败 - 关联产品不存在 404 / 关联产品非 ACTIVE 422")
     void createDraftBatch_ProductValidation() {
         BatchCreateRequest reqNotFound = new BatchCreateRequest(
-                "EXT-001", 999L, "SOURCE", new BigDecimal("10.000"), "kg",
+                "EXT-001", 999L, new BigDecimal("10.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
         when(productMapper.selectByIdForUpdate(999L)).thenReturn(null);
@@ -434,7 +514,7 @@ class BatchApplicationServiceTest {
                 .isInstanceOf(ResourceNotFoundException.class);
 
         BatchCreateRequest reqInactive = new BatchCreateRequest(
-                "EXT-002", 501L, "SOURCE", new BigDecimal("10.000"), "kg",
+                "EXT-002", 501L, new BigDecimal("10.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null
         );
         when(productMapper.selectByIdForUpdate(501L)).thenReturn(inactiveProduct);
@@ -471,7 +551,7 @@ class BatchApplicationServiceTest {
 
         // 1. 相同语义重试 -> 返回原批次
         BatchCreateRequest sameReq = new BatchCreateRequest(
-                "EXT-ORIGINAL", 500L, "SOURCE", new BigDecimal("50.000"), "kg",
+                "EXT-ORIGINAL", 500L, new BigDecimal("50.000"), "kg",
                 "DOMESTIC_CAPTURE", "舟山海域", null, null, null, null
         );
         BatchResponse resp = batchService.createDraftBatch(sameReq, VALID_IDEMPOTENCY_KEY, operatorPrincipal);
@@ -482,7 +562,7 @@ class BatchApplicationServiceTest {
 
         // 2. externalBatchNo 变更 -> 报 IDEMPOTENCY_KEY_REUSED
         BatchCreateRequest diffExternalReq = new BatchCreateRequest(
-                "EXT-CHANGED", 500L, "SOURCE", new BigDecimal("50.000"), "kg",
+                "EXT-CHANGED", 500L, new BigDecimal("50.000"), "kg",
                 "DOMESTIC_CAPTURE", "舟山海域", null, null, null, null
         );
         assertThatThrownBy(() -> batchService.createDraftBatch(diffExternalReq, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
@@ -495,7 +575,7 @@ class BatchApplicationServiceTest {
 
         // 3. 数量不同 -> 报 IDEMPOTENCY_KEY_REUSED
         BatchCreateRequest diffQtyReq = new BatchCreateRequest(
-                "EXT-ORIGINAL", 500L, "SOURCE", new BigDecimal("99.000"), "kg",
+                "EXT-ORIGINAL", 500L, new BigDecimal("99.000"), "kg",
                 "DOMESTIC_CAPTURE", "舟山海域", null, null, null, null
         );
         assertThatThrownBy(() -> batchService.createDraftBatch(diffQtyReq, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
@@ -530,7 +610,7 @@ class BatchApplicationServiceTest {
 
         // 相同载荷重放 -> 即使产品停用也应成功重放，不查产品锁，不报 422
         BatchCreateRequest sameReq = new BatchCreateRequest(
-                "EXT-INA-001", 501L, "SOURCE", new BigDecimal("50.000"), "kg",
+                "EXT-INA-001", 501L, new BigDecimal("50.000"), "kg",
                 "DOMESTIC_CAPTURE", "舟山海域", null, null, null, null
         );
         BatchResponse resp = batchService.createDraftBatch(sameReq, VALID_IDEMPOTENCY_KEY, operatorPrincipal);
@@ -541,7 +621,7 @@ class BatchApplicationServiceTest {
 
         // 不同载荷 -> 优先报 409 IDEMPOTENCY_KEY_REUSED，而非 422 PRODUCT_NOT_ACTIVE
         BatchCreateRequest diffReq = new BatchCreateRequest(
-                "EXT-INA-001", 501L, "SOURCE", new BigDecimal("60.000"), "kg",
+                "EXT-INA-001", 501L, new BigDecimal("60.000"), "kg",
                 "DOMESTIC_CAPTURE", "舟山海域", null, null, null, null
         );
         assertThatThrownBy(() -> batchService.createDraftBatch(diffReq, VALID_IDEMPOTENCY_KEY, operatorPrincipal))
@@ -557,7 +637,7 @@ class BatchApplicationServiceTest {
     @DisplayName("创建批次草稿 - 并发 DuplicateKey 竞态安全恢复（同语义重放成功，不同语义报 IDEMPOTENCY_KEY_REUSED，非幂等键冲突报 DATA_CONFLICT）")
     void createDraftBatch_DuplicateKeyHandling() {
         BatchCreateRequest req = new BatchCreateRequest(
-                "EXT-001", 500L, "SOURCE", new BigDecimal("50.000"), "kg",
+                "EXT-001", 500L, new BigDecimal("50.000"), "kg",
                 "DOMESTIC_CAPTURE", "舟山海域", null, null, null, null
         );
         when(productMapper.selectByIdForUpdate(500L)).thenReturn(activeProduct);
@@ -854,32 +934,37 @@ class BatchApplicationServiceTest {
                 .isInstanceOf(ResourceNotFoundException.class);
     }
 
+    /** 构造本组织创建、仍由本组织负责、来源字段完整的 SOURCE 草稿批次。 */
+    private Batch sourceDraft(Long id, Long orgId, Long productId, long version) {
+        Batch b = new Batch();
+        b.setId(id);
+        b.setOrgId(orgId);
+        b.setCreationOrgId(orgId);
+        b.setProductId(productId);
+        b.setTraceBatchNo("TB-ABCDEFGHJKLMNPQRSTUVWXYZ23");
+        b.setExternalBatchNo("EXT-001");
+        b.setBatchType("SOURCE");
+        b.setQuantity(new BigDecimal("1000.000"));
+        b.setUnitCode("kg");
+        b.setOriginType("DOMESTIC_CAPTURE");
+        b.setOriginText("东海舟山渔场");
+        b.setFlowStatus("DRAFT");
+        b.setRiskStatus("NORMAL");
+        b.setVersion(version);
+        return b;
+    }
+
     @Test
-    @DisplayName("提交批次草稿成功 - 仅允许当前 DRAFT+NORMAL，原子流转为 ACTIVE，risk保持 NORMAL，版本自增")
+    @DisplayName("提交来源批次成功 - DRAFT+NORMAL 原子流转为 ACTIVE+NORMAL，版本自增，并在同一事务内生成 SOURCE 事件")
     void submitDraftBatch_Success() {
-        Batch existing = new Batch();
-        existing.setId(100L);
-        existing.setOrgId(10L);
-        existing.setProductId(500L);
-        existing.setTraceBatchNo("TB-ABCDEFGHJKLMNPQRSTUVWXYZ23");
-        existing.setExternalBatchNo("EXT-001");
-        existing.setFlowStatus("DRAFT");
-        existing.setRiskStatus("NORMAL");
-        existing.setVersion(0L);
+        Batch existing = sourceDraft(100L, 10L, 500L, 0L);
 
         when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(existing);
         when(productMapper.selectByIdForUpdate(500L)).thenReturn(activeProduct);
         when(batchMapper.submitDraftBatch(eq(100L), eq(10L), eq(0L), any(LocalDateTime.class), eq(101L))).thenReturn(1);
 
-        Batch submitted = new Batch();
-        submitted.setId(100L);
-        submitted.setOrgId(10L);
-        submitted.setProductId(500L);
-        submitted.setTraceBatchNo("TB-ABCDEFGHJKLMNPQRSTUVWXYZ23");
-        submitted.setExternalBatchNo("EXT-001");
+        Batch submitted = sourceDraft(100L, 10L, 500L, 1L);
         submitted.setFlowStatus("ACTIVE");
-        submitted.setRiskStatus("NORMAL");
-        submitted.setVersion(1L);
         when(batchMapper.selectByIdAndOrgId(100L, 10L)).thenReturn(submitted);
 
         BatchSubmitRequest submitReq = new BatchSubmitRequest(0L);
@@ -891,6 +976,79 @@ class BatchApplicationServiceTest {
         assertThat(resp.version()).isEqualTo(1L);
         verify(batchMapper).submitDraftBatch(eq(100L), eq(10L), eq(0L), any(LocalDateTime.class), eq(101L));
         verify(productMapper).selectByIdForUpdate(500L);
+
+        // SOURCE 事件使用提交后的最新批次行、当前提交人和与批次更新相同的激活时刻
+        ArgumentCaptor<LocalDateTime> submitTime = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(batchMapper).submitDraftBatch(eq(100L), eq(10L), eq(0L), submitTime.capture(), eq(101L));
+        verify(traceEventApplicationService).appendSourceEvent(submitted, 101L, submitTime.getValue());
+    }
+
+    @Test
+    @DisplayName("提交来源批次 - SOURCE 事件写入失败时异常向上传播（由事务回滚批次激活）")
+    void submitDraftBatch_SourceEventFailurePropagates() {
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(sourceDraft(100L, 10L, 500L, 0L));
+        when(productMapper.selectByIdForUpdate(500L)).thenReturn(activeProduct);
+        when(batchMapper.submitDraftBatch(eq(100L), eq(10L), eq(0L), any(LocalDateTime.class), eq(101L))).thenReturn(1);
+        Batch submitted = sourceDraft(100L, 10L, 500L, 1L);
+        submitted.setFlowStatus("ACTIVE");
+        when(batchMapper.selectByIdAndOrgId(100L, 10L)).thenReturn(submitted);
+        doThrow(new BusinessException(HttpStatus.CONFLICT, "SOURCE_EVENT_CONFLICT", "来源事件冲突", "冲突"))
+                .when(traceEventApplicationService).appendSourceEvent(any(), anyLong(), any());
+
+        assertThatThrownBy(() -> batchService.submitDraftBatch(100L, new BatchSubmitRequest(0L), operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("SOURCE_EVENT_CONFLICT"));
+    }
+
+    @Test
+    @DisplayName("提交来源批次前置失败 - 非来源组织 / 非 OPERATOR 一律 403，且不读取批次")
+    void submitDraftBatch_RejectsNonSourceOrgAndNonOperator() {
+        assertThatThrownBy(() -> batchService.submitDraftBatch(100L, new BatchSubmitRequest(0L), processorOperatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(be.getCode()).isEqualTo("ORG_TYPE_NOT_ALLOWED");
+                });
+        assertThatThrownBy(() -> batchService.submitDraftBatch(100L, new BatchSubmitRequest(0L), sourceViewerPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("ACCESS_DENIED"));
+        verify(batchMapper, never()).selectByIdIgnoreTenant(anyLong());
+        verify(traceEventApplicationService, never()).appendSourceEvent(any(), anyLong(), any());
+    }
+
+    @Test
+    @DisplayName("提交来源批次前置失败 - 非 SOURCE 类型 422 / 来源字段不完整 422 / 责任组织已不是创建组织 403")
+    void submitDraftBatch_RejectsNonSourceTypeIncompleteOriginAndForeignCreator() {
+        BatchSubmitRequest submitReq = new BatchSubmitRequest(0L);
+
+        Batch processing = sourceDraft(100L, 10L, 500L, 0L);
+        processing.setBatchType("PROCESSING");
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(processing);
+        assertThatThrownBy(() -> batchService.submitDraftBatch(100L, submitReq, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+                    assertThat(be.getCode()).isEqualTo("BATCH_TYPE_NOT_SUBMITTABLE");
+                });
+
+        Batch incomplete = sourceDraft(100L, 10L, 500L, 0L);
+        incomplete.setOriginText("  ");
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(incomplete);
+        assertThatThrownBy(() -> batchService.submitDraftBatch(100L, submitReq, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("SOURCE_FIELDS_INCOMPLETE"));
+
+        Batch foreignCreator = sourceDraft(100L, 10L, 500L, 0L);
+        foreignCreator.setCreationOrgId(99L);
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(foreignCreator);
+        assertThatThrownBy(() -> batchService.submitDraftBatch(100L, submitReq, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("ORG_SCOPE_DENIED"));
+
+        verify(batchMapper, never()).submitDraftBatch(anyLong(), anyLong(), anyLong(), any(), anyLong());
+        verify(traceEventApplicationService, never()).appendSourceEvent(any(), anyLong(), any());
     }
 
     @Test
@@ -903,40 +1061,21 @@ class BatchApplicationServiceTest {
                 .isInstanceOf(ResourceNotFoundException.class);
 
         // 2. 跨组织越权提交 -> 403 ORG_SCOPE_DENIED
-        Batch org20Batch = new Batch();
-        org20Batch.setId(100L);
-        org20Batch.setOrgId(20L);
-        org20Batch.setFlowStatus("DRAFT");
-        org20Batch.setRiskStatus("NORMAL");
-        org20Batch.setVersion(0L);
-        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(org20Batch);
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(sourceDraft(100L, 20L, 500L, 0L));
 
         assertThatThrownBy(() -> batchService.submitDraftBatch(100L, submitReq, operatorPrincipal))
                 .isInstanceOf(BusinessException.class)
                 .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("ORG_SCOPE_DENIED"));
 
         // 3. 版本不一致 -> 409 VERSION_CONFLICT
-        Batch versionMismatchBatch = new Batch();
-        versionMismatchBatch.setId(100L);
-        versionMismatchBatch.setOrgId(10L);
-        versionMismatchBatch.setFlowStatus("DRAFT");
-        versionMismatchBatch.setRiskStatus("NORMAL");
-        versionMismatchBatch.setVersion(1L);
-        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(versionMismatchBatch);
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(sourceDraft(100L, 10L, 500L, 1L));
 
         assertThatThrownBy(() -> batchService.submitDraftBatch(100L, submitReq, operatorPrincipal))
                 .isInstanceOf(BusinessException.class)
                 .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("VERSION_CONFLICT"));
 
         // 4. 关联产品停用 -> 422 PRODUCT_NOT_ACTIVE
-        Batch draftBatch = new Batch();
-        draftBatch.setId(100L);
-        draftBatch.setOrgId(10L);
-        draftBatch.setProductId(501L);
-        draftBatch.setFlowStatus("DRAFT");
-        draftBatch.setRiskStatus("NORMAL");
-        draftBatch.setVersion(0L);
-        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(draftBatch);
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(sourceDraft(100L, 10L, 501L, 0L));
         when(productMapper.selectByIdForUpdate(501L)).thenReturn(inactiveProduct);
 
         assertThatThrownBy(() -> batchService.submitDraftBatch(100L, submitReq, operatorPrincipal))
@@ -946,16 +1085,13 @@ class BatchApplicationServiceTest {
                     assertThat(be.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
                     assertThat(be.getCode()).isEqualTo("PRODUCT_NOT_ACTIVE");
                 });
+        verify(traceEventApplicationService, never()).appendSourceEvent(any(), anyLong(), any());
     }
 
     @Test
     @DisplayName("提交批次草稿失败 - ACTIVE/FROZEN/RECALLED 等非 DRAFT+NORMAL 状态一律报 409 INVALID_STATE_TRANSITION")
     void submitDraftBatch_RejectsNonDraftNormal() {
-        Batch existing = new Batch();
-        existing.setId(100L);
-        existing.setOrgId(10L);
-        existing.setProductId(500L);
-        existing.setVersion(0L);
+        Batch existing = sourceDraft(100L, 10L, 500L, 0L);
 
         // ACTIVE + NORMAL -> 409
         existing.setFlowStatus("ACTIVE");
@@ -976,27 +1112,15 @@ class BatchApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("提交批次草稿 - submit 返回 0 且当前锁定读状态已变为 ACTIVE 时，精准报 409 INVALID_STATE_TRANSITION")
+    @DisplayName("提交批次草稿 - submit 返回 0 且当前锁定读状态已变为 ACTIVE 时，精准报 409 INVALID_STATE_TRANSITION，且不生成 SOURCE")
     void submitDraftBatch_AffectedRowsZero_StatusChanged_ThrowsInvalidStateTransition() {
-        Batch existing = new Batch();
-        existing.setId(100L);
-        existing.setOrgId(10L);
-        existing.setProductId(500L);
-        existing.setFlowStatus("DRAFT");
-        existing.setRiskStatus("NORMAL");
-        existing.setVersion(0L);
-
-        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(existing);
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(sourceDraft(100L, 10L, 500L, 0L));
         when(productMapper.selectByIdForUpdate(500L)).thenReturn(activeProduct);
         when(batchMapper.submitDraftBatch(eq(100L), eq(10L), eq(0L), any(LocalDateTime.class), eq(101L))).thenReturn(0);
 
         // 当前锁定读重查：并发线程已完成提交流转为 ACTIVE
-        Batch concurrentSubmitted = new Batch();
-        concurrentSubmitted.setId(100L);
-        concurrentSubmitted.setOrgId(10L);
+        Batch concurrentSubmitted = sourceDraft(100L, 10L, 500L, 1L);
         concurrentSubmitted.setFlowStatus("ACTIVE");
-        concurrentSubmitted.setRiskStatus("NORMAL");
-        concurrentSubmitted.setVersion(1L);
         when(batchMapper.selectByIdIgnoreTenantForUpdate(100L)).thenReturn(concurrentSubmitted);
 
         BatchSubmitRequest submitReq = new BatchSubmitRequest(0L);
@@ -1009,31 +1133,18 @@ class BatchApplicationServiceTest {
                 });
 
         verify(batchMapper).selectByIdIgnoreTenantForUpdate(100L);
+        verify(traceEventApplicationService, never()).appendSourceEvent(any(), anyLong(), any());
     }
 
     @Test
     @DisplayName("提交批次草稿 - submit 返回 0 且当前锁定读仍为 DRAFT+NORMAL 但版本递增时，精准报 409 VERSION_CONFLICT")
     void submitDraftBatch_AffectedRowsZero_VersionMismatch_ThrowsVersionConflict() {
-        Batch existing = new Batch();
-        existing.setId(100L);
-        existing.setOrgId(10L);
-        existing.setProductId(500L);
-        existing.setFlowStatus("DRAFT");
-        existing.setRiskStatus("NORMAL");
-        existing.setVersion(0L);
-
-        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(existing);
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(sourceDraft(100L, 10L, 500L, 0L));
         when(productMapper.selectByIdForUpdate(500L)).thenReturn(activeProduct);
         when(batchMapper.submitDraftBatch(eq(100L), eq(10L), eq(0L), any(LocalDateTime.class), eq(101L))).thenReturn(0);
 
         // 当前锁定读重查：状态仍为 DRAFT+NORMAL，但版本已被并发线程更新
-        Batch concurrentUpdated = new Batch();
-        concurrentUpdated.setId(100L);
-        concurrentUpdated.setOrgId(10L);
-        concurrentUpdated.setFlowStatus("DRAFT");
-        concurrentUpdated.setRiskStatus("NORMAL");
-        concurrentUpdated.setVersion(1L);
-        when(batchMapper.selectByIdIgnoreTenantForUpdate(100L)).thenReturn(concurrentUpdated);
+        when(batchMapper.selectByIdIgnoreTenantForUpdate(100L)).thenReturn(sourceDraft(100L, 10L, 500L, 1L));
 
         BatchSubmitRequest submitReq = new BatchSubmitRequest(0L);
         assertThatThrownBy(() -> batchService.submitDraftBatch(100L, submitReq, operatorPrincipal))
@@ -1050,15 +1161,7 @@ class BatchApplicationServiceTest {
     @Test
     @DisplayName("提交批次草稿 - submit 返回 0 且当前锁定读显示跨组织时，精准报 403 ORG_SCOPE_DENIED；被物理删除时报 404")
     void submitDraftBatch_AffectedRowsZero_CrossOrgAndNotFound() {
-        Batch existing = new Batch();
-        existing.setId(100L);
-        existing.setOrgId(10L);
-        existing.setProductId(500L);
-        existing.setFlowStatus("DRAFT");
-        existing.setRiskStatus("NORMAL");
-        existing.setVersion(0L);
-
-        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(existing);
+        when(batchMapper.selectByIdIgnoreTenant(100L)).thenReturn(sourceDraft(100L, 10L, 500L, 0L));
         when(productMapper.selectByIdForUpdate(500L)).thenReturn(activeProduct);
         when(batchMapper.submitDraftBatch(eq(100L), eq(10L), eq(0L), any(LocalDateTime.class), eq(101L))).thenReturn(0);
 

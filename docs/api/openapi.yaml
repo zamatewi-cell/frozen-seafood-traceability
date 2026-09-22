@@ -341,12 +341,21 @@ paths:
         '403': {$ref: '#/components/responses/Problem'}
     post:
       tags: [Batches]
-      summary: 创建批次草稿（仅限企业操作员）
+      summary: 创建来源批次草稿（仅限来源组织的企业操作员）
       description: |
-        仅 OPERATOR 角色可调用。服务端生成全局唯一 `traceBatchNo`，客户端**不能**指定或覆盖；
-        请求体中夹带的 `traceBatchNo`、`orgId`、`creationOrgId`、`flowStatus`、`riskStatus` 等服务端字段会被忽略。
-        新批次为 `DRAFT` + `NORMAL`，`orgId`（当前责任组织）与内部 `creationOrgId`（创建组织）均为当前登录组织。
-        `Idempotency-Key` 的作用域是不可变的创建组织；同 key 同载荷重放返回原批次，同 key 不同载荷返回 409 `IDEMPOTENCY_KEY_REUSED`。
+        企业端公开创建接口**只**建立来源批次：
+        - 仅当前登录组织 `orgType=SOURCE` 且用户具有 `OPERATOR` 角色时可调用；
+          非 SOURCE 组织返回 403 `ORG_TYPE_NOT_ALLOWED`，非 OPERATOR 返回 403 `ACCESS_DENIED`。
+        - `batchType` 由服务端固定为 `SOURCE`，客户端不能选择或指定任何批次类型；
+          PROCESSING 等输出批次未来只能由 BatchOperation 产生，本接口不创建。
+        - 新批次固定为 `DRAFT` + `NORMAL`；`orgId`（当前责任组织）与内部 `creationOrgId`（创建组织）均取自当前 Session。
+        - `traceBatchNo` 由服务端生成、全局唯一、只读，客户端**不能**指定或覆盖；`externalBatchNo` 可选、可重复（同组织与跨组织均可），不作为批次身份。
+        - `unitCode` 在 Demo MVP 中固定为 `kg`。
+        - 请求体只接受 `CreateBatchRequest` 声明的字段；夹带 `batchType`、`traceBatchNo`、`orgId`、`creationOrgId`、
+          `flowStatus`、`riskStatus`、`status` 或任何其他未声明字段时返回 400 `INVALID_REQUEST`，不会静默忽略。
+        - `Idempotency-Key` 的作用域是不可变的创建组织；同 key 同载荷重放返回原批次，同 key 不同载荷返回 409 `IDEMPOTENCY_KEY_REUSED`。
+        - 关联产品不存在返回 404 `RESOURCE_NOT_FOUND`；产品非 ACTIVE 返回 422 `PRODUCT_NOT_ACTIVE`。
+        - 创建草稿不产生任何追溯事件。
       operationId: createBatch
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -357,7 +366,7 @@ paths:
             schema: {$ref: '#/components/schemas/CreateBatchRequest'}
       responses:
         '201':
-          description: 批次草稿
+          description: 来源批次草稿（batchType=SOURCE，flowStatus=DRAFT，riskStatus=NORMAL）
           content:
             application/json:
               schema: {$ref: '#/components/schemas/BatchEnvelope'}
@@ -410,8 +419,22 @@ paths:
       - {$ref: '#/components/parameters/BatchId'}
     post:
       tags: [Batches]
-      summary: 提交激活批次草稿（仅限企业操作员）
-      description: '`DRAFT` + `NORMAL` → `ACTIVE` + `NORMAL`；关联产品必须为 ACTIVE。'
+      summary: 提交激活来源批次（仅限来源组织的企业操作员），并自动生成 SOURCE 追溯事件
+      description: |
+        状态流转：`DRAFT` + `NORMAL` → `ACTIVE` + `NORMAL`，使用 `version` 乐观锁。前提条件与错误：
+        - 当前登录组织 `orgType=SOURCE` 且具有 `OPERATOR` 角色，否则 403 `ORG_TYPE_NOT_ALLOWED` / `ACCESS_DENIED`；
+        - 批次当前责任组织必须是本组织，且仍是创建该批次的来源组织，否则 403 `ORG_SCOPE_DENIED`；
+        - 批次不存在 404 `RESOURCE_NOT_FOUND`；
+        - 仅 `DRAFT` + `NORMAL` 可提交，否则 409 `INVALID_STATE_TRANSITION`；版本不一致 409 `VERSION_CONFLICT`；
+        - 仅 `batchType=SOURCE` 可经本接口激活，否则 422 `BATCH_TYPE_NOT_SUBMITTABLE`；
+        - 来源类型与来源描述必须完整，否则 422 `SOURCE_FIELDS_INCOMPLETE`；关联产品必须仍为 ACTIVE，否则 422 `PRODUCT_NOT_ACTIVE`。
+
+        **副作用**：激活成功时，在同一数据库事务内自动追加且仅追加一条 SOURCE 追溯事件
+        （`eventType=SOURCE`、`status=SUBMITTED`、`orgId`=来源组织、`operatorId`=提交人、`dataSource=MANUAL`，
+        `occurredAt` 为提交激活时刻；`detailsJson` 保存 `sourceObjectType=BATCH`、`sourceObjectId`、`traceBatchNo`、`productId`、
+        `originType`、`originText`、`quantity`、`unitCode`、可用的 `productionDate`/`captureDate`/`freezeDate`/`shelfLifeDays`
+        与 `occurredAtBasis=BATCH_ACTIVATION`）。事件身份由服务端基于批次 ID 决定，同一批次无论并发或重复请求都至多一条 SOURCE；
+        SOURCE 写入失败时批次激活整体回滚并返回 409 `SOURCE_EVENT_CONFLICT`。
       operationId: submitBatch
       requestBody:
         required: true
@@ -420,7 +443,7 @@ paths:
             schema: {$ref: '#/components/schemas/SubmitBatchRequest'}
       responses:
         '200':
-          description: 批次已激活
+          description: 来源批次已激活为 ACTIVE/NORMAL，且已生成唯一 SOURCE 追溯事件
           content:
             application/json:
               schema: {$ref: '#/components/schemas/BatchEnvelope'}
@@ -558,6 +581,10 @@ paths:
     post:
       tags: [Trace]
       summary: 提交批次追溯事件（仅限企业操作员）
+      description: |
+        受控人工事件接口。`eventType=SOURCE` 只能由来源批次提交激活自动生成，本接口拒绝创建，返回 422 `EVENT_TYPE_NOT_MANUAL`。
+        `Idempotency-Key` 不得以服务端保留前缀 `SYS:` 开头（400 `INVALID_REQUEST`）。
+        批次必须为 `ACTIVE` + `NORMAL`，否则 422 `BATCH_FLOW_BLOCKED`；跨组织 403 `ORG_SCOPE_DENIED`；同 key 不同载荷 409 `IDEMPOTENCY_CONFLICT`。
       operationId: createTraceEvent
       parameters:
         - {$ref: '#/components/parameters/BatchId'}
@@ -595,6 +622,9 @@ paths:
     post:
       tags: [Trace]
       summary: 对历史追溯事件提交追加式更正记录（仅限企业操作员）
+      description: |
+        不能把事件更正为 `SOURCE`（422 `EVENT_TYPE_NOT_MANUAL`），也不能更正由系统自动生成的 SOURCE 事件（422 `AUTO_EVENT_NOT_CORRECTABLE`）。
+        `Idempotency-Key` 不得以服务端保留前缀 `SYS:` 开头（400 `INVALID_REQUEST`）。
       operationId: correctTraceEvent
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -1136,8 +1166,9 @@ components:
               items: {$ref: '#/components/schemas/TemperatureRule'}
     BatchType:
       type: string
+      readOnly: true
       enum: [SOURCE, PROCESSING, DISTRIBUTION, SALE]
-      description: 批次环节类型 (SOURCE 来源/捕捞, PROCESSING 加工速冻, DISTRIBUTION 分销仓储, SALE 终端销售)
+      description: 批次环节类型（只读，由服务端决定）(SOURCE 来源/捕捞, PROCESSING 加工速冻, DISTRIBUTION 分销仓储, SALE 终端销售)；企业端创建接口只产生 SOURCE
     OriginType:
       type: string
       enum: [DOMESTIC_CAPTURE, DOMESTIC_FARMED, IMPORT]
@@ -1187,13 +1218,16 @@ components:
         updatedBy: {type: integer, format: int64}
     CreateBatchRequest:
       type: object
-      description: 不包含 `traceBatchNo`、`orgId`、`creationOrgId`、`flowStatus`、`riskStatus`；这些字段由服务端决定，客户端夹带时被忽略。
-      required: [productId, batchType, quantity, unitCode, originType, originText]
+      additionalProperties: false
+      description: |
+        来源批次创建请求。不包含 `batchType`、`traceBatchNo`、`orgId`、`creationOrgId`、`flowStatus`、`riskStatus`；
+        这些字段由服务端决定（batchType 固定 SOURCE，状态固定 DRAFT/NORMAL，组织取自 Session），
+        客户端夹带任何未声明字段时返回 400 `INVALID_REQUEST`。
+      required: [productId, quantity, unitCode, originType, originText]
       properties:
         externalBatchNo: {type: string, maxLength: 64, description: 可选企业外部批号，可重复；空白视为未填写}
-        productId: {type: integer, format: int64}
-        batchType: {$ref: '#/components/schemas/BatchType'}
-        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次声明数量}
+        productId: {type: integer, format: int64, description: 关联产品 ID，必须为 ACTIVE}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次声明数量（大于 0，最多 3 位小数）}
         unitCode: {type: string, enum: [kg], example: kg}
         originType: {$ref: '#/components/schemas/OriginType'}
         originText: {type: string, maxLength: 255}
@@ -1311,7 +1345,7 @@ components:
         - TRANSPORT
         - ARRIVAL
         - SALE
-      description: 追溯事件类型枚举（仅限系统规定的10个环节）
+      description: 追溯事件类型枚举（仅限系统规定的10个环节）；SOURCE 只由来源批次提交激活自动生成，人工事件接口不得创建或更正为 SOURCE
     TraceEventDetailsJson:
       type: [object, 'null']
       maxProperties: 20

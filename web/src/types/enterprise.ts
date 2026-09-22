@@ -54,6 +54,47 @@ export interface Batch {
   updatedBy?: number
 }
 
+export type OriginType = 'DOMESTIC_CAPTURE' | 'DOMESTIC_FARMED' | 'IMPORT'
+
+export const ORIGIN_TYPES: readonly OriginType[] = ['DOMESTIC_CAPTURE', 'DOMESTIC_FARMED', 'IMPORT']
+
+/**
+ * 来源批次创建请求（POST /api/v1/batches）。
+ * 只包含企业可填写的字段；batchType、traceBatchNo、orgId、flowStatus、riskStatus 等由服务端决定，绝不发送。
+ */
+export interface CreateSourceBatchRequest {
+  externalBatchNo?: string
+  productId: number
+  quantity: number
+  /** Demo MVP 固定为 kg */
+  unitCode: 'kg'
+  originType: OriginType
+  originText: string
+  productionDate?: string
+  captureDate?: string
+  freezeDate?: string
+  shelfLifeDays?: number
+}
+
+export type TraceEventDetailValue = string | number | boolean | null
+
+export interface TraceEvent {
+  id: number
+  batchId: number
+  orgId: number
+  siteId?: number
+  eventType: string
+  occurredAt: string
+  recordedAt: string
+  operatorId?: number
+  dataSource: string
+  status: 'SUBMITTED' | 'CORRECTED' | string
+  summary: string
+  detailsJson?: Record<string, TraceEventDetailValue>
+  correctsEventId?: number
+  correctionReason?: string
+}
+
 export interface BatchListQuery {
   page: number
   size: number

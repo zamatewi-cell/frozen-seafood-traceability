@@ -5,6 +5,7 @@ import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import { listBatches } from '@/api/batches'
 import { ApiError } from '@/api/client'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
+import { useSession } from '@/stores/session'
 import {
   BATCH_FLOW_STATUSES,
   BATCH_RISK_STATUSES,
@@ -14,6 +15,7 @@ import {
 } from '@/types/enterprise'
 import type { PageMeta } from '@/types/api'
 import { formatFlowStatus, formatQuantity, formatRiskStatus } from '@/utils/formatters'
+import { canManageSourceBatches } from '@/utils/permissions'
 import { parseBatchListQuery, rememberBatchListQuery, toRouteQuery } from './batchQuery'
 
 type LoadState = 'loading' | 'loaded' | 'error'
@@ -21,6 +23,8 @@ type LoadState = 'loading' | 'loaded' | 'error'
 const route = useRoute()
 const router = useRouter()
 const directory = useDirectoryLabels()
+const { user } = useSession()
+const canCreateSourceBatch = computed(() => canManageSourceBatches(user.value))
 
 const loadState = ref<LoadState>('loading')
 const batches = ref<Batch[]>([])
@@ -106,6 +110,14 @@ onBeforeUnmount(() => activeRequest?.abort())
         <h1 class="ent-page-title">批次列表</h1>
         <p class="ent-page-subtitle">仅显示当前责任组织为本组织的批次（数据来自服务端实时查询）。</p>
       </div>
+      <RouterLink
+        v-if="canCreateSourceBatch"
+        to="/app/batches/new"
+        class="ent-button primary-link"
+        data-testid="new-source-batch"
+      >
+        ＋ 新建来源批次
+      </RouterLink>
     </div>
 
     <section class="ent-card filter-bar" aria-label="批次筛选">
@@ -216,6 +228,16 @@ onBeforeUnmount(() => activeRequest?.abort())
 </template>
 
 <style scoped>
+.primary-link {
+  background-color: var(--color-ocean);
+  border-color: var(--color-ocean);
+  color: #ffffff;
+  font-weight: 600;
+}
+.primary-link:hover {
+  background-color: var(--color-ocean-hover);
+  color: #ffffff;
+}
 .filter-bar {
   display: flex;
   align-items: flex-end;

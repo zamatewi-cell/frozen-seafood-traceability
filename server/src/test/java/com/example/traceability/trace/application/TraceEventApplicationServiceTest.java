@@ -194,7 +194,7 @@ class TraceEventApplicationServiceTest {
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "SOURCE", OCCURRED_AT, null, "MANUAL", "捕捞出海", null
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "捕捞出海", null
             );
 
             assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
@@ -218,7 +218,7 @@ class TraceEventApplicationServiceTest {
                 when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
                 CreateTraceEventRequest req = new CreateTraceEventRequest(
-                        "SOURCE", OCCURRED_AT, null, "MANUAL", "操作测试", null
+                        "FREEZE", OCCURRED_AT, null, "MANUAL", "操作测试", null
                 );
 
                 assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
@@ -298,7 +298,7 @@ class TraceEventApplicationServiceTest {
             existing.setBatchId(1000L);
             existing.setOrgId(10L);
             existing.setOperatorId(100L);
-            existing.setEventType("SOURCE");
+            existing.setEventType("FREEZE");
             existing.setOccurredAt(OCCURRED_AT.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
             existing.setRecordedAt(LocalDateTime.now(ZoneOffset.UTC));
             existing.setSiteId(null);
@@ -312,7 +312,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.selectByOrgIdAndIdempotencyKey(10L, VALID_KEY)).thenReturn(existing);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "SOURCE", OCCURRED_AT, null, "MANUAL", "东海初次捕捞", null
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "东海初次捕捞", null
             );
 
             TraceEventResponse resp = eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1);
@@ -329,7 +329,7 @@ class TraceEventApplicationServiceTest {
             existing.setBatchId(1000L);
             existing.setOrgId(10L);
             existing.setOperatorId(100L);
-            existing.setEventType("SOURCE");
+            existing.setEventType("FREEZE");
             existing.setOccurredAt(OCCURRED_AT.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
             existing.setRecordedAt(LocalDateTime.now(ZoneOffset.UTC));
             existing.setSiteId(null);
@@ -344,7 +344,7 @@ class TraceEventApplicationServiceTest {
 
             // 不同摘要
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "SOURCE", OCCURRED_AT, null, "MANUAL", "不同摘要载荷", null
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "不同摘要载荷", null
             );
 
             assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
@@ -946,6 +946,148 @@ class TraceEventApplicationServiceTest {
 
             assertThatThrownBy(() -> eventService.listEvents(999L, operatorOrg1))
                     .isInstanceOf(ResourceNotFoundException.class);
+        }
+    }
+
+    @Nested
+    @DisplayName("SOURCE 自动投影与人工接口禁止伪造")
+    class SourceEventTests {
+
+        private Batch activatedSourceBatch() {
+            Batch b = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
+            b.setProductId(500L);
+            b.setTraceBatchNo("TB-ABCDEFGHJKLMNPQRSTUVWXYZ23");
+            b.setBatchType("SOURCE");
+            b.setQuantity(new java.math.BigDecimal("1000.000"));
+            b.setUnitCode("kg");
+            b.setOriginType("DOMESTIC_CAPTURE");
+            b.setOriginText("东海舟山渔场");
+            b.setCaptureDate(java.time.LocalDate.of(2026, 9, 1));
+            b.setShelfLifeDays(365);
+            return b;
+        }
+
+        @Test
+        @DisplayName("appendSourceEvent：SOURCE/SUBMITTED、来源组织与提交人、服务端幂等身份、结构化 detailsJson、激活时刻")
+        void appendSourceEvent_WritesStructuredFacts() throws Exception {
+            LocalDateTime activatedAt = LocalDateTime.of(2026, 9, 21, 8, 30, 0, 123_000_000);
+
+            eventService.appendSourceEvent(activatedSourceBatch(), 100L, activatedAt);
+
+            ArgumentCaptor<TraceEvent> captor = ArgumentCaptor.forClass(TraceEvent.class);
+            verify(traceEventMapper).insert(captor.capture());
+            TraceEvent event = captor.getValue();
+            assertThat(event.getEventType()).isEqualTo("SOURCE");
+            assertThat(event.getStatus()).isEqualTo("SUBMITTED");
+            assertThat(event.getBatchId()).isEqualTo(1000L);
+            assertThat(event.getOrgId()).isEqualTo(10L);
+            assertThat(event.getOperatorId()).isEqualTo(100L);
+            assertThat(event.getDataSource()).isEqualTo("MANUAL");
+            assertThat(event.getIdempotencyKey()).isEqualTo("SYS:SOURCE:BATCH:1000");
+            assertThat(event.getOccurredAt()).isEqualTo(activatedAt);
+            assertThat(event.getRecordedAt()).isEqualTo(activatedAt);
+            assertThat(event.getCorrectsEventId()).isNull();
+
+            Map<String, Object> details = objectMapper.readValue(event.getDetailsJson(), new tools.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            assertThat(details)
+                    .containsEntry("sourceObjectType", "BATCH")
+                    .containsEntry("sourceObjectId", 1000)
+                    .containsEntry("traceBatchNo", "TB-ABCDEFGHJKLMNPQRSTUVWXYZ23")
+                    .containsEntry("productId", 500)
+                    .containsEntry("originType", "DOMESTIC_CAPTURE")
+                    .containsEntry("originText", "东海舟山渔场")
+                    .containsEntry("quantity", "1000.000")
+                    .containsEntry("unitCode", "kg")
+                    .containsEntry("captureDate", "2026-09-01")
+                    .containsEntry("shelfLifeDays", 365)
+                    .containsEntry("occurredAtBasis", "BATCH_ACTIVATION")
+                    .doesNotContainKeys("productionDate", "freezeDate");
+        }
+
+        @Test
+        @DisplayName("appendSourceEvent：身份冲突转为 409 SOURCE_EVENT_CONFLICT（调用方事务整体回滚）")
+        void appendSourceEvent_DuplicateIdentity_Conflict() {
+            when(traceEventMapper.insert(any(TraceEvent.class))).thenThrow(new DuplicateKeyException("uk_trace_event_org_idempotency"));
+
+            assertThatThrownBy(() -> eventService.appendSourceEvent(activatedSourceBatch(), 100L, LocalDateTime.now()))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> {
+                        BusinessException be = (BusinessException) e;
+                        assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                        assertThat(be.getCode()).isEqualTo("SOURCE_EVENT_CONFLICT");
+                    });
+        }
+
+        @Test
+        @DisplayName("appendSourceEvent 必须在既有事务中调用 (Propagation.MANDATORY)")
+        void appendSourceEvent_RequiresExistingTransaction() throws Exception {
+            var method = TraceEventApplicationService.class.getMethod("appendSourceEvent", Batch.class, Long.class, LocalDateTime.class);
+            var tx = method.getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+            assertThat(tx).isNotNull();
+            assertThat(tx.propagation()).isEqualTo(org.springframework.transaction.annotation.Propagation.MANDATORY);
+        }
+
+        @Test
+        @DisplayName("人工创建 SOURCE 被拒绝 (422 EVENT_TYPE_NOT_MANUAL)，不读取批次、不落库")
+        void createEvent_Source_Rejected() {
+            CreateTraceEventRequest req = new CreateTraceEventRequest(
+                    "source", OCCURRED_AT, null, "MANUAL", "伪造来源", null
+            );
+
+            assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> {
+                        BusinessException be = (BusinessException) e;
+                        assertThat(be.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+                        assertThat(be.getCode()).isEqualTo("EVENT_TYPE_NOT_MANUAL");
+                    });
+            verify(batchMapper, never()).selectByIdIgnoreTenantForUpdate(anyLong());
+            verify(traceEventMapper, never()).insert(any(TraceEvent.class));
+        }
+
+        @Test
+        @DisplayName("人工更正为 SOURCE 被拒绝；更正既有 SOURCE 事件被拒绝 (422 AUTO_EVENT_NOT_CORRECTABLE)")
+        void correctEvent_SourceRejected() {
+            CorrectTraceEventRequest toSource = new CorrectTraceEventRequest(
+                    "SOURCE", OCCURRED_AT, null, "MANUAL", "改为来源", null, "伪造"
+            );
+            assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, toSource, VALID_KEY, operatorOrg1))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> assertThat(((BusinessException) e).getCode()).isEqualTo("EVENT_TYPE_NOT_MANUAL"));
+
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            TraceEvent sourceEvent = new TraceEvent();
+            sourceEvent.setId(500L);
+            sourceEvent.setBatchId(1000L);
+            sourceEvent.setOrgId(10L);
+            sourceEvent.setEventType("SOURCE");
+            sourceEvent.setStatus(TraceEventStatus.SUBMITTED.name());
+            when(traceEventMapper.selectByIdIgnoreTenantForUpdate(500L)).thenReturn(sourceEvent);
+
+            CorrectTraceEventRequest overwriteSource = new CorrectTraceEventRequest(
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "覆盖来源", null, "试图作废来源事件"
+            );
+            assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, overwriteSource, VALID_KEY, operatorOrg1))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> {
+                        BusinessException be = (BusinessException) e;
+                        assertThat(be.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+                        assertThat(be.getCode()).isEqualTo("AUTO_EVENT_NOT_CORRECTABLE");
+                    });
+            verify(traceEventMapper, never()).insert(any(TraceEvent.class));
+            verify(traceEventMapper, never()).updateStatusToCorrected(anyLong(), anyLong(), anyLong(), anyLong(), any());
+        }
+
+        @Test
+        @DisplayName("人工接口不得使用服务端保留的 SYS: 幂等键前缀 (400 INVALID_REQUEST)")
+        void manualIdempotencyKey_ReservedPrefix_Rejected() {
+            CreateTraceEventRequest req = new CreateTraceEventRequest(
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "抢占来源身份", null
+            );
+            assertThatThrownBy(() -> eventService.createEvent(1000L, req, "sys:SOURCE:BATCH:1001", operatorOrg1))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> assertThat(((BusinessException) e).getCode()).isEqualTo("INVALID_REQUEST"));
+            verify(traceEventMapper, never()).insert(any(TraceEvent.class));
         }
     }
 }
