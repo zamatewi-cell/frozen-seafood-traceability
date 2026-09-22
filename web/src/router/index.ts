@@ -7,6 +7,11 @@ import WorkbenchView from '@/views/enterprise/WorkbenchView.vue'
 import BatchListView from '@/views/enterprise/BatchListView.vue'
 import BatchDetailView from '@/views/enterprise/BatchDetailView.vue'
 import SourceBatchCreateView from '@/views/enterprise/SourceBatchCreateView.vue'
+import TransferCreateView from '@/views/enterprise/TransferCreateView.vue'
+import ShipmentListView from '@/views/enterprise/ShipmentListView.vue'
+import ShipmentCreateView from '@/views/enterprise/ShipmentCreateView.vue'
+import ShipmentDetailView from '@/views/enterprise/ShipmentDetailView.vue'
+import InboundTransferListView from '@/views/enterprise/InboundTransferListView.vue'
 import { installAuthGuard } from './guards'
 
 declare module 'vue-router' {
@@ -76,6 +81,38 @@ export const routes: RouteRecordRaw[] = [
         component: BatchDetailView,
         props: true,
         meta: { title: '批次详情' }
+      },
+      {
+        path: 'batches/:id/transfers/new',
+        name: 'TransferCreate',
+        component: TransferCreateView,
+        props: true,
+        meta: { title: '发起交接' }
+      },
+      {
+        path: 'shipments',
+        name: 'ShipmentList',
+        component: ShipmentListView,
+        meta: { title: '运输任务' }
+      },
+      {
+        path: 'shipments/new',
+        name: 'ShipmentCreate',
+        component: ShipmentCreateView,
+        meta: { title: '新建运输任务' }
+      },
+      {
+        path: 'shipments/:id',
+        name: 'ShipmentDetail',
+        component: ShipmentDetailView,
+        props: true,
+        meta: { title: '运输任务详情' }
+      },
+      {
+        path: 'transfers/inbound',
+        name: 'InboundTransfers',
+        component: InboundTransferListView,
+        meta: { title: '待接收交接' }
       },
       {
         path: ':pathMatch(.*)*',

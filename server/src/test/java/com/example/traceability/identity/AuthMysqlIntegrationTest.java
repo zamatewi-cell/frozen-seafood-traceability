@@ -312,8 +312,8 @@ class AuthMysqlIntegrationTest {
     }
 
     @Test
-    @DisplayName("真实 MySQL: 组织目录读取仅返回本组织白名单摘要，读取其他组织返回 403 ORG_SCOPE_DENIED")
-    void organizationDirectoryReadIsScopedToOwnOrganization() throws Exception {
+    @DisplayName("真实 MySQL: 组织目录只返回白名单摘要；Slice 2 起交易对手组织同样只读返回白名单摘要（不含信用代码等字段）")
+    void organizationDirectoryReadReturnsWhitelistOnly() throws Exception {
         String rawPassword = generateRandomPassword();
         TestFixture fixture = createTestFixture(rawPassword, "ACTIVE", "ACTIVE");
 
@@ -349,9 +349,11 @@ class AuthMysqlIntegrationTest {
                 .andExpect(jsonPath("$.data.version").doesNotExist());
 
         mockMvc.perform(get("/api/v1/organizations/" + otherOrg.getId()).session(session))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value("ORG_SCOPE_DENIED"))
-                .andExpect(jsonPath("$.data").doesNotExist());
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.name").value(otherOrg.getName()))
+                .andExpect(jsonPath("$.data.orgType").value("RETAILER"))
+                .andExpect(jsonPath("$.data.creditCode").doesNotExist())
+                .andExpect(jsonPath("$.data.version").doesNotExist());
 
         mockMvc.perform(get("/api/v1/organizations/" + fixture.org().getId()))
                 .andExpect(status().isUnauthorized())

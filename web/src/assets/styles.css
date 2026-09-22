@@ -241,3 +241,152 @@ button {
 .ent-muted {
   color: var(--color-text-light);
 }
+
+/* ===================== 交接与运输页面共用样式 ===================== */
+.ent-back-link {
+  margin-bottom: 14px;
+}
+
+.ent-button.ent-primary {
+  background-color: var(--color-ocean);
+  border-color: var(--color-ocean);
+  color: #ffffff;
+}
+
+.ent-button.ent-primary:hover:not(:disabled) {
+  background-color: var(--color-ocean-hover);
+  color: #ffffff;
+}
+
+.ent-button.ent-danger {
+  color: var(--color-danger-text);
+  border-color: var(--color-danger-border);
+}
+
+.ent-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px 18px;
+}
+
+.ent-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.ent-field.wide {
+  grid-column: 1 / -1;
+}
+
+.ent-field em {
+  color: var(--color-danger-text);
+  font-style: normal;
+}
+
+.ent-field input,
+.ent-field select,
+.ent-field textarea {
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border-dark);
+  border-radius: var(--radius-sm);
+  background-color: #ffffff;
+  color: var(--color-text-body);
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.ent-field small {
+  color: var(--color-text-muted);
+}
+
+.ent-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.ent-flash {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  text-align: left;
+}
+
+.ent-flash.success {
+  color: var(--color-success-text);
+  background-color: var(--color-success-bg);
+  border: 1px solid var(--color-success-border);
+}
+
+.ent-flash.warning {
+  color: var(--color-warning-text);
+  background-color: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+}
+
+.ent-flash.error {
+  color: var(--color-danger-text);
+  background-color: var(--color-danger-bg);
+  border: 1px solid var(--color-danger-border);
+}
+
+.ent-next-step {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border-left: 4px solid var(--color-ocean);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-ocean-subtle);
+  font-size: 13px;
+  color: var(--color-text-body);
+}
+
+.ent-next-step strong {
+  color: var(--color-ocean-hover);
+}
+
+.ent-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.ent-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.ent-table th,
+.ent-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.ent-table th {
+  color: var(--color-text-muted);
+  font-weight: 600;
+  background-color: #f8fafc;
+}
+
+.ent-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.ent-tabs .ent-button[aria-pressed='true'] {
+  border-color: var(--color-ocean);
+  background-color: var(--color-ocean-subtle);
+  color: var(--color-ocean-hover);
+  font-weight: 600;
+}

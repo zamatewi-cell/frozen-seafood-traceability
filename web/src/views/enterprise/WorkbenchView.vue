@@ -3,13 +3,15 @@ import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useSession } from '@/stores/session'
 import { formatOrgType } from '@/utils/formatters'
-import { canManageSourceBatches } from '@/utils/permissions'
+import { canManageSourceBatches, canShip, isCarrierOperator } from '@/utils/permissions'
 
 const { user } = useSession()
 
 const roles = computed(() => (user.value?.roles.length ? user.value.roles.join('、') : '无'))
 const scopes = computed(() => (user.value?.scopes.length ? user.value.scopes.join('、') : '无'))
 const canCreateSourceBatch = computed(() => canManageSourceBatches(user.value))
+const isCarrier = computed(() => isCarrierOperator(user.value))
+const canSend = computed(() => canShip(user.value))
 </script>
 
 <template>
@@ -53,7 +55,29 @@ const canCreateSourceBatch = computed(() => canManageSourceBatches(user.value))
         </RouterLink>
         <RouterLink to="/app/batches" class="entry-item" data-testid="entry-batches">
           <strong>我的批次</strong>
-          <span>查看当前由本组织负责的追溯批次，按流转状态与风险状态筛选。</span>
+          <span>查看当前由本组织负责的追溯批次，按流转状态与风险状态筛选；在批次详情中发起交接。</span>
+        </RouterLink>
+        <RouterLink
+          v-if="isCarrier"
+          :to="{ path: '/app/shipments', query: { role: 'CARRIER' } }"
+          class="entry-item"
+          data-testid="entry-carrier-shipments"
+        >
+          <strong>承运任务</strong>
+          <span>查看指派给本企业的运输任务，确认装载发运与到达。</span>
+        </RouterLink>
+        <RouterLink
+          v-if="canSend"
+          :to="{ path: '/app/shipments', query: { role: 'SENDER' } }"
+          class="entry-item"
+          data-testid="entry-shipments"
+        >
+          <strong>运输任务</strong>
+          <span>创建运输任务、装载交接草稿并提交交接。</span>
+        </RouterLink>
+        <RouterLink v-if="!isCarrier" to="/app/transfers/inbound" class="entry-item" data-testid="entry-inbound">
+          <strong>待接收交接</strong>
+          <span>运输任务到达后接受或拒收发往本企业的交接；接受后本企业成为批次当前责任组织。</span>
         </RouterLink>
         <RouterLink to="/trace" class="entry-item">
           <strong>消费者追溯查询</strong>

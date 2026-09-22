@@ -122,3 +122,108 @@ export interface Product {
   status: string
   version: number
 }
+
+export interface SiteSummary {
+  id: number
+  orgId: number
+  siteNo: string
+  name: string
+  siteType: string
+  status: string
+}
+
+export type TransferStatus = 'DRAFT' | 'PENDING' | 'ACCEPTED' | 'REJECTED'
+export type ShipmentStatus = 'PLANNED' | 'IN_TRANSIT' | 'DELIVERED' | 'CANCELLED'
+
+export const SHIPMENT_STATUSES: readonly ShipmentStatus[] = ['PLANNED', 'IN_TRANSIT', 'DELIVERED', 'CANCELLED']
+
+/**
+ * 企业间整批交接（责任交接凭证）。只有 ACCEPTED 会改变批次当前责任组织；
+ * 提交前必须绑定 PLANNED 运输任务，接受 / 拒收前运输任务必须已 DELIVERED。
+ */
+export interface Transfer {
+  id: number
+  transferNo: string
+  batchId: number
+  traceBatchNo?: string
+  shipmentId?: number
+  shipmentNo?: string
+  shipmentStatus?: ShipmentStatus
+  senderOrgId: number
+  receiverOrgId: number
+  quantity: number
+  unitCode: string
+  status: TransferStatus
+  submittedRecordedAt?: string
+  submittedBy?: number
+  receivedAt?: string
+  decisionRecordedAt?: string
+  decidedBy?: number
+  receivedQuantity?: number
+  differenceReason?: string
+  rejectionReason?: string
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TransferListQuery {
+  direction?: 'SENT' | 'RECEIVED'
+  status?: TransferStatus
+  batchId?: number
+  page: number
+  size: number
+}
+
+export interface ShipmentPartyRef {
+  id: number
+  orgNo?: string
+  name?: string
+  orgType?: string
+}
+
+export interface ShipmentTransferItem {
+  transferId: number
+  transferNo: string
+  batchId: number
+  traceBatchNo?: string
+  quantity: number
+  unitCode: string
+  status: TransferStatus
+  version: number
+}
+
+/** 一次物理冷链运输；Shipment 与承运商从不改变批次当前责任组织。 */
+export interface Shipment {
+  id: number
+  shipmentNo: string
+  status: ShipmentStatus
+  senderOrg: ShipmentPartyRef
+  receiverOrg: ShipmentPartyRef
+  carrierOrg: ShipmentPartyRef
+  vehicleOrContainerNo: string
+  originSite?: SiteSummary
+  destinationSite?: SiteSummary
+  loadedAt?: string
+  unloadedAt?: string
+  dispatchedRecordedAt?: string
+  dispatchedBy?: number
+  deliveredRecordedAt?: string
+  deliveredBy?: number
+  cancelledRecordedAt?: string
+  cancelledBy?: number
+  cancelReason?: string
+  transfers: ShipmentTransferItem[]
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export type ShipmentRole = 'SENDER' | 'CARRIER' | 'RECEIVER'
+
+export interface ShipmentListQuery {
+  role?: ShipmentRole
+  status?: ShipmentStatus
+  page: number
+  size: number
+}

@@ -6,6 +6,8 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
+import java.util.List;
+
 /**
  * 场所数据访问接口。
  *
@@ -23,4 +25,13 @@ public interface SiteMapper extends BaseMapper<Site> {
      */
     @Select("SELECT * FROM site WHERE id = #{id} AND is_deleted = 0")
     Site selectByIdIgnoreTenant(@Param("id") Long id);
+
+    /**
+     * 查询指定组织下全部启用场所（按场所编号稳定排序），用于运输任务起止场所选择。
+     *
+     * @param orgId 组织 ID
+     * @return 启用场所列表
+     */
+    @Select("SELECT * FROM site WHERE org_id = #{orgId} AND status = 'ACTIVE' AND is_deleted = 0 ORDER BY site_no ASC, id ASC")
+    List<Site> selectActiveByOrgId(@Param("orgId") Long orgId);
 }

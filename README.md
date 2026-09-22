@@ -89,6 +89,8 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 - [x] 完成 Phase 3 响应式消费者追溯 Web 生产前端（Issue #19 / PR #20 已合并到主分支：Vue 3 + TypeScript + Vite 8、移动优先查询页、真实性披露、Vitest、Playwright、真实 Vue → Spring Boot → MySQL 8.4 冒烟与独立前端 CI）
 - [x] 完成 Phase 3 企业间整批交接生命周期（Issue #21：FR-TRANSFER-001 跨组织整批交接生命周期 DRAFT -> PENDING -> ACCEPTED | REJECTED、双时间维度独立留痕、批次持有组织原子转移与数量快照防篡改、拒收不转移与不生成事件、同名批次排他回滚、在途批次加工排他预留、多动作独立幂等表、open_batch_id 虚拟生成列排他唯一索引与 Flyway V7 物理约束）
 - [x] 确认统一业务契约 v1.1 与 Demo MVP 实施路线图
+- [x] 完成 Phase A Slice 2：Transfer + Shipment（Flyway V9；运输任务 PLANNED → IN_TRANSIT → DELIVERED / CANCELLED；提交前必须绑定 PLANNED 运输任务、到达后接收方才能接受或拒收；TRANSPORT / ARRIVAL 仅由运输任务发运 / 到达按批次各生成一条，ACCEPT 不再生成 ARRIVAL；发出交接、运输任务、承运与待接收生产页面；真实三账号浏览器验收 `npm run test:smoke`，手工验收 `SMOKE_KEEP=true npm run test:smoke`）
+  - Demo MVP Phase A 阶段性限制：承运方必须是独立的 `CARRIER` 类型组织，承运组织不能作为发货方或交接接收方。统一业务契约 v1.1 未规定承运方必须与发送 / 接收方不同，因此该限制只在应用层执行，没有写入数据库永久约束。
 - [ ] 完成 Phase 0：Batch 双状态、双编号及企业端基础壳纠偏
 - [ ] 完成 Phase A：来源建批至消费者查询的正常业务闭环
 - [ ] 完成 Phase B：温度异常、隔离与模拟召回闭环

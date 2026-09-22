@@ -1,15 +1,19 @@
-/**
- * Phase 0 + Phase A / Slice 1 真实浏览器冒烟：真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue。
+﻿/**
+ * Phase 0 + Phase A / Slice 1 + Slice 2 真实浏览器冒烟：真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue。
  *
  * 1. 在 MySQL 8.4 容器中新建隔离 schema（seafood_trace_phase0_demo_<随机后缀>），绝不触碰 seafood_trace；
- * 2. 以进程级随机 pepper 启动 Spring Boot（Flyway 在空 schema 上执行 V1~V8）；
+ * 2. 以进程级随机 pepper 启动 Spring Boot（Flyway 在空 schema 上执行 V1~V9）；
  * 3. 通过 SQL 准备基础资料（两个来源组织、角色、账号、产品），通过真实 HTTP API（CSRF + Session）创建与提交来源批次、激活公开码；
  *    Phase 0 没有冻结 / 召回 / 关闭接口，FROZEN、RECALLED、CLOSED 状态在隔离 schema 中直接写入以验证展示与筛选；
  * 4. Playwright 在不使用任何拦截或替身的情况下走完整企业端与消费者路径，并在浏览器中真实新建、激活来源批次 SRC-2026-001；
  * 5. 浏览器结束后直接查询 MySQL，确认 SRC-2026-001 为 ACTIVE/NORMAL 且恰好一条 SOURCE 事件；
- * 6. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
+ * 6. Slice 2：另建独立的来源 / 承运 / 加工三个组织、账号与场所，并以来源账号通过真实 API 创建并激活 1000kg 来源批次 B0；
+ *    Playwright 以三个隔离浏览器上下文走完 Transfer + Shipment 全链，结束后查询 MySQL 验证全部验收事实；
+ * 7. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
  *
  * 密码、pepper、Cookie 与 CSRF 凭据只在进程环境与内存中传递，从不打印。
+ * 例外：SMOKE_KEEP=true 手工验收模式只准备 Slice 2 基础资料，打印一次三个临时账号供人工在真实浏览器中操作，
+ * 并保持 Spring Boot 与 Vite 运行，直到按 Ctrl+C 后清理；这些账号只存在于随后被删除的隔离 schema 中。
  */
 import { randomBytes, randomUUID, pbkdf2Sync } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
@@ -271,21 +275,150 @@ function verifyBrowserCreatedSourceBatch(orgA) {
   console.log(`[smoke] MySQL 确认浏览器新建来源批次: ${traceBatchNo} SOURCE ACTIVE/NORMAL 1000 kg，SOURCE 事件 ${sourceCount} 条（服务端幂等身份 ${serverKeyCount} 条）`)
 }
 
-function runBrowserSmoke(env) {
+/**
+ * Slice 2 基础资料：独立的来源 / 承运 / 加工组织与 OPERATOR 账号，来源码头与加工厂两个场所。
+ * 只准备基础资料，不预造任何交接或运输单据。
+ */
+function seedSlice2MasterData(suffix, passwords) {
+  mysql(`
+    START TRANSACTION;
+    SET @role = (SELECT id FROM role WHERE role_code = 'OPERATOR');
+    INSERT INTO organization (org_no, name, org_type, status) VALUES ('S2_SRC_${suffix}', 'Slice2来源捕捞企业_${suffix}', 'SOURCE', 'ACTIVE');
+    SET @src = LAST_INSERT_ID();
+    INSERT INTO organization (org_no, name, org_type, status) VALUES ('S2_CAR_${suffix}', 'Slice2冷链承运企业_${suffix}', 'CARRIER', 'ACTIVE');
+    SET @car = LAST_INSERT_ID();
+    INSERT INTO organization (org_no, name, org_type, status) VALUES ('S2_PRC_${suffix}', 'Slice2水产加工企业_${suffix}', 'PROCESSOR', 'ACTIVE');
+    SET @prc = LAST_INSERT_ID();
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@src, 's2_src_${suffix}', 'Slice2来源操作员', ${sqlText(springPbkdf2(passwords.source))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@car, 's2_car_${suffix}', 'Slice2承运操作员', ${sqlText(springPbkdf2(passwords.carrier))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@prc, 's2_prc_${suffix}', 'Slice2加工操作员', ${sqlText(springPbkdf2(passwords.processor))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@src, 'S2-PORT', 'Slice2沈家门码头', 'PORT', 'ACTIVE');
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@prc, 'S2-FACTORY', 'Slice2舟山加工厂', 'FACTORY', 'ACTIVE');
+    COMMIT;
+  `, { database: schema })
+  const ids = mysql(`SELECT
+      (SELECT id FROM organization WHERE org_no = 'S2_SRC_${suffix}'),
+      (SELECT id FROM organization WHERE org_no = 'S2_CAR_${suffix}'),
+      (SELECT id FROM organization WHERE org_no = 'S2_PRC_${suffix}');`, { database: schema }).split('\t').map(Number)
+  return {
+    sourceOrgId: ids[0],
+    carrierOrgId: ids[1],
+    processorOrgId: ids[2],
+    sourceOrgName: `Slice2来源捕捞企业_${suffix}`,
+    carrierOrgName: `Slice2冷链承运企业_${suffix}`,
+    processorOrgName: `Slice2水产加工企业_${suffix}`,
+    sourceSiteName: 'Slice2沈家门码头',
+    processorSiteName: 'Slice2舟山加工厂',
+    usernames: { source: `s2_src_${suffix}`, carrier: `s2_car_${suffix}`, processor: `s2_prc_${suffix}` }
+  }
+}
+
+/** B0：来源企业通过 Slice 1 真实 API 创建并激活的 1000kg ACTIVE/NORMAL 来源批次。 */
+async function seedSlice2SourceBatch(master, productId, password) {
+  const session = new ApiSession()
+  await session.login(master.usernames.source, password)
+  return createBatch(session, {
+    productId, externalBatchNo: 'S2-B0', quantity: 1000, unitCode: 'kg',
+    originType: 'DOMESTIC_CAPTURE', originText: '东海舟山渔场（Slice 2 验收）', captureDate: '2026-09-20', shelfLifeDays: 365
+  }, true)
+}
+
+/** Slice 2 最终数据库事实：T0 ACCEPTED、S0 DELIVERED、B0 责任组织为加工企业且 ACTIVE/NORMAL 1000kg、TRANSPORT / ARRIVAL 各一条。 */
+function verifySlice2Database(master, b0Id) {
+  const row = mysql(`SELECT
+      (SELECT COUNT(*) FROM transfer WHERE batch_id = ${b0Id} AND is_deleted = 0),
+      (SELECT status FROM transfer WHERE batch_id = ${b0Id} AND is_deleted = 0 LIMIT 1),
+      (SELECT s.status FROM shipment s JOIN transfer t ON t.shipment_id = s.id WHERE t.batch_id = ${b0Id} LIMIT 1),
+      (SELECT s.loaded_at <= s.unloaded_at FROM shipment s JOIN transfer t ON t.shipment_id = s.id WHERE t.batch_id = ${b0Id} LIMIT 1),
+      (SELECT s.carrier_org_id = ${master.carrierOrgId} AND s.sender_org_id = ${master.sourceOrgId} AND s.receiver_org_id = ${master.processorOrgId}
+         FROM shipment s JOIN transfer t ON t.shipment_id = s.id WHERE t.batch_id = ${b0Id} LIMIT 1),
+      b.org_id = ${master.processorOrgId}, b.flow_status, b.risk_status, b.quantity,
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.event_type = 'TRANSPORT'),
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.event_type = 'ARRIVAL'),
+      (SELECT COUNT(*) FROM trace_event e JOIN transfer t ON t.batch_id = e.batch_id
+         WHERE e.batch_id = b.id AND e.event_type IN ('TRANSPORT', 'ARRIVAL')
+           AND JSON_UNQUOTE(JSON_EXTRACT(e.details_json, '$.sourceObjectType')) = 'SHIPMENT'
+           AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.details_json, '$.shipmentId')) AS UNSIGNED) = t.shipment_id),
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.idempotency_key LIKE 'TRANSFER_ARRIVAL_%'),
+      (SELECT COUNT(*) FROM trace_event e JOIN transfer t ON t.batch_id = e.batch_id
+         WHERE e.batch_id = b.id AND e.event_type = 'ARRIVAL' AND e.recorded_at <= t.decision_recorded_at),
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.org_id = ${master.carrierOrgId})
+    FROM batch b WHERE b.id = ${b0Id};`, { database: schema })
+  const [transferCount, transferStatus, shipmentStatus, timeOrder, parties, ownedByProcessor, flow, risk, quantity,
+    transportCount, arrivalCount, fromShipmentCount, legacyArrivalCount, arrivalBeforeAccept, carrierOrgEvents] = row.split('\t')
+  const facts = {
+    'T0 = ACCEPTED': transferCount === '1' && transferStatus === 'ACCEPTED',
+    'S0 = DELIVERED': shipmentStatus === 'DELIVERED',
+    'S0 loaded_at <= unloaded_at': timeOrder === '1',
+    'S0 sender/carrier/receiver = SOURCE/CARRIER/PROCESSOR': parties === '1',
+    'B0 responsibleOrgId = PROCESSOR': ownedByProcessor === '1',
+    'B0 = ACTIVE + NORMAL': flow === 'ACTIVE' && risk === 'NORMAL',
+    'B0 quantity = 1000kg': Number(quantity) === 1000,
+    'TRANSPORT = 1': transportCount === '1',
+    'ARRIVAL = 1': arrivalCount === '1',
+    'TRANSPORT / ARRIVAL 来源为该运输任务': fromShipmentCount === '2',
+    'ACCEPT 未生成 ARRIVAL（无 TRANSFER_ARRIVAL_* 事件）': legacyArrivalCount === '0',
+    'ARRIVAL 登记早于 ACCEPT 决定': arrivalBeforeAccept === '1',
+    '承运商从未成为事件记录 / 责任组织': carrierOrgEvents === '0'
+  }
+  for (const [fact, ok] of Object.entries(facts)) console.log(`[smoke] MySQL ${ok ? '✔' : '✘'} ${fact}`)
+  if (Object.values(facts).some((ok) => !ok)) throw new Error(`Slice 2 数据库事实不符合预期: ${row}`)
+  console.log('[smoke] MySQL trace_event（B0）:')
+  console.log(mysql(`SELECT id, event_type, org_id, site_id, occurred_at, idempotency_key FROM trace_event WHERE batch_id = ${b0Id} ORDER BY occurred_at, id;`, { database: schema })
+    .split('\n').map((line) => `  ${line}`).join('\n'))
+}
+
+function startViteDevServer() {
   const npmCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm'
-  const npmArgs = process.platform === 'win32'
-    ? ['/d', '/s', '/c', 'npm.cmd run test:e2e -- tests/e2e/real-smoke.spec.ts --project=desktop --workers=1']
-    : ['run', 'test:e2e', '--', 'tests/e2e/real-smoke.spec.ts', '--project=desktop', '--workers=1']
-  const result = spawnSync(npmCommand, npmArgs, {
+  const npmArgs = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm.cmd run dev'] : ['run', 'dev']
+  return spawn(npmCommand, npmArgs, {
     cwd: webDir,
-    env: { ...process.env, ...env, REAL_SMOKE: 'true', VITE_BACKEND_PROXY_TARGET: backendOrigin },
+    env: { ...process.env, VITE_BACKEND_PROXY_TARGET: backendOrigin },
     stdio: 'inherit'
   })
-  if (result.status !== 0) throw new Error(`真实前后端浏览器冒烟失败，退出码 ${result.status}`)
+}
+
+function waitForInterrupt() {
+  return new Promise((resolvePromise) => {
+    process.once('SIGINT', resolvePromise)
+    process.once('SIGTERM', resolvePromise)
+  })
+}
+
+/**
+ * 异步运行 Playwright：必须保持 Node 事件循环持续读取 Spring Boot 的 stdout/stderr 管道。
+ * 若使用 spawnSync 阻塞事件循环，后端日志会填满管道缓冲区，后端在写日志时被阻塞，请求随之挂起。
+ */
+function runBrowserSmoke(env, spec = 'tests/e2e/real-smoke.spec.ts') {
+  const npmCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm'
+  const npmArgs = process.platform === 'win32'
+    ? ['/d', '/s', '/c', `npm.cmd run test:e2e -- ${spec} --project=desktop --workers=1`]
+    : ['run', 'test:e2e', '--', spec, '--project=desktop', '--workers=1']
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(npmCommand, npmArgs, {
+      cwd: webDir,
+      windowsVerbatimArguments: process.platform === 'win32',
+      env: { ...process.env, ...env, REAL_SMOKE: 'true', VITE_BACKEND_PROXY_TARGET: backendOrigin },
+      stdio: 'inherit'
+    })
+    child.once('error', reject)
+    child.once('exit', (code) => {
+      if (code === 0) resolvePromise()
+      else reject(new Error(`真实前后端浏览器冒烟失败（${spec}），退出码 ${code}`))
+    })
+  })
 }
 
 let backend
+let viteServer
 let schemaCreated = false
+const keepForManualAcceptance = process.env.SMOKE_KEEP === 'true'
 let primaryError
 const backendLog = { value: '' }
 
@@ -306,6 +439,31 @@ try {
   const passwordA = `P0!${randomBytes(18).toString('base64url')}`
   const passwordB = `P0!${randomBytes(18).toString('base64url')}`
   const master = seedMasterData(suffix, passwordA, passwordB)
+  const slice2Passwords = {
+    source: `S2!${randomBytes(18).toString('base64url')}`,
+    carrier: `S2!${randomBytes(18).toString('base64url')}`,
+    processor: `S2!${randomBytes(18).toString('base64url')}`
+  }
+  const slice2 = seedSlice2MasterData(suffix, slice2Passwords)
+  const b0 = await seedSlice2SourceBatch(slice2, master.productFish, slice2Passwords.source)
+  console.log(`[smoke] Slice 2 B0 已由来源账号经真实 API 创建并激活: ${b0.traceBatchNo} ${b0.flowStatus}/${b0.riskStatus} ${b0.quantity} ${b0.unitCode}`)
+
+  if (keepForManualAcceptance) {
+    viteServer = startViteDevServer()
+    console.log('[smoke] ===== SMOKE_KEEP 手工验收模式（账号只存在于本次隔离 schema，退出时随 schema 删除）=====')
+    console.log('[smoke] 浏览器地址: http://localhost:5173/login  （建议三个独立浏览器 Profile）')
+    console.log(`[smoke] 来源企业 ${slice2.sourceOrgName}: ${slice2.usernames.source} / ${slice2Passwords.source}`)
+    console.log(`[smoke] 承运企业 ${slice2.carrierOrgName}: ${slice2.usernames.carrier} / ${slice2Passwords.carrier}`)
+    console.log(`[smoke] 加工企业 ${slice2.processorOrgName}: ${slice2.usernames.processor} / ${slice2Passwords.processor}`)
+    console.log(`[smoke] B0: /app/batches/${b0.id}  (${b0.traceBatchNo}, 1000 kg ACTIVE/NORMAL)`)
+    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 数据库事实，再停止服务并删除 schema。')
+    await waitForInterrupt()
+    try {
+      verifySlice2Database(slice2, b0.id)
+    } catch (verifyError) {
+      console.error(verifyError.message)
+    }
+  } else {
   const fixture = await seedBusinessData(suffix, master, passwordA, passwordB)
   console.log('[smoke] MySQL batch 表（id, trace_batch_no, external_batch_no, flow, risk, 属于登录组织）:')
   console.log(databaseEvidence(master.orgA).split('\n').map((line) => `  ${line}`).join('\n'))
@@ -322,16 +480,38 @@ try {
     foreign: fixture.foreign.traceBatchNo,
     publicTraceId: fixture.publicTraceId
   }
-  runBrowserSmoke({
+  await runBrowserSmoke({
     SMOKE_USERNAME: `p0_src_a_${suffix}`,
     SMOKE_PASSWORD: passwordA,
     SMOKE_EXPECTED: JSON.stringify(expected)
   })
   verifyBrowserCreatedSourceBatch(master.orgA)
   console.log('[smoke] 真实 Vue → Vite proxy → Spring Boot → MySQL 8.4 企业端、来源建批与消费者冒烟通过')
+
+  await runBrowserSmoke({
+    SLICE2_SOURCE_USERNAME: slice2.usernames.source,
+    SLICE2_SOURCE_PASSWORD: slice2Passwords.source,
+    SLICE2_CARRIER_USERNAME: slice2.usernames.carrier,
+    SLICE2_CARRIER_PASSWORD: slice2Passwords.carrier,
+    SLICE2_PROCESSOR_USERNAME: slice2.usernames.processor,
+    SLICE2_PROCESSOR_PASSWORD: slice2Passwords.processor,
+    SLICE2_EXPECTED: JSON.stringify({
+      b0Id: b0.id,
+      b0TraceBatchNo: b0.traceBatchNo,
+      sourceOrgName: slice2.sourceOrgName,
+      carrierOrgName: slice2.carrierOrgName,
+      processorOrgName: slice2.processorOrgName,
+      sourceSiteName: slice2.sourceSiteName,
+      processorSiteName: slice2.processorSiteName
+    })
+  }, 'tests/e2e/real-slice2.spec.ts')
+  verifySlice2Database(slice2, b0.id)
+  console.log('[smoke] Slice 2 真实三账号 Transfer + Shipment 浏览器验收与 MySQL 事实校验通过')
+  }
 } catch (error) {
   primaryError = error
 } finally {
+  stopProcessTree(viteServer)
   stopProcessTree(backend)
   if (schemaCreated) {
     try {

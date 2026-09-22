@@ -159,6 +159,30 @@ public class GlobalExceptionHandler {
         return buildResponseEntity(problem, HttpStatus.BAD_REQUEST);
     }
 
+    /** 捕获缺失的必填查询参数（例如 DELETE 的 expectedVersion）与无法转换类型的路径 / 查询参数。 */
+    @ExceptionHandler({
+            org.springframework.web.bind.MissingServletRequestParameterException.class,
+            org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class
+    })
+    public ResponseEntity<Problem> handleRequestParameterException(Exception ex, HttpServletRequest request) {
+        String detail = ex instanceof org.springframework.web.bind.MissingServletRequestParameterException missing
+                ? "缺少必填请求参数: " + missing.getParameterName()
+                : "请求参数类型与接口契约不匹配";
+        Problem problem = Problem.builder()
+                .type(URI.create("https://example.invalid/problems/invalid-request"))
+                .title("请求参数无效")
+                .status(HttpStatus.BAD_REQUEST.value())
+                .code("INVALID_REQUEST")
+                .detail(detail)
+                .instance(request.getRequestURI())
+                .requestId(resolveRequestId(request))
+                .fieldErrors(List.of())
+                .build();
+
+        log.warn("请求参数无效: uri={}, detail={}", request.getRequestURI(), detail);
+        return buildResponseEntity(problem, HttpStatus.BAD_REQUEST);
+    }
+
     /**
      * 2. 捕获受控未找到异常 (ResourceNotFoundException)。
      */

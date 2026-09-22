@@ -918,7 +918,7 @@ class TraceEventApplicationServiceTest {
             e2.setOccurredAt(LocalDateTime.of(2026, 9, 1, 8, 0));
             e2.setRecordedAt(LocalDateTime.of(2026, 9, 1, 8, 10));
 
-            when(traceEventMapper.selectByBatchIdAndOrgId(1000L, 10L)).thenReturn(List.of(e1, e2));
+            when(traceEventMapper.selectByBatchId(1000L)).thenReturn(List.of(e1, e2));
 
             List<TraceEventResponse> result = eventService.listEvents(1000L, operatorOrg1);
 
@@ -926,6 +926,51 @@ class TraceEventApplicationServiceTest {
             assertThat(result.get(0).status()).isEqualTo("CORRECTED");
             assertThat(result.get(1).status()).isEqualTo("SUBMITTED");
             assertThat(result.get(1).correctsEventId()).isEqualTo(1L);
+        }
+
+        @Test
+        @DisplayName("当前责任组织读取完整时间线：包含前序责任组织记录的 SOURCE / TRANSPORT / ARRIVAL")
+        void listEvents_currentHolderSeesEventsRecordedByPreviousHolder() {
+            Batch batch = createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name());
+            when(batchMapper.selectByIdIgnoreTenant(1000L)).thenReturn(batch);
+            TraceEvent source = new TraceEvent();
+            source.setId(1L);
+            source.setBatchId(1000L);
+            source.setOrgId(20L);
+            source.setEventType("SOURCE");
+            source.setStatus("SUBMITTED");
+            TraceEvent arrival = new TraceEvent();
+            arrival.setId(2L);
+            arrival.setBatchId(1000L);
+            arrival.setOrgId(20L);
+            arrival.setEventType("ARRIVAL");
+            arrival.setStatus("SUBMITTED");
+            when(traceEventMapper.selectByBatchId(1000L)).thenReturn(List.of(source, arrival));
+
+            List<TraceEventResponse> result = eventService.listEvents(1000L, operatorOrg1);
+
+            assertThat(result).extracting(TraceEventResponse::eventType).containsExactly("SOURCE", "ARRIVAL");
+            verify(traceEventMapper, never()).selectByBatchIdAndOrgId(any(), any());
+        }
+
+        @Test
+        @DisplayName("历史参与组织（批次已转出）只读本组织记录的历史事件")
+        void listEvents_historicalParticipantSeesOwnRecordsOnly() {
+            Batch batch = createBatch(1000L, 20L, BatchFlowStatus.ACTIVE.name());
+            when(batchMapper.selectByIdIgnoreTenant(1000L)).thenReturn(batch);
+            when(traceEventMapper.countByBatchIdAndOrgId(1000L, 10L)).thenReturn(2);
+            TraceEvent own = new TraceEvent();
+            own.setId(3L);
+            own.setBatchId(1000L);
+            own.setOrgId(10L);
+            own.setEventType("TRANSPORT");
+            own.setStatus("SUBMITTED");
+            when(traceEventMapper.selectByBatchIdAndOrgId(1000L, 10L)).thenReturn(List.of(own));
+
+            List<TraceEventResponse> result = eventService.listEvents(1000L, operatorOrg1);
+
+            assertThat(result).extracting(TraceEventResponse::orgId).containsOnly(10L);
+            verify(traceEventMapper, never()).selectByBatchId(any());
         }
 
         @Test

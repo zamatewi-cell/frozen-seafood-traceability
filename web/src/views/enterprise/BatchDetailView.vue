@@ -3,10 +3,11 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import { getBatch, listBatchEvents, submitBatch } from '@/api/batches'
+import { listTransfers } from '@/api/transfers'
 import { ApiError } from '@/api/client'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
 import { useSession } from '@/stores/session'
-import type { Batch, TraceEvent } from '@/types/enterprise'
+import type { Batch, TraceEvent, Transfer } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import {
   formatBatchType,
@@ -19,9 +20,11 @@ import {
   formatProductCategory,
   formatQuantity,
   formatRiskStatus,
-  formatTraceEventType
+  formatShipmentStatus,
+  formatTraceEventType,
+  formatTransferStatus
 } from '@/utils/formatters'
-import { canManageSourceBatches } from '@/utils/permissions'
+import { canInitiateTransfer, canManageSourceBatches } from '@/utils/permissions'
 import { takeBatchFlash, type BatchFlash } from './batchFlash'
 import { recalledBatchListQuery } from './batchQuery'
 
@@ -44,6 +47,16 @@ const events = ref<TraceEvent[]>([])
 const eventError = ref('')
 
 const flash = ref<BatchFlash | null>(null)
+
+type TransferLoadState = 'loading' | 'loaded' | 'error'
+const transferState = ref<TransferLoadState>('loading')
+const transfers = ref<Transfer[]>([])
+
+/** 批次已转出（403）时，本组织作为历史参与组织仍可只读查看自己参与的交接与本组织记录的历史事件。 */
+const history = ref<{ transfers: Transfer[]; events: TraceEvent[] } | null>(null)
+
+const openTransfer = computed(() => transfers.value.find((t) => t.status === 'DRAFT' || t.status === 'PENDING') ?? null)
+const showInitiateTransfer = computed(() => canInitiateTransfer(user.value, batch.value) && transferState.value === 'loaded' && !openTransfer.value)
 const submitting = ref(false)
 const submitError = ref('')
 
@@ -66,6 +79,32 @@ const SOURCE_DETAIL_LABELS: Record<string, string> = {
   captureDate: '捕捞日期',
   freezeDate: '速冻日期',
   shelfLifeDays: '保质期（天）'
+}
+
+const SHIPMENT_DETAIL_LABELS: Record<string, string> = {
+  shipmentNo: '运输单号',
+  carrierOrgName: '承运企业',
+  vehicleOrContainerNo: '车辆 / 容器',
+  originSiteName: '启运场所',
+  destinationSiteName: '目的场所'
+}
+
+/** TRANSPORT / ARRIVAL 由运输任务自动生成，展示可追溯到运输任务的结构化事实。 */
+function shipmentFacts(event: TraceEvent): Array<{ label: string; value: string }> {
+  const details = event.detailsJson ?? {}
+  const facts: Array<{ label: string; value: string }> = []
+  for (const [key, label] of Object.entries(SHIPMENT_DETAIL_LABELS)) {
+    const raw = details[key]
+    if (raw === undefined || raw === null || raw === '') continue
+    facts.push({ label, value: String(raw) })
+  }
+  return facts
+}
+
+function eventShipmentId(event: TraceEvent): number | null {
+  const raw = event.detailsJson?.shipmentId
+  const id = typeof raw === 'number' ? raw : Number(raw)
+  return Number.isInteger(id) && id > 0 ? id : null
 }
 
 function sourceFacts(event: TraceEvent): Array<{ label: string; value: string }> {
@@ -96,6 +135,39 @@ const organization = computed(() => {
 
 let activeRequest: AbortController | null = null
 let eventRequest: AbortController | null = null
+let transferRequest: AbortController | null = null
+
+async function loadTransfers(batchId: number) {
+  transferRequest?.abort()
+  const controller = new AbortController()
+  transferRequest = controller
+  transferState.value = 'loading'
+  try {
+    const page = await listTransfers({ batchId, page: 1, size: 20 }, controller.signal)
+    if (controller.signal.aborted) return
+    transfers.value = page.items
+    directory.resolveOrganizations(page.items.flatMap((t) => [t.senderOrgId, t.receiverOrgId]))
+    transferState.value = 'loaded'
+  } catch {
+    if (controller.signal.aborted) return
+    transfers.value = []
+    transferState.value = 'error'
+  }
+}
+
+async function loadHistory(batchId: number, signal: AbortSignal) {
+  try {
+    const [page, ownEvents] = await Promise.all([
+      listTransfers({ batchId, page: 1, size: 20 }, signal),
+      listBatchEvents(batchId, signal)
+    ])
+    if (signal.aborted) return
+    directory.resolveOrganizations(page.items.flatMap((t) => [t.senderOrgId, t.receiverOrgId]))
+    history.value = { transfers: page.items, events: ownEvents }
+  } catch {
+    history.value = null
+  }
+}
 
 async function loadEvents(batchId: number) {
   eventRequest?.abort()
@@ -128,6 +200,7 @@ async function load() {
   activeRequest = controller
   loadState.value = 'loading'
   batch.value = null
+  history.value = null
   errorMessage.value = ''
 
   const batchId = Number(props.id)
@@ -144,12 +217,14 @@ async function load() {
     directory.resolveProducts([result.productId])
     directory.resolveOrganizations([result.orgId])
     loadEvents(result.id)
+    loadTransfers(result.id)
   } catch (err: unknown) {
     if (controller.signal.aborted) return
     if (err instanceof ApiError && err.status === 404) {
       loadState.value = 'not-found'
     } else if (err instanceof ApiError && err.status === 403) {
       loadState.value = 'forbidden'
+      loadHistory(batchId, controller.signal)
     } else {
       loadState.value = 'error'
       errorMessage.value = err instanceof ApiError
@@ -190,6 +265,7 @@ watch(() => props.id, (id) => {
 onBeforeUnmount(() => {
   activeRequest?.abort()
   eventRequest?.abort()
+  transferRequest?.abort()
 })
 </script>
 
@@ -205,9 +281,25 @@ onBeforeUnmount(() => {
       未找到该批次，可能已被删除或编号有误。
     </div>
 
-    <div v-else-if="loadState === 'forbidden'" class="ent-card ent-state" role="alert" data-testid="batch-detail-forbidden">
-      该批次当前不由本组织负责，无权查看。
-    </div>
+    <template v-else-if="loadState === 'forbidden'">
+      <div class="ent-card ent-state" role="alert" data-testid="batch-detail-forbidden">
+        该批次当前不由本组织负责，无权查看批次详情，也不能再修改该批次。
+      </div>
+      <section v-if="history && (history.transfers.length > 0 || history.events.length > 0)" class="ent-card" data-testid="batch-history">
+        <h2 class="ent-card-title">本组织参与的历史记录（只读）</h2>
+        <ul class="history-list">
+          <li v-for="t in history.transfers" :key="`t-${t.id}`" data-testid="history-transfer">
+            交接 <span class="mono">{{ t.transferNo }}</span>
+            <StatusBadge :info="formatTransferStatus(t.status)" dimension="交接" />
+            {{ directory.organizationLabel(t.senderOrgId) }} → {{ directory.organizationLabel(t.receiverOrgId) }}
+            <RouterLink v-if="t.shipmentId" :to="`/app/shipments/${t.shipmentId}`" class="mono">运输任务 {{ t.shipmentNo }}</RouterLink>
+          </li>
+          <li v-for="event in history.events" :key="`e-${event.id}`" data-testid="history-event" :data-event-type="event.eventType">
+            {{ formatTraceEventType(event.eventType) }} · {{ formatIsoDateTime(event.occurredAt) }} · {{ event.summary }}
+          </li>
+        </ul>
+      </section>
+    </template>
 
     <div v-else-if="loadState === 'error'" class="ent-card ent-state error" role="alert" data-testid="batch-detail-error">
       <p>{{ errorMessage }}</p>
@@ -332,6 +424,51 @@ onBeforeUnmount(() => {
         </section>
       </div>
 
+      <section class="ent-card" aria-labelledby="handover-title" data-testid="batch-transfers">
+        <h2 id="handover-title" class="ent-card-title">交接与运输</h2>
+        <div v-if="transferState === 'loading'" class="ent-state">正在加载交接记录…</div>
+        <div v-else-if="transferState === 'error'" class="ent-state error" role="alert">
+          交接记录加载失败
+          <button type="button" class="ent-button" @click="loadTransfers(batch.id)">重试</button>
+        </div>
+        <template v-else>
+          <div v-if="transfers.length === 0" class="ent-muted section-note" data-testid="batch-transfers-empty">该批次暂无交接记录。</div>
+          <div v-else class="ent-table-scroll">
+            <table class="ent-table">
+              <thead>
+                <tr><th>交接单号</th><th>发送 → 接收</th><th>交接状态</th><th>运输任务</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in transfers" :key="t.id" data-testid="batch-transfer-row" :data-transfer-id="t.id">
+                  <td class="mono">{{ t.transferNo }}</td>
+                  <td>{{ directory.organizationLabel(t.senderOrgId) }} → {{ directory.organizationLabel(t.receiverOrgId) }}</td>
+                  <td><StatusBadge :info="formatTransferStatus(t.status)" dimension="交接" data-testid="batch-transfer-status" :data-status="t.status" /></td>
+                  <td>
+                    <template v-if="t.shipmentId">
+                      <RouterLink :to="`/app/shipments/${t.shipmentId}`" class="mono" data-testid="batch-transfer-shipment">{{ t.shipmentNo }}</RouterLink>
+                      <StatusBadge v-if="t.shipmentStatus" :info="formatShipmentStatus(t.shipmentStatus)" dimension="运输" />
+                    </template>
+                    <RouterLink
+                      v-else-if="t.status === 'DRAFT' && t.senderOrgId === user?.orgId"
+                      :to="{ path: '/app/shipments/new', query: { transferId: String(t.id) } }"
+                      class="ent-button"
+                      data-testid="batch-transfer-create-shipment"
+                    >
+                      创建运输任务并装载
+                    </RouterLink>
+                    <span v-else class="ent-muted">未绑定</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="showInitiateTransfer" class="ent-actions">
+            <RouterLink :to="`/app/batches/${batch.id}/transfers/new`" class="ent-button ent-primary" data-testid="initiate-transfer">发起交接</RouterLink>
+            <small class="ent-muted">交接给其他企业；接受前批次仍由本组织负责。</small>
+          </div>
+        </template>
+      </section>
+
       <section class="ent-card" aria-labelledby="events-title" data-testid="trace-events">
         <h2 id="events-title" class="ent-card-title">追溯事件</h2>
         <div v-if="eventState === 'loading'" class="ent-state" data-testid="events-loading">正在加载追溯事件…</div>
@@ -372,6 +509,15 @@ onBeforeUnmount(() => {
                 <template v-for="fact in sourceFacts(event)" :key="fact.label">
                   <dt>{{ fact.label }}</dt>
                   <dd>{{ fact.value }}</dd>
+                </template>
+              </template>
+              <template v-if="event.eventType === 'TRANSPORT' || event.eventType === 'ARRIVAL'">
+                <template v-for="fact in shipmentFacts(event)" :key="fact.label">
+                  <dt>{{ fact.label }}</dt>
+                  <dd :data-testid="`event-fact-${fact.label}`">
+                    <RouterLink v-if="fact.label === '运输单号' && eventShipmentId(event)" :to="`/app/shipments/${eventShipmentId(event)}`">{{ fact.value }}</RouterLink>
+                    <span v-else>{{ fact.value }}</span>
+                  </dd>
                 </template>
               </template>
             </dl>
@@ -480,6 +626,14 @@ onBeforeUnmount(() => {
 }
 .secondary {
   background-color: #f8fafc;
+}
+.history-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
 }
 .section-note {
   margin: 12px 0 0;

@@ -34,7 +34,7 @@ import java.util.List;
 /**
  * 企业间整批交接生命周期控制器。
  * <p>
- * 提供整批交接草稿创建、修改、逻辑删除、提交发货、收货接受与到货拒收接口。
+ * 提供整批交接草稿创建、修改、逻辑删除、提交、接受与拒收接口；物理运输由运输任务接口 (/api/v1/shipments) 承担。
  * 写操作严格校验登录主体、CSRF 防护与 Idempotency-Key 防重幂等键。
  * </p>
  *
@@ -72,6 +72,8 @@ public class TransferController {
     public SuccessEnvelope<List<TransferResponse>> listTransfers(
             @RequestParam(value = "direction", required = false) String direction,
             @RequestParam(value = "status", required = false) String status,
+            @RequestParam(value = "batchId", required = false)
+            @Min(value = 1, message = "批次 batchId 必须为正整数") Long batchId,
             @RequestParam(value = "page", defaultValue = "1")
             @Min(value = 1, message = "页码 page 最小值为 1") int page,
             @RequestParam(value = "size", defaultValue = "20")
@@ -105,8 +107,8 @@ public class TransferController {
             }
             normalizedStatus = st;
         }
-        List<TransferResponse> list = transferService.listTransfers(normalizedDirection, normalizedStatus, page, size, principal);
-        long total = transferService.countTransfers(normalizedDirection, normalizedStatus, principal);
+        List<TransferResponse> list = transferService.listTransfers(normalizedDirection, normalizedStatus, batchId, page, size, principal);
+        long total = transferService.countTransfers(normalizedDirection, normalizedStatus, batchId, principal);
         PageMeta pageMeta = new PageMeta(page, size, total);
         return SuccessEnvelope.ofPage(list, pageMeta);
     }
@@ -151,7 +153,7 @@ public class TransferController {
     }
 
     /**
-     * 发送方提交交接 (POST /api/v1/transfers/{transferId}/submit)。
+     * 发送方提交交接 (POST /api/v1/transfers/{transferId}/submit)，前提为已绑定 PLANNED 运输任务。
      */
     @PostMapping("/{transferId}/submit")
     public SuccessEnvelope<TransferResponse> submitTransfer(
@@ -165,7 +167,7 @@ public class TransferController {
     }
 
     /**
-     * 接收方接受交接并转移持有权 (POST /api/v1/transfers/{transferId}/accept)。
+     * 接收方接受交接并转移当前责任组织 (POST /api/v1/transfers/{transferId}/accept)，前提为运输任务已 DELIVERED；不生成 ARRIVAL。
      */
     @PostMapping("/{transferId}/accept")
     public SuccessEnvelope<TransferResponse> acceptTransfer(
@@ -179,7 +181,7 @@ public class TransferController {
     }
 
     /**
-     * 接收方拒收交接 (POST /api/v1/transfers/{transferId}/reject)。
+     * 接收方拒收交接 (POST /api/v1/transfers/{transferId}/reject)，前提为运输任务已 DELIVERED。
      */
     @PostMapping("/{transferId}/reject")
     public SuccessEnvelope<TransferResponse> rejectTransfer(
