@@ -5,7 +5,7 @@ const channel = isCI ? undefined : 'chrome'
 
 export default defineConfig({
   testDir: './tests/e2e',
-  testIgnore: process.env.REAL_SMOKE === 'true' ? undefined : '**/real-smoke.spec.ts',
+  testIgnore: process.env.REAL_SMOKE === 'true' ? undefined : '**/real-*.spec.ts',
   timeout: 30000,
   expect: {
     timeout: 5000
