@@ -47,6 +47,7 @@ export interface SalesOrder {
   id: number
   orderNo: string
   sellerOrgId: number
+  buyerOrgId: number | null
   customerName: string
   customerPhone: string | null
   deliveryAddress: string
@@ -56,6 +57,9 @@ export interface SalesOrder {
   placedAt: string
   deliveredAt: string | null
   note: string | null
+  cancelRequestRole: string | null
+  cancelRequestReason: string | null
+  cancelRequestStatus: string | null
   amountTotal: number
   currencyCode: string
   items: OrderItem[]
@@ -191,6 +195,10 @@ export async function approveCancelRequest(orderId: number): Promise<PurchaseOrd
 
 export async function rejectCancelRequest(orderId: number): Promise<PurchaseOrder> {
   return postWithCsrf<PurchaseOrder>(`/api/v1/orders/purchase/${orderId}/cancel-reject`)
+}
+
+export async function withdrawCancelRequest(orderId: number): Promise<PurchaseOrder> {
+  return postWithCsrf<PurchaseOrder>(`/api/v1/orders/purchase/${orderId}/cancel-withdraw`)
 }
 
 export interface OrderNote {

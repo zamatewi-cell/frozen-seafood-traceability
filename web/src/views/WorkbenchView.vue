@@ -21,6 +21,7 @@ import {
   requestCancelOrder,
   approveCancelRequest,
   rejectCancelRequest,
+  withdrawCancelRequest,
   updateSalesStatus,
   addOrderNote,
   listOrderNotes,
@@ -53,7 +54,14 @@ import {
   listInspections,
   createInspection,
   submitInspectionResult,
-  type QualityInspection
+  listPendingInspections,
+  listInspectionsByOrder,
+  updateChecklistItem,
+  passInspection,
+  submitQualityReview,
+  parseChecklist,
+  type QualityInspection,
+  type ChecklistItemState
 } from '@/api/quality'
 import { fetchAdminOverview, type AdminOverview } from '@/api/admin'
 
@@ -177,6 +185,9 @@ async function loadPurchases() {
     purchases.value = await listPurchaseOrders()
     await loadPoNotesAndAllocations()
     await loadMyInventory()
+    for (const p of purchases.value) {
+      await loadOrderQc(p.id)
+    }
   } catch (e) {
     purchaseError.value = e instanceof Error ? e.message : '采购单加载失败'
   }
@@ -225,12 +236,35 @@ const cancelTarget = ref<{ id: number; reason: string } | null>(null)
 
 async function doCancel() {
   if (!cancelTarget.value || !cancelTarget.value.reason.trim()) {
-    purchaseError.value = '请填写取消原因'
+    if (activeTab.value === 'sales') {
+      salesError.value = '请填写取消原因'
+    } else {
+      purchaseError.value = '请填写取消原因'
+    }
     return
   }
   const id = cancelTarget.value.id
-  await approveAct(`cancel-${id}`, () => requestCancelOrder(id, cancelTarget.value!.reason))
+  const reason = cancelTarget.value.reason
   cancelTarget.value = null
+  if (activeTab.value === 'sales') {
+    if (salesActing.value[`cancel-${id}`]) return
+    salesActing.value[`cancel-${id}`] = true
+    try {
+      await requestCancelOrder(id, reason)
+      showToast('取消请求已提交')
+      await loadSales()
+    } catch (e) {
+      salesError.value = e instanceof Error ? e.message : '操作失败'
+    } finally {
+      salesActing.value[`cancel-${id}`] = false
+    }
+  } else {
+    await approveAct(`cancel-${id}`, () => requestCancelOrder(id, reason))
+  }
+}
+
+async function doWithdrawCancel(poId: number) {
+  await approveAct(`cw-${poId}`, () => withdrawCancelRequest(poId))
 }
 
 async function doReceive(poId: number) {
@@ -443,54 +477,6 @@ async function doAllocate(poId: number) {
   }
 }
 
-// 质检快捷入口:在采购单卡片上直接查看分配批次的质检状态并一键通过
-const qcQuickOpen = ref<number | null>(null)
-const poBatchQc = ref<Record<number, { batchId: number; batchNo: string; passed: boolean }[]>>({})
-
-async function loadPoBatchQc(poId: number) {
-  const allocs = poAllocations.value[poId] || []
-  const result: { batchId: number; batchNo: string; passed: boolean }[] = []
-  for (const a of allocs) {
-    try {
-      const inspections = await listInspections(a.batchId)
-      const passed = inspections.some((i) => i.result === 'PASS')
-      result.push({ batchId: a.batchId, batchNo: a.batchNo, passed })
-    } catch {
-      result.push({ batchId: a.batchId, batchNo: a.batchNo, passed: false })
-    }
-  }
-  poBatchQc.value[poId] = result
-}
-
-async function toggleQcQuick(poId: number) {
-  if (qcQuickOpen.value === poId) {
-    qcQuickOpen.value = null
-    return
-  }
-  qcQuickOpen.value = poId
-  await loadPoBatchQc(poId)
-}
-
-async function quickPassQc(poId: number, batchId: number) {
-  try {
-    const created = await createInspection(batchId, {
-      inspectionType: 'OUTGOING',
-      summary: '出厂抽样检验-快捷通过'
-    })
-    await submitInspectionResult(created.id, { result: 'PASS', summary: '合格放行' })
-    showToast('质检已通过')
-    await loadPoBatchQc(poId)
-  } catch (e) {
-    purchaseError.value = e instanceof Error ? e.message : '质检操作失败'
-  }
-}
-
-function canDeliver(po: PurchaseOrder): boolean {
-  const batches = poBatchQc.value[po.id]
-  if (!batches || batches.length === 0) return false
-  return batches.every((b) => b.passed)
-}
-
 // ==================== 销售单 ====================
 const sales = ref<SalesOrder[]>([])
 const salesError = ref('')
@@ -498,9 +484,7 @@ const salesError = ref('')
 // ==================== 销售单tab:下游采购单的备注/分配/质检操作 ====================
 const salesNoteOpen = ref<number | null>(null)
 const salesAllocOpen = ref<number | null>(null)
-const salesQcOpen = ref<number | null>(null)
 const salesAllocs = ref<Record<number, BatchAllocation[]>>({})
-const salesBatchQc = ref<Record<number, { batchId: number; batchNo: string; passed: boolean }[]>>({})
 const newNoteText = ref('')
 
 async function loadPoAllocForSales(poId: number) {
@@ -515,24 +499,8 @@ async function loadPoAllocForSales(poId: number) {
 }
 
 async function loadSalesBatchQc(poId: number) {
-  const allocs = salesAllocs.value[poId] || []
-  const result: { batchId: number; batchNo: string; passed: boolean }[] = []
-  for (const a of allocs) {
-    try {
-      const inspections = await listInspections(a.batchId)
-      const passed = inspections.some((i) => i.result === 'PASS')
-      result.push({ batchId: a.batchId, batchNo: a.batchNo, passed })
-    } catch {
-      result.push({ batchId: a.batchId, batchNo: a.batchNo, passed: false })
-    }
-  }
-  salesBatchQc.value[poId] = result
-}
-
-function canDeliverSales(so: SalesOrder): boolean {
-  const batches = salesBatchQc.value[so.id]
-  if (!batches || batches.length === 0) return false
-  return batches.every((b) => b.passed)
+  // 保留函数签名但不再使用,质检流程已改为环节质检审核
+  void poId
 }
 
 async function doAddNoteForSales(poId: number) {
@@ -573,17 +541,9 @@ async function doAllocateForSales(poId: number) {
 }
 
 async function quickPassQcForSales(poId: number, batchId: number) {
-  try {
-    const created = await createInspection(batchId, {
-      inspectionType: 'OUTGOING',
-      summary: '出厂抽样检验-快捷通过'
-    })
-    await submitInspectionResult(created.id, { result: 'PASS', summary: '合格放行' })
-    showToast('质检已通过')
-    await loadSalesBatchQc(poId)
-  } catch (e) {
-    salesError.value = e instanceof Error ? e.message : '质检操作失败'
-  }
+  // 保留函数签名但不再使用,质检流程已改为环节质检审核
+  void poId
+  void batchId
 }
 
 const showCreateSales = ref(false)
@@ -618,6 +578,7 @@ async function loadSales() {
       } catch {
         // 忽略单条失败
       }
+      await loadOrderQc(id)
     }
   } catch (e) {
     salesError.value = e instanceof Error ? e.message : '销售单加载失败'
@@ -707,6 +668,48 @@ async function salesDeliver(poId: number) {
     salesError.value = e instanceof Error ? e.message : '出货失败'
   } finally {
     salesActing.value[`deliver-${poId}`] = false
+  }
+}
+
+async function salesApproveCancel(poId: number) {
+  if (salesActing.value[`capp-${poId}`]) return
+  salesActing.value[`capp-${poId}`] = true
+  try {
+    await approveCancelRequest(poId)
+    showToast('已同意取消')
+    await loadSales()
+  } catch (e) {
+    salesError.value = e instanceof Error ? e.message : '同意取消失败'
+  } finally {
+    salesActing.value[`capp-${poId}`] = false
+  }
+}
+
+async function salesRejectCancel(poId: number) {
+  if (salesActing.value[`crej-${poId}`]) return
+  salesActing.value[`crej-${poId}`] = true
+  try {
+    await rejectCancelRequest(poId)
+    showToast('已拒绝取消')
+    await loadSales()
+  } catch (e) {
+    salesError.value = e instanceof Error ? e.message : '拒绝取消失败'
+  } finally {
+    salesActing.value[`crej-${poId}`] = false
+  }
+}
+
+async function salesWithdrawCancel(poId: number) {
+  if (salesActing.value[`cw-${poId}`]) return
+  salesActing.value[`cw-${poId}`] = true
+  try {
+    await withdrawCancelRequest(poId)
+    showToast('已撤回取消请求')
+    await loadSales()
+  } catch (e) {
+    salesError.value = e instanceof Error ? e.message : '撤回失败'
+  } finally {
+    salesActing.value[`cw-${poId}`] = false
   }
 }
 
@@ -864,61 +867,115 @@ async function doAccept() {
   acceptTarget.value = null
 }
 
-// ==================== 质检 ====================
-const qcBatches = ref<BatchItem[]>([])
-const inspectionMap = ref<Record<number, QualityInspection[]>>({})
+// ==================== 质检(环节质检审核) ====================
 const qcError = ref('')
-const selectedQcBatch = ref<number | null>(null)
-const qcSummary = ref('')
+const pendingInspections = ref<QualityInspection[]>([])
+const selectedQcInspection = ref<QualityInspection | null>(null)
+const checklistItems = ref<ChecklistItemState[]>([])
+const stageLabels: Record<string, string> = {
+  CAPTURE_OUT: '捕捞出货质检',
+  PROCESS_OUT: '加工出货质检',
+  DIST_OUT: '批发分装出货质检'
+}
+
+// 订单级质检状态(供采购单/销售单tab显示)
+const orderQcMap = ref<Record<number, QualityInspection[]>>({})
+
+async function loadOrderQc(orderId: number) {
+  try {
+    orderQcMap.value[orderId] = await listInspectionsByOrder(orderId)
+  } catch {
+    orderQcMap.value[orderId] = []
+  }
+}
+
+function qcStatusOf(orderId: number): string {
+  const list = orderQcMap.value[orderId]
+  if (!list || list.length === 0) return 'NONE'
+  if (list.every((q) => q.result === 'PASS')) return 'PASS'
+  if (list.some((q) => q.result === 'INSPECTING')) return 'INSPECTING'
+  return 'FAIL'
+}
+
+function qcSubmitted(orderId: number): boolean {
+  const list = orderQcMap.value[orderId]
+  return !!list && list.length > 0
+}
+
+function qcAllPassed(orderId: number): boolean {
+  const list = orderQcMap.value[orderId]
+  return !!list && list.length > 0 && list.every((q) => q.result === 'PASS')
+}
 
 async function loadQuality() {
   qcError.value = ''
   try {
-    const bs = await listBatches()
-    qcBatches.value = bs
-    if (bs.length > 0) selectQcBatch(bs[0].id)
+    pendingInspections.value = await listPendingInspections()
+    if (pendingInspections.value.length > 0) {
+      await selectQcInspection(pendingInspections.value[0])
+    } else {
+      selectedQcInspection.value = null
+      checklistItems.value = []
+    }
   } catch (e) {
     qcError.value = e instanceof Error ? e.message : '质检数据加载失败'
   }
 }
 
-async function selectQcBatch(id: number) {
-  selectedQcBatch.value = id
-  try {
-    inspectionMap.value[id] = await listInspections(id)
-  } catch (e) {
-    qcError.value = e instanceof Error ? e.message : '质检单加载失败'
-  }
+async function selectQcInspection(inp: QualityInspection) {
+  selectedQcInspection.value = inp
+  checklistItems.value = parseChecklist(inp.checklistJson)
 }
 
-function qcInspections(): QualityInspection[] {
-  return selectedQcBatch.value ? inspectionMap.value[selectedQcBatch.value] || [] : []
-}
-
-async function addOutgoingInspection() {
-  if (!selectedQcBatch.value) return
+async function toggleChecklistItem(itemName: string, passed: boolean) {
+  if (!selectedQcInspection.value) return
   try {
-    await createInspection(selectedQcBatch.value, {
-      inspectionType: 'OUTGOING',
-      summary: qcSummary.value || '出厂抽样检验'
+    const updated = await updateChecklistItem(selectedQcInspection.value.id, {
+      itemName,
+      passed
     })
-    qcSummary.value = ''
-    showToast('质检单已创建（待判定）')
-    await selectQcBatch(selectedQcBatch.value)
+    selectedQcInspection.value = updated
+    checklistItems.value = parseChecklist(updated.checklistJson)
+    if (passed) showToast(`"${itemName}" 已通过`)
   } catch (e) {
-    qcError.value = e instanceof Error ? e.message : '创建失败'
+    qcError.value = e instanceof Error ? e.message : '更新失败'
   }
 }
 
-async function decideInsp(inp: QualityInspection, result: 'PASS' | 'FAIL') {
+async function doPassInspection() {
+  if (!selectedQcInspection.value) return
   try {
-    await submitInspectionResult(inp.id, { result, summary: result === 'PASS' ? '合格放行' : '不合格' })
-    showToast('质检判定已提交')
-    if (selectedQcBatch.value) await selectQcBatch(selectedQcBatch.value)
+    await passInspection(selectedQcInspection.value.id)
+    showToast('质检已通过，溯源已更新')
+    await loadQuality()
   } catch (e) {
-    qcError.value = e instanceof Error ? e.message : '判定失败'
+    qcError.value = e instanceof Error ? e.message : '质检通过失败'
   }
 }
+
+function isAllChecklistPassed(): boolean {
+  return checklistItems.value.length > 0 && checklistItems.value.every((i) => i.passed)
+}
+
+async function submitQualityReviewForOrder(poId: number) {
+  try {
+    await submitQualityReview(poId)
+    showToast('已提交质检审核，等待质检员确认')
+    await loadOrderQc(poId)
+    if (activeTab.value === 'sales') {
+      await loadSales()
+    } else {
+      await loadPurchases()
+    }
+  } catch (e) {
+    if (activeTab.value === 'sales') {
+      salesError.value = e instanceof Error ? e.message : '提交质检审核失败'
+    } else {
+      purchaseError.value = e instanceof Error ? e.message : '提交质检审核失败'
+    }
+  }
+}
+
 
 // ==================== 系统管理 ====================
 const adminData = ref<AdminOverview | null>(null)
@@ -1116,7 +1173,24 @@ onMounted(async () => {
               <button class="warn-btn sm" type="button" @click="approveAct(`capp-${po.id}`, () => approveCancelRequest(po.id))">同意取消</button>
               <button class="ghost-btn sm" type="button" @click="approveAct(`crej-${po.id}`, () => rejectCancelRequest(po.id))">拒绝取消</button>
             </span>
-            <span v-else class="muted">等待对方审核</span>
+            <span v-else>
+              <button class="ghost-btn sm" type="button" :disabled="acting[`cw-${po.id}`]" @click="doWithdrawCancel(po.id)">撤回取消</button>
+              <span class="muted">等待对方审核</span>
+            </span>
+          </div>
+
+          <!-- 质检状态 -->
+          <div v-if="qcSubmitted(po.id)" class="qc-status">
+            <span class="badge" :class="statusBadge(qcStatusOf(po.id))">
+              {{ qcStatusOf(po.id) === 'PASS' ? '质检已通过' : qcStatusOf(po.id) === 'INSPECTING' ? '质检中' : '质检未通过' }}
+            </span>
+            <ul>
+              <li v-for="qc in orderQcMap[po.id]" :key="qc.id">
+                {{ qc.inspectionNo }}
+                <span v-if="qc.inspectionStage"> · {{ stageLabels[qc.inspectionStage] }}</span>
+                · {{ qc.result === 'PASS' ? '已通过' : qc.result === 'INSPECTING' ? '待质检' : '未通过' }}
+              </li>
+            </ul>
           </div>
 
           <div v-if="!isBuyer(po)" class="item-acts">
@@ -1153,11 +1227,11 @@ onMounted(async () => {
               @click="allocFormOpen = allocFormOpen === po.id ? null : po.id"
             >{{ allocFormOpen === po.id ? '收起' : '分配批次' }}</button>
             <button
-              v-if="po.status === 'PROCESSING' && poAllocations[po.id]?.length"
+              v-if="po.status === 'PROCESSING' && poAllocations[po.id]?.length && !qcSubmitted(po.id)"
               class="ghost-btn"
               type="button"
-              @click="toggleQcQuick(po.id)"
-            >{{ qcQuickOpen === po.id ? '收起' : '质检快捷' }}</button>
+              @click="submitQualityReviewForOrder(po.id)"
+            >提交质检审核</button>
             <button
               v-if="po.status === 'PROCESSING'"
               class="pri-btn"
@@ -1179,7 +1253,7 @@ onMounted(async () => {
               class="pri-btn"
               type="button"
               :disabled="acting[`recv-${po.id}`]"
-              @click="approveAct(`recv-${po.id}`, () => doReceive(po.id))"
+              @click="doReceive(po.id)"
             >收货入库</button>
             <button
               v-if="po.cancelRequestStatus !== 'PENDING' && !['RECEIVED','CANCELLED','REJECTED'].includes(po.status)"
@@ -1223,31 +1297,15 @@ onMounted(async () => {
             </div>
           </div>
 
-          <!-- 质检快捷面板 -->
-          <div v-if="qcQuickOpen === po.id" class="inline-form">
-            <p v-if="!poAllocations[po.id]?.length" class="muted">请先分配批次</p>
-            <div v-else>
-              <table class="tb qc-quick-tb">
-                <thead>
-                  <tr><th>批次号</th><th>质检状态</th><th>操作</th></tr>
-                </thead>
-                <tbody>
-                  <tr v-for="b in poBatchQc[po.id] || []" :key="b.batchId">
-                    <td class="mono">{{ b.batchNo }}</td>
-                    <td>
-                      <span v-if="b.passed" class="badge success">已通过</span>
-                      <span v-else class="badge warning">未质检</span>
-                    </td>
-                    <td>
-                      <button v-if="!b.passed" class="pri-btn sm" type="button" @click="quickPassQc(po.id, b.batchId)">一键通过</button>
-                      <span v-else class="muted">无需操作</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              <p v-if="!canDeliver(po)" class="note">所有分配批次需质检通过后方可确认出货</p>
-              <p v-else class="note" style="color: #059669">质检全部通过，可以确认出货</p>
-            </div>
+          <!-- 质检提示 -->
+          <div v-if="po.status === 'PROCESSING' && poAllocations[po.id]?.length && !qcSubmitted(po.id)" class="inline-form">
+            <p class="note">提交质检审核后，本环节质检员将审核清单，全部通过后方可确认出货</p>
+          </div>
+          <div v-if="po.status === 'PROCESSING' && qcAllPassed(po.id)" class="inline-form">
+            <p class="note">质检已全部通过，可确认出货</p>
+          </div>
+          <div v-if="po.status === 'PROCESSING' && qcSubmitted(po.id) && !qcAllPassed(po.id)" class="inline-form">
+            <p class="note">质检审核中，等待质检员通过清单</p>
           </div>
         </article>
         <p v-if="purchases.length === 0" class="muted">暂无采购单</p>
@@ -1345,11 +1403,11 @@ onMounted(async () => {
               @click="salesAllocOpen = salesAllocOpen === so.id ? null : so.id; loadPoAllocForSales(so.id)"
             >{{ salesAllocOpen === so.id ? '收起' : '分配批次' }}</button>
             <button
-              v-if="so.status === 'PROCESSING' && (salesAllocs[so.id]?.length)"
+              v-if="so.status === 'PROCESSING' && (salesAllocs[so.id]?.length) && !qcSubmitted(so.id)"
               class="ghost-btn"
               type="button"
-              @click="salesQcOpen = salesQcOpen === so.id ? null : so.id; loadSalesBatchQc(so.id)"
-            >{{ salesQcOpen === so.id ? '收起' : '质检快捷' }}</button>
+              @click="submitQualityReviewForOrder(so.id)"
+            >提交质检审核</button>
             <button
               v-if="so.status === 'PROCESSING'"
               class="pri-btn"
@@ -1357,7 +1415,40 @@ onMounted(async () => {
               :disabled="salesActing[`deliver-${so.id}`]"
               @click="salesDeliver(so.id)"
             >确认出货</button>
+            <button
+              v-if="so.cancelRequestStatus !== 'PENDING' && !['RECEIVED','CANCELLED','REJECTED'].includes(so.status)"
+              class="warn-btn"
+              type="button"
+              @click="cancelTarget = { id: so.id, reason: '' }"
+            >发起取消</button>
           </div>
+          <!-- 下游采购单取消请求 -->
+          <div v-if="isDownstreamOrder(so) && so.cancelRequestStatus === 'PENDING'" class="cancel-notice">
+            {{ so.cancelRequestRole === 'BUYER' ? '买方' : '卖方' }}发起取消: {{ so.cancelRequestReason }}
+            <span v-if="so.cancelRequestRole !== 'SELLER'">
+              <button class="warn-btn sm" type="button" :disabled="salesActing[`capp-${so.id}`]" @click="salesApproveCancel(so.id)">同意取消</button>
+              <button class="ghost-btn sm" type="button" :disabled="salesActing[`crej-${so.id}`]" @click="salesRejectCancel(so.id)">拒绝取消</button>
+            </span>
+            <span v-else>
+              <button class="ghost-btn sm" type="button" :disabled="salesActing[`cw-${so.id}`]" @click="salesWithdrawCancel(so.id)">撤回取消</button>
+              <span class="muted">等待对方审核</span>
+            </span>
+          </div>
+
+          <!-- 下游采购单质检状态 -->
+          <div v-if="isDownstreamOrder(so) && qcSubmitted(so.id)" class="qc-status">
+            <span class="badge" :class="statusBadge(qcStatusOf(so.id))">
+              {{ qcStatusOf(so.id) === 'PASS' ? '质检已通过' : qcStatusOf(so.id) === 'INSPECTING' ? '质检中' : '质检未通过' }}
+            </span>
+            <ul>
+              <li v-for="qc in orderQcMap[so.id]" :key="qc.id">
+                {{ qc.inspectionNo }}
+                <span v-if="qc.inspectionStage"> · {{ stageLabels[qc.inspectionStage] }}</span>
+                · {{ qc.result === 'PASS' ? '已通过' : qc.result === 'INSPECTING' ? '待质检' : '未通过' }}
+              </li>
+            </ul>
+          </div>
+
           <!-- 下游采购单进度备注时间线 -->
           <div v-if="isDownstreamOrder(so) && (poNotes[so.id]?.length)" class="note-timeline">
             <h4>进度备注</h4>
@@ -1405,31 +1496,15 @@ onMounted(async () => {
               <div class="acts"><button class="pri-btn" type="button" @click="doAllocateForSales(so.id)">分配</button></div>
             </div>
           </div>
-          <!-- 质检快捷面板 -->
-          <div v-if="isDownstreamOrder(so) && salesQcOpen === so.id" class="inline-form">
-            <p v-if="!salesAllocs[so.id]?.length" class="muted">请先分配批次</p>
-            <div v-else>
-              <table class="tb qc-quick-tb">
-                <thead>
-                  <tr><th>批次号</th><th>质检状态</th><th>操作</th></tr>
-                </thead>
-                <tbody>
-                  <tr v-for="b in salesBatchQc[so.id] || []" :key="b.batchId">
-                    <td class="mono">{{ b.batchNo }}</td>
-                    <td>
-                      <span v-if="b.passed" class="badge success">已通过</span>
-                      <span v-else class="badge warning">未质检</span>
-                    </td>
-                    <td>
-                      <button v-if="!b.passed" class="pri-btn sm" type="button" @click="quickPassQcForSales(so.id, b.batchId)">一键通过</button>
-                      <span v-else class="muted">无需操作</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              <p v-if="!canDeliverSales(so)" class="note">所有分配批次需质检通过后方可确认出货</p>
-              <p v-else class="note" style="color: #059669">质检全部通过，可以确认出货</p>
-            </div>
+          <!-- 质检提示 -->
+          <div v-if="isDownstreamOrder(so) && so.status === 'PROCESSING' && (salesAllocs[so.id]?.length) && !qcSubmitted(so.id)" class="inline-form">
+            <p class="note">提交质检审核后，本环节质检员将审核清单，全部通过后方可确认出货</p>
+          </div>
+          <div v-if="isDownstreamOrder(so) && so.status === 'PROCESSING' && qcAllPassed(so.id)" class="inline-form">
+            <p class="note">质检已全部通过，可确认出货</p>
+          </div>
+          <div v-if="isDownstreamOrder(so) && so.status === 'PROCESSING' && qcSubmitted(so.id) && !qcAllPassed(so.id)" class="inline-form">
+            <p class="note">质检审核中，等待质检员通过清单</p>
           </div>
           <p v-if="so.packedPackageNo" class="note mono">溯源码：{{ so.packedPackageNo }}</p>
         </article>
@@ -1562,54 +1637,71 @@ onMounted(async () => {
       <!-- 质检 -->
       <section v-else-if="activeTab === 'quality'" class="card">
         <div class="sec-head">
-          <h2>质检工作台</h2>
+          <h2>质检审核工作台</h2>
         </div>
         <p v-if="qcError" class="err">{{ qcError }}</p>
 
         <div class="qr-split">
           <div class="qr-list">
-            <h3 class="subtitle">本企业批次</h3>
+            <h3 class="subtitle">待审质检单</h3>
             <button
-              v-for="b in qcBatches"
-              :key="b.id"
+              v-for="inp in pendingInspections"
+              :key="inp.id"
               type="button"
               class="qr-item"
-              :class="{ active: selectedQcBatch === b.id }"
-              @click="selectQcBatch(b.id)"
+              :class="{ active: selectedQcInspection?.id === inp.id }"
+              @click="selectQcInspection(inp)"
             >
-              <span class="mono">{{ b.batchNo }}</span>
-              <span class="badge" :class="statusBadge(b.status)">{{ b.status }}</span>
+              <span class="mono">{{ inp.inspectionNo }}</span>
+              <span class="badge warning">{{ stageLabels[inp.inspectionStage || ''] || inp.inspectionStage }}</span>
             </button>
-            <p v-if="qcBatches.length === 0" class="muted">暂无批次</p>
-
-            <div class="acts" style="margin-top: 14px">
-              <button
-                v-if="selectedQcBatch"
-                class="pri-btn"
-                type="button"
-                @click="addOutgoingInspection"
-              >对选中批次创建出厂质检</button>
-            </div>
-            <input v-model="qcSummary" class="qc-summary" type="text" placeholder="质检说明（选填）" />
+            <p v-if="pendingInspections.length === 0" class="muted">暂无待审质检单</p>
           </div>
 
           <div class="qr-detail">
-            <h3 class="subtitle">质检记录</h3>
-            <article v-for="inp in qcInspections()" :key="inp.id" class="item-card">
-              <div class="item-head">
-                <span class="mono">{{ inp.inspectionNo }}</span>
-                <span class="badge" :class="statusBadge(inp.result)">{{ inp.result }}</span>
+            <div v-if="selectedQcInspection">
+              <h3 class="subtitle">
+                {{ stageLabels[selectedQcInspection.inspectionStage || ''] || '质检单' }}
+                · 批次#{{ selectedQcInspection.batchId }}
+              </h3>
+              <p class="item-meta">
+                <span class="mono">{{ selectedQcInspection.inspectionNo }}</span>
+                <span v-if="selectedQcInspection.checklistPassedAt" class="note" style="color: #059669">
+                  清单已全部通过
+                </span>
+              </p>
+
+              <div class="checklist">
+                <label
+                  v-for="(item, idx) in checklistItems"
+                  :key="idx"
+                  class="checklist-item"
+                  :class="{ passed: item.passed }"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="item.passed"
+                    @change="toggleChecklistItem(item.itemName, !item.passed)"
+                  />
+                  <span class="cl-name">{{ item.itemName }}</span>
+                  <span v-if="item.itemDesc" class="cl-desc">{{ item.itemDesc }}</span>
+                  <span v-if="item.passed && item.checkedBy" class="cl-checked">
+                    {{ item.checkedBy }} · {{ item.checkedAt?.slice(0, 19).replace('T', ' ') }}
+                  </span>
+                </label>
               </div>
-              <div class="item-meta">
-                <span>{{ inp.inspectionType }} · {{ inp.inspectorName || '待判定' }}</span>
-                <span v-if="inp.summary" class="note">{{ inp.summary }}</span>
+
+              <div class="acts" style="margin-top: 14px">
+                <button
+                  class="pri-btn"
+                  type="button"
+                  :disabled="!isAllChecklistPassed()"
+                  @click="doPassInspection"
+                >质检通过</button>
+                <p v-if="!isAllChecklistPassed()" class="note">请先完成所有清单项打钩</p>
               </div>
-              <div v-if="inp.result === 'INSPECTING'" class="item-acts">
-                <button class="pri-btn" type="button" @click="decideInsp(inp, 'PASS')">判定合格</button>
-                <button class="warn-btn" type="button" @click="decideInsp(inp, 'FAIL')">判定不合格</button>
-              </div>
-            </article>
-            <p v-if="qcInspections().length === 0" class="muted">该批次暂无质检单</p>
+            </div>
+            <p v-else class="muted">请从左侧选择待审质检单</p>
           </div>
         </div>
       </section>
@@ -2128,6 +2220,52 @@ textarea {
   padding: 6px 10px;
   border-bottom: 1px solid #e2e8f0;
 }
+.checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  cursor: pointer;
+  background: #fff;
+  transition: border-color 0.15s;
+}
+.checklist-item:hover {
+  border-color: #94a3b8;
+}
+.checklist-item.passed {
+  border-color: #10b981;
+  background: #ecfdf5;
+}
+.checklist-item input[type='checkbox'] {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.cl-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1e293b;
+}
+.cl-desc {
+  font-size: 12px;
+  color: #64748b;
+  margin-left: 8px;
+}
+.cl-checked {
+  font-size: 11px;
+  color: #059669;
+  margin-left: auto;
+  white-space: nowrap;
+}
 .trace-code-box {
   margin: 8px 0;
   padding: 8px 12px;
@@ -2158,6 +2296,23 @@ textarea {
 .cancel-notice .muted {
   color: #78716c;
   font-size: 12px;
+}
+.qc-status {
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: #eff6ff;
+  border-left: 3px solid #3b82f6;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #1e40af;
+}
+.qc-status ul {
+  margin: 4px 0 0 0;
+  padding-left: 16px;
+}
+.qc-status li {
+  font-size: 12px;
+  color: #475569;
 }
 .pri-btn.sm,
 .warn-btn.sm,

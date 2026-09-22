@@ -11,6 +11,7 @@ public record SalesOrderResponse(
         Long id,
         String orderNo,
         Long sellerOrgId,
+        Long buyerOrgId,
         String customerName,
         String customerPhone,
         String deliveryAddress,
@@ -20,6 +21,9 @@ public record SalesOrderResponse(
         LocalDateTime placedAt,
         LocalDateTime deliveredAt,
         String note,
+        String cancelRequestRole,
+        String cancelRequestReason,
+        String cancelRequestStatus,
         BigDecimal amountTotal,
         String currencyCode,
         List<SalesItem> items

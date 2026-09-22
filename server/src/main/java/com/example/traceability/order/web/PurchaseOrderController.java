@@ -120,6 +120,13 @@ public class PurchaseOrderController {
         return SuccessEnvelope.of(orderService.rejectCancelRequest(orderId, principal));
     }
 
+    @PostMapping("/{orderId}/cancel-withdraw")
+    public SuccessEnvelope<PurchaseOrderResponse> cancelWithdraw(
+            @PathVariable Long orderId,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal) {
+        return SuccessEnvelope.of(orderService.withdrawCancelRequest(orderId, principal));
+    }
+
     public record CancelReasonBody(String reason) {
     }
 }

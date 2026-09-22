@@ -11,12 +11,15 @@ public record QualityInspectionResponse(
         Long batchId,
         Long orgId,
         String inspectionType,
+        String inspectionStage,
+        Long relatedOrderId,
         Long relatedTransferId,
         Long inspectorId,
         String inspectorName,
         String result,
         String summary,
         String checklistJson,
+        LocalDateTime checklistPassedAt,
         LocalDateTime checkedAt,
         LocalDateTime createdAt
 ) {

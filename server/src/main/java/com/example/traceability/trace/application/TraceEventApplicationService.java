@@ -142,6 +142,29 @@ public class TraceEventApplicationService {
             TraceSecurityPrincipal principal
     ) {
         checkOperatorRole(principal);
+        return doCreateEvent(batchId, req, idempotencyKey, principal);
+    }
+
+    /**
+     * 质检专用溯源事件创建:跳过 OPERATOR 角色检查(调用方已做 QA 角色校验)。
+     * 用于质检通过时为每个清单项生成溯源事件。
+     */
+    @Transactional
+    public TraceEventResponse createEventForQuality(
+            Long batchId,
+            CreateTraceEventRequest req,
+            String idempotencyKey,
+            TraceSecurityPrincipal principal
+    ) {
+        return doCreateEvent(batchId, req, idempotencyKey, principal);
+    }
+
+    private TraceEventResponse doCreateEvent(
+            Long batchId,
+            CreateTraceEventRequest req,
+            String idempotencyKey,
+            TraceSecurityPrincipal principal
+    ) {
         String cleanIdempotencyKey = validateIdempotencyKey(idempotencyKey);
         Long orgId = principal.getOrgId();
 

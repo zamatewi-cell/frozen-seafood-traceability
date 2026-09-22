@@ -1,7 +1,7 @@
 import type { ProblemDetails } from '@/types/trace'
 
 /**
- * 质检 API（质量管理员）。
+ * 质检 API（质量管理员 + 操作员提交质检审核）。
  */
 
 export interface QualityInspection {
@@ -10,14 +10,36 @@ export interface QualityInspection {
   batchId: number
   orgId: number
   inspectionType: string
+  inspectionStage: string | null
+  relatedOrderId: number | null
   relatedTransferId: number | null
   inspectorId: number | null
   inspectorName: string | null
   result: string
   summary: string | null
   checklistJson: string | null
+  checklistPassedAt: string | null
   checkedAt: string | null
   createdAt: string
+}
+
+export interface ChecklistTemplateItem {
+  id: number
+  stageCode: string
+  orgType: string
+  itemName: string
+  itemDesc: string | null
+  sortOrder: number
+  isRequired: number
+}
+
+export interface ChecklistItemState {
+  itemName: string
+  itemDesc: string | null
+  passed: boolean
+  checkedBy: string | null
+  checkedAt: string | null
+  remark: string | null
 }
 
 interface Envelope<T> {
@@ -84,4 +106,64 @@ export async function submitInspectionResult(
     body: JSON.stringify(payload)
   })
   return parseEnvelope<QualityInspection>(res)
+}
+
+// ==================== 新:环节质检流程 ====================
+
+export async function getChecklistTemplate(stageCode: string): Promise<ChecklistTemplateItem[]> {
+  const res = await fetch(`/api/v1/quality/checklist-template/${stageCode}`, { credentials: 'include' })
+  return parseEnvelope(res)
+}
+
+export async function submitQualityReview(orderId: number): Promise<QualityInspection[]> {
+  const csrf = await fetchCsrf()
+  const res = await fetch(`/api/v1/orders/purchase/${orderId}/submit-quality-review`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf }
+  })
+  return parseEnvelope<QualityInspection[]>(res)
+}
+
+export async function listPendingInspections(): Promise<QualityInspection[]> {
+  const res = await fetch('/api/v1/quality/pending-inspections', { credentials: 'include' })
+  return parseEnvelope(res)
+}
+
+export async function listInspectionsByOrder(orderId: number): Promise<QualityInspection[]> {
+  const res = await fetch(`/api/v1/orders/purchase/${orderId}/inspections`, { credentials: 'include' })
+  return parseEnvelope(res)
+}
+
+export async function updateChecklistItem(
+  inspectionId: number,
+  payload: { itemName: string; passed: boolean; remark?: string }
+): Promise<QualityInspection> {
+  const csrf = await fetchCsrf()
+  const res = await fetch(`/api/v1/inspections/${inspectionId}/checklist-item`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf },
+    body: JSON.stringify(payload)
+  })
+  return parseEnvelope<QualityInspection>(res)
+}
+
+export async function passInspection(inspectionId: number): Promise<QualityInspection> {
+  const csrf = await fetchCsrf()
+  const res = await fetch(`/api/v1/inspections/${inspectionId}/pass`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf }
+  })
+  return parseEnvelope<QualityInspection>(res)
+}
+
+export function parseChecklist(json: string | null): ChecklistItemState[] {
+  if (!json) return []
+  try {
+    return JSON.parse(json) as ChecklistItemState[]
+  } catch {
+    return []
+  }
 }

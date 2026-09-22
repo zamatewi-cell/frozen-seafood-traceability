@@ -76,6 +76,7 @@ public class OrderApplicationService {
     private final OrderBatchAllocationMapper orderBatchAllocationMapper;
     private final QualityInspectionMapper qualityInspectionMapper;
     private final OrganizationMapper organizationMapper;
+    private final com.example.traceability.batch.mapper.BatchMapper batchMapper;
     private final Map<Long, String> orgCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     public OrderApplicationService(
@@ -88,7 +89,8 @@ public class OrderApplicationService {
             OrderProgressNoteMapper orderProgressNoteMapper,
             OrderBatchAllocationMapper orderBatchAllocationMapper,
             QualityInspectionMapper qualityInspectionMapper,
-            OrganizationMapper organizationMapper) {
+            OrganizationMapper organizationMapper,
+            com.example.traceability.batch.mapper.BatchMapper batchMapper) {
         this.purchaseOrderMapper = purchaseOrderMapper;
         this.purchaseOrderItemMapper = purchaseOrderItemMapper;
         this.salesOrderMapper = salesOrderMapper;
@@ -99,6 +101,7 @@ public class OrderApplicationService {
         this.orderBatchAllocationMapper = orderBatchAllocationMapper;
         this.qualityInspectionMapper = qualityInspectionMapper;
         this.organizationMapper = organizationMapper;
+        this.batchMapper = batchMapper;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -276,17 +279,19 @@ public class OrderApplicationService {
             throw new BusinessException(HttpStatus.CONFLICT, "ALLOCATION_INSUFFICIENT",
                     "分配量不足", "已分配 " + totalAllocated + " kg，订单需要 " + totalOrdered + " kg，请补充分配后再交付");
         }
-        // 加工厂质检强制:每个分配批次必须有 PASS 质检单
+        // 环节质检强制:出货方组织需通过对应环节质检(清单全部打钩通过)
         List<OrderBatchAllocation> allocs = orderBatchAllocationMapper.selectByOrderId(orderId);
         for (OrderBatchAllocation alloc : allocs) {
             List<QualityInspection> inspections = qualityInspectionMapper.selectList(
                     new LambdaQueryWrapper<QualityInspection>()
                             .eq(QualityInspection::getBatchId, alloc.getBatchId())
+                            .eq(QualityInspection::getOrgId, principal.getOrgId())
                             .eq(QualityInspection::getResult, "PASS")
+                            .isNotNull(QualityInspection::getInspectionStage)
                             .eq(QualityInspection::getIsDeleted, 0));
             if (inspections.isEmpty()) {
                 throw new BusinessException(HttpStatus.CONFLICT, "QUALITY_NOT_PASSED",
-                        "质检未通过", "批次 " + alloc.getBatchId() + " 尚无通过的质检单，不可交付");
+                        "质检未通过", "批次 " + alloc.getBatchId() + " 尚未通过环节质检，不可交付");
             }
         }
         order.setStatus(OrderStatus.PURCHASE_SHIPPED);
@@ -346,10 +351,13 @@ public class OrderApplicationService {
         }
         purchaseOrderMapper.updateById(order);
 
+        // 将订单分配的批次归属权从卖方转移到买方(收货后批次进入买方库存)
+        transferAllocatedBatchesToBuyer(orderId, order.getSellerOrgId(), principal.getOrgId(), principal.getUserId());
+
         OrderProgressNote note = new OrderProgressNote();
         note.setOrderId(orderId);
         note.setOrderType("PURCHASE");
-        note.setNoteText("已收货入库，溯源码已生成: " + order.getPublicTraceId());
+        note.setNoteText("已收货入库，批次已转入库存，溯源码: " + order.getPublicTraceId());
         note.setStatusAt(OrderStatus.PURCHASE_RECEIVED);
         note.setIsTerminalVisible(1);
         note.setOrgId(principal.getOrgId());
@@ -493,6 +501,43 @@ public class OrderApplicationService {
         return getPurchaseOrder(orderId, principal);
     }
 
+    /**
+     * 撤回取消请求:仅发起方可撤回自己 PENDING 状态的取消请求,撤回后订单恢复执行。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PurchaseOrderResponse withdrawCancelRequest(Long orderId, TraceSecurityPrincipal principal) {
+        PurchaseOrder order = requirePurchaseAccess(orderId, principal);
+        requireOperator(principal);
+        if (order.getCancelRequestStatus() == null
+                || !"PENDING".equals(order.getCancelRequestStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "NO_PENDING_CANCEL",
+                    "无待审核取消请求", "该订单没有待审核的取消请求，无法撤回");
+        }
+        String myRole = order.getBuyerOrgId().equals(principal.getOrgId()) ? "BUYER" : "SELLER";
+        if (!myRole.equals(order.getCancelRequestRole())) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "CANCEL_WITHDRAW_NOT_OWNER",
+                    "不可撤回他人请求", "仅取消请求发起方可撤回自己的取消请求");
+        }
+        order.setCancelRequestStatus("WITHDRAWN");
+        order.setUpdatedBy(principal.getUserId());
+        purchaseOrderMapper.updateById(order);
+
+        OrderProgressNote note = new OrderProgressNote();
+        note.setOrderId(orderId);
+        note.setOrderType("PURCHASE");
+        note.setNoteText("取消请求已撤回，订单继续执行");
+        note.setStatusAt(order.getStatus());
+        note.setIsTerminalVisible(1);
+        note.setOrgId(principal.getOrgId());
+        note.setCreatedBy(principal.getUserId());
+        note.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        note.setVersion(0L);
+        note.setIsDeleted(0);
+        orderProgressNoteMapper.insert(note);
+
+        return getPurchaseOrder(orderId, principal);
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public SalesOrderResponse createSalesOrder(SalesOrderCreateRequest request, TraceSecurityPrincipal principal) {
         LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
@@ -560,8 +605,10 @@ public class OrderApplicationService {
         String contactPhone = po.getBuyerContactPhone();
         String contactAddr = po.getBuyerContactAddress() != null ? po.getBuyerContactAddress() : "下游采购订单";
         return new SalesOrderResponse(po.getId(), po.getOrderNo(), po.getSellerOrgId(),
+                po.getBuyerOrgId(),
                 contactName, contactPhone, contactAddr, po.getStatus(), po.getTraceCodeId(),
                 po.getPublicTraceId(), po.getOrderedAt(), null, po.getNote(),
+                po.getCancelRequestRole(), po.getCancelRequestReason(), po.getCancelRequestStatus(),
                 po.getAmountTotal(), po.getCurrencyCode(), items);
     }
 
@@ -621,6 +668,37 @@ public class OrderApplicationService {
         return order;
     }
 
+    /**
+     * 收货入库时将订单分配的批次归属权从卖方转移到买方。
+     * 使用乐观锁保证安全,转移后批次进入买方库存可见。
+     */
+    private void transferAllocatedBatchesToBuyer(Long orderId, Long sellerOrgId, Long buyerOrgId, Long userId) {
+        List<OrderBatchAllocation> allocs = orderBatchAllocationMapper.selectByOrderId(orderId);
+        if (allocs == null || allocs.isEmpty()) {
+            return;
+        }
+        for (OrderBatchAllocation alloc : allocs) {
+            com.example.traceability.batch.domain.Batch batch = batchMapper.selectById(alloc.getBatchId());
+            if (batch == null) {
+                continue;
+            }
+            // 批次已在买方名下则跳过(幂等)
+            if (buyerOrgId.equals(batch.getOrgId())) {
+                continue;
+            }
+            // 批次不在卖方名下说明已被转移,跳过避免覆盖
+            if (!sellerOrgId.equals(batch.getOrgId())) {
+                continue;
+            }
+            int affected = batchMapper.updateOrgIdByIdAndVersion(
+                    batch.getId(), sellerOrgId, buyerOrgId, batch.getVersion(), userId);
+            if (affected == 0) {
+                throw new BusinessException(HttpStatus.CONFLICT, "BATCH_TRANSFER_CONFLICT",
+                        "批次转移冲突", "批次 " + batch.getBatchNo() + " 在转移过程中版本冲突，请重试");
+            }
+        }
+    }
+
     private SalesOrder requireSalesAccess(Long orderId, TraceSecurityPrincipal principal) {
         SalesOrder order = salesOrderMapper.selectById(orderId);
         if (order == null) {
@@ -671,9 +749,12 @@ public class OrderApplicationService {
                         productName(item.getProductId()), item.getQuantity(), item.getUnitCode(),
                         item.getUnitPrice(), item.getRowAmount())).toList();
         return new SalesOrderResponse(order.getId(), order.getOrderNo(), order.getSellerOrgId(),
+                null,
                 order.getCustomerName(), order.getCustomerPhone(), order.getDeliveryAddress(),
                 order.getStatus(), order.getTraceCodeId(), order.getPackedPackageNo(),
-                order.getPlacedAt(), order.getDeliveredAt(), order.getNote(), order.getAmountTotal(),
+                order.getPlacedAt(), order.getDeliveredAt(), order.getNote(),
+                null, null, null,
+                order.getAmountTotal(),
                 order.getCurrencyCode(), items);
     }
 

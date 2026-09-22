@@ -32,6 +32,12 @@ public class QualityInspection {
     @TableField("inspection_type")
     private String inspectionType;
 
+    @TableField("inspection_stage")
+    private String inspectionStage;
+
+    @TableField("related_order_id")
+    private Long relatedOrderId;
+
     @TableField("related_transfer_id")
     private Long relatedTransferId;
 
@@ -49,6 +55,9 @@ public class QualityInspection {
 
     @TableField("checklist_json")
     private String checklistJson;
+
+    @TableField("checklist_passed_at")
+    private LocalDateTime checklistPassedAt;
 
     @TableField("checked_at")
     private LocalDateTime checkedAt;
@@ -83,6 +92,10 @@ public class QualityInspection {
     public void setOrgId(Long orgId) { this.orgId = orgId; }
     public String getInspectionType() { return inspectionType; }
     public void setInspectionType(String inspectionType) { this.inspectionType = inspectionType; }
+    public String getInspectionStage() { return inspectionStage; }
+    public void setInspectionStage(String inspectionStage) { this.inspectionStage = inspectionStage; }
+    public Long getRelatedOrderId() { return relatedOrderId; }
+    public void setRelatedOrderId(Long relatedOrderId) { this.relatedOrderId = relatedOrderId; }
     public Long getRelatedTransferId() { return relatedTransferId; }
     public void setRelatedTransferId(Long relatedTransferId) { this.relatedTransferId = relatedTransferId; }
     public Long getInspectorId() { return inspectorId; }
@@ -95,6 +108,8 @@ public class QualityInspection {
     public void setSummary(String summary) { this.summary = summary; }
     public String getChecklistJson() { return checklistJson; }
     public void setChecklistJson(String checklistJson) { this.checklistJson = checklistJson; }
+    public LocalDateTime getChecklistPassedAt() { return checklistPassedAt; }
+    public void setChecklistPassedAt(LocalDateTime checklistPassedAt) { this.checklistPassedAt = checklistPassedAt; }
     public LocalDateTime getCheckedAt() { return checkedAt; }
     public void setCheckedAt(LocalDateTime checkedAt) { this.checkedAt = checkedAt; }
     public Long getVersion() { return version; }
