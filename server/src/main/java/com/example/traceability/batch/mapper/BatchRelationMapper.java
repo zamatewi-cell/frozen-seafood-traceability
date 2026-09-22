@@ -24,9 +24,6 @@ public interface BatchRelationMapper extends BaseMapper<BatchRelation> {
     @Select("SELECT * FROM batch_relation WHERE operation_id = #{operationId} ORDER BY id ASC")
     List<BatchRelation> selectByOperationId(@Param("operationId") Long operationId);
 
-    @Select("SELECT COUNT(*) FROM batch_relation WHERE child_batch_id = #{childBatchId}")
-    int countUpstreamRelationsByChildBatchId(@Param("childBatchId") Long childBatchId);
-
     @Insert("<script>" +
             "INSERT INTO batch_relation (operation_id, parent_batch_id, child_batch_id, relation_type, created_at) VALUES " +
             "<foreach collection='relations' item='r' separator=','>" +

@@ -1,6 +1,7 @@
 package com.example.traceability.batch.application;
 
 import com.example.traceability.batch.domain.Batch;
+import com.example.traceability.batch.domain.BatchFlowStatus;
 import com.example.traceability.batch.domain.BatchItemRole;
 import com.example.traceability.batch.domain.BatchOperation;
 import com.example.traceability.batch.domain.BatchOperationItem;
@@ -8,8 +9,9 @@ import com.example.traceability.batch.domain.BatchOperationStatus;
 import com.example.traceability.batch.domain.BatchOperationType;
 import com.example.traceability.batch.domain.BatchRelation;
 import com.example.traceability.batch.domain.BatchRelationType;
-import com.example.traceability.batch.domain.BatchFlowStatus;
 import com.example.traceability.batch.domain.BatchRiskStatus;
+import com.example.traceability.batch.domain.BatchType;
+import com.example.traceability.batch.domain.TraceBatchNoGenerator;
 import com.example.traceability.batch.dto.BatchOperationCreateRequest;
 import com.example.traceability.batch.dto.BatchOperationItemRequest;
 import com.example.traceability.batch.dto.BatchOperationItemResponse;
@@ -20,35 +22,52 @@ import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.batch.mapper.BatchOperationItemMapper;
 import com.example.traceability.batch.mapper.BatchOperationMapper;
 import com.example.traceability.batch.mapper.BatchRelationMapper;
+import com.example.traceability.common.envelope.PageMeta;
+import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
+import com.example.traceability.masterdata.domain.Product;
+import com.example.traceability.masterdata.mapper.ProductMapper;
+import com.example.traceability.trace.application.TraceEventApplicationService;
+import com.example.traceability.trace.application.TraceEventApplicationService.ProcessBatchLine;
+import com.example.traceability.trace.application.TraceEventApplicationService.ProcessProjection;
 import com.example.traceability.trace.mapper.TransferMapper;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
 /**
- * 批次操作与谱系边应用服务。
+ * 批次操作（物料转换）与谱系边应用服务。
  * <p>
- * 负责批次操作草稿创建、服务端物料平衡重新计算、引用批次活性/组织校验、
- * 输入批次历史累计量校验、输出批次唯一生产来源校验、基于 MySQL 8.4 recursive CTE 的成环检测、
- * 稳定顺序行锁控制、两套幂等并发安全恢复及谱系边生成。
+ * Phase A Slice 3 协议（统一业务契约 v1.1 §4 / §5 / §6 / §11）：
+ * <ul>
+ *   <li>本 Slice 仅执行 PROCESS 与 SPLIT，且恰好一个 INPUT；MERGE / REPACK 返回 422 OPERATION_TYPE_NOT_SUPPORTED
+ *       （当前 Slice 范围限制，不是永久业务规则）；</li>
+ *   <li>INPUT 必须全量消耗输入批次当前剩余量，禁止部分 INPUT；需要部分加工时先 SPLIT；</li>
+ *   <li>OUTPUT 批次由服务端在创建操作草稿时生成为 DRAFT+NORMAL，只能随操作提交原子激活；</li>
+ *   <li>提交在同一事务内：关闭全部 INPUT、激活全部 OUTPUT、固化谱系边，PROCESS 自动投影 PROCESS 事件，SPLIT 不产生事件；</li>
+ *   <li>物料平衡由服务端以 BigDecimal 数值比较（compareTo）精确校验：sum(INPUT) = sum(OUTPUT + LOSS + WASTE + SAMPLE)；</li>
+ *   <li>写操作仅限当前责任组织为 PROCESSOR 的 OPERATOR；读取对操作所属组织开放（含历史参与后已转出批次的情形）。</li>
+ * </ul>
+ * 锁顺序：batch_operation → batch（按 ID 升序），从不锁 transfer / shipment，与 Slice 2 的 shipment → transfer → batch 不成环。
  * </p>
  *
  * @author Seafood Traceability Team
@@ -57,35 +76,49 @@ import java.util.Set;
 @Service
 public class BatchOperationApplicationService {
 
-    private static final BigDecimal MASS_BALANCE_TOLERANCE = new BigDecimal("0.001");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final DateTimeFormatter OP_NO_DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
+    private static final Duration MAX_FUTURE_SKEW = Duration.ofMinutes(5);
+    private static final Set<BatchOperationType> SUPPORTED_TYPES = Set.of(BatchOperationType.PROCESS, BatchOperationType.SPLIT);
 
     private final BatchOperationMapper operationMapper;
     private final BatchOperationItemMapper itemMapper;
     private final BatchRelationMapper relationMapper;
     private final BatchMapper batchMapper;
     private final TransferMapper transferMapper;
+    private final ProductMapper productMapper;
+    private final TraceBatchNoGenerator traceBatchNoGenerator;
+    private final TraceEventApplicationService traceEventService;
 
     public BatchOperationApplicationService(
             BatchOperationMapper operationMapper,
             BatchOperationItemMapper itemMapper,
             BatchRelationMapper relationMapper,
             BatchMapper batchMapper,
-            TransferMapper transferMapper
+            TransferMapper transferMapper,
+            ProductMapper productMapper,
+            TraceBatchNoGenerator traceBatchNoGenerator,
+            TraceEventApplicationService traceEventService
     ) {
         this.operationMapper = Objects.requireNonNull(operationMapper, "operationMapper 不能为空");
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper 不能为空");
         this.relationMapper = Objects.requireNonNull(relationMapper, "relationMapper 不能为空");
         this.batchMapper = Objects.requireNonNull(batchMapper, "batchMapper 不能为空");
         this.transferMapper = Objects.requireNonNull(transferMapper, "transferMapper 不能为空");
+        this.productMapper = Objects.requireNonNull(productMapper, "productMapper 不能为空");
+        this.traceBatchNoGenerator = Objects.requireNonNull(traceBatchNoGenerator, "traceBatchNoGenerator 不能为空");
+        this.traceEventService = Objects.requireNonNull(traceEventService, "traceEventService 不能为空");
     }
 
+    // =====================================================================================
+    // 创建草稿
+    // =====================================================================================
+
     /**
-     * 创建批次操作草稿。
+     * 创建批次操作草稿，并由服务端生成全部 OUTPUT 草稿批次（DRAFT+NORMAL）。
      * <p>
-     * 仅限 OPERATOR 角色操作。服务端推导组织与操作人上下文。
-     * 强制校验 Idempotency-Key；同组织相同幂等键重放原操作，不同语义返回 409 IDEMPOTENCY_CONFLICT。
+     * 同组织相同 Idempotency-Key 且语义相同则重放原操作；语义不同返回 409 IDEMPOTENCY_CONFLICT。
+     * 创建阶段不改变输入批次状态，也不对输入批次做排他预留；提交时在行锁下重新校验全部前提。
      * </p>
      *
      * @param req            操作创建请求
@@ -93,209 +126,121 @@ public class BatchOperationApplicationService {
      * @param principal      当前认证主体
      * @return 创建或重放的批次操作详情
      */
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public BatchOperationResponse createDraftOperation(
             BatchOperationCreateRequest req,
             String idempotencyKey,
             TraceSecurityPrincipal principal
     ) {
-        checkOperatorRole(principal);
+        checkWriteAccess(principal);
+        String cleanKey = validateIdempotencyKey(idempotencyKey);
 
-        // 1. 幂等键基础格式校验
-        String cleanIdempotencyKey = validateIdempotencyKey(idempotencyKey, "Idempotency-Key");
-
-        // 2. 操作类型校验与规范化
-        if (!BatchOperationType.isValid(req.operationType())) {
-            throw new BusinessException(
-                    HttpStatus.BAD_REQUEST,
-                    "INVALID_REQUEST",
-                    "参数校验失败",
-                    "不支持的批次操作类型: " + req.operationType()
-            );
-        }
-        BatchOperationType opType = BatchOperationType.fromCode(req.operationType());
-
-        // 3. 项目明细基础校验、单位校验、数量校验与 batchId 规则校验
-        List<BatchOperationItemRequest> itemRequests = req.items();
-        if (itemRequests == null || itemRequests.size() < 2) {
-            throw new BusinessException(
-                    HttpStatus.BAD_REQUEST,
-                    "INVALID_REQUEST",
-                    "参数校验失败",
-                    "操作明细项目 items 不能为空且至少包含 2 个项目"
-            );
-        }
-
-        int inputCount = 0;
-        int outputCount = 0;
-        Set<Long> referencedBatchIds = new HashSet<>();
-
-        for (BatchOperationItemRequest item : itemRequests) {
-            if (item == null) {
-                throw new BusinessException(
-                        HttpStatus.BAD_REQUEST,
-                        "INVALID_REQUEST",
-                        "参数校验失败",
-                        "操作明细项目列表中不得包含空项目"
-                );
-            }
-            if (!BatchItemRole.isValid(item.role())) {
-                throw new BusinessException(
-                        HttpStatus.BAD_REQUEST,
-                        "INVALID_REQUEST",
-                        "参数校验失败",
-                        "不支持的项目角色: " + item.role()
-                );
-            }
-            BatchItemRole role = BatchItemRole.fromCode(item.role());
-
-            if (item.unitCode() == null || !"kg".equalsIgnoreCase(item.unitCode().trim())) {
-                throw new BusinessException(
-                        HttpStatus.BAD_REQUEST,
-                        "INVALID_REQUEST",
-                        "参数校验失败",
-                        "操作明细计量单位仅允许 kg"
-                );
-            }
-
-            if (item.quantity() == null || item.quantity().compareTo(BigDecimal.ZERO) <= 0) {
-                throw new BusinessException(
-                        HttpStatus.BAD_REQUEST,
-                        "INVALID_REQUEST",
-                        "参数校验失败",
-                        "明细数量必须大于 0"
-                );
-            }
-            if (item.quantity().scale() > 3) {
-                throw new BusinessException(
-                        HttpStatus.BAD_REQUEST,
-                        "INVALID_REQUEST",
-                        "参数校验失败",
-                        "明细数量最多保留 3 位小数"
-                );
-            }
-
-            if (role == BatchItemRole.INPUT || role == BatchItemRole.OUTPUT) {
-                if (item.batchId() == null || item.batchId() <= 0) {
-                    throw new BusinessException(
-                            HttpStatus.BAD_REQUEST,
-                            "INVALID_REQUEST",
-                            "参数校验失败",
-                            role.name() + " 角色项目必须指定有效的 batchId"
-                    );
-                }
-                // 同一操作中批次 ID 不得重复，且同一批次不得同时作为投入和产出
-                if (!referencedBatchIds.add(item.batchId())) {
-                    throw new BusinessException(
-                            HttpStatus.BAD_REQUEST,
-                            "INVALID_REQUEST",
-                            "参数校验失败",
-                            "同一操作中批次 ID 不得重复引用: " + item.batchId()
-                    );
-                }
-                if (role == BatchItemRole.INPUT) {
-                    inputCount++;
-                } else {
-                    outputCount++;
-                }
-            } else {
-                // LOSS/WASTE/SAMPLE 角色严禁引用批次
-                if (item.batchId() != null) {
-                    throw new BusinessException(
-                            HttpStatus.BAD_REQUEST,
-                            "INVALID_REQUEST",
-                            "参数校验失败",
-                            role.name() + " 角色项目严禁关联批次 batchId"
-                    );
-                }
-            }
-        }
-
-        // 4. 操作类型基数（Cardinality）约束检查
-        validateCardinality(opType, inputCount, outputCount);
-
+        BatchOperationType opType = resolveSupportedType(req.operationType());
+        ValidatedItems validated = validateItems(opType, req.items());
+        LocalDateTime occurredAtUtc = normalizeOccurredAt(req);
+        String cleanNote = req.note() != null && !req.note().isBlank() ? req.note().trim() : null;
         Long orgId = principal.getOrgId();
 
-        // 5. 幂等预检：查询同组织下是否已存在该创建幂等键
-        BatchOperation existing = operationMapper.selectByOrgIdAndIdempotencyKey(orgId, cleanIdempotencyKey);
+        // 1. 幂等预检（含已删除草稿占用的键）
+        BatchOperation existing = operationMapper.selectByOrgIdAndIdempotencyKeyIncludingDeleted(orgId, cleanKey);
         if (existing != null) {
-            List<BatchOperationItem> existingItems = itemMapper.selectByOperationId(existing.getId());
-            if (isSameCreateSemantics(existing, existingItems, req, opType)) {
-                List<BatchRelation> relations = relationMapper.selectByOperationId(existing.getId());
-                return buildResponse(existing, existingItems, relations);
-            }
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "IDEMPOTENCY_CONFLICT",
-                    "幂等提交冲突",
-                    "当前创建幂等键已被使用且请求载荷与历史记录不一致"
-            );
+            return replayCreateOrConflict(existing, validated, opType, occurredAtUtc, cleanNote);
         }
 
-        // 6. 对所有引用的 batchId 按升序进行数据库当前锁定读并检查是否存在在途交接(PENDING)
-        List<Long> sortedBatchIds = referencedBatchIds.stream().sorted().toList();
-        for (Long batchId : sortedBatchIds) {
-            batchMapper.selectByIdForUpdate(batchId);
-            if (transferMapper.countPendingTransfersByBatchId(batchId) > 0) {
-                throw new BusinessException(
-                        HttpStatus.CONFLICT,
-                        "BATCH_TRANSFER_PENDING",
-                        "批次在途交接冲突",
-                        "批次 ID " + batchId + " 处于在途交接确认(PENDING)中，禁止进行批次操作"
-                );
-            }
+        // 2. 锁定唯一 INPUT 批次并校验全量消耗前提
+        BatchOperationItemRequest inputReq = validated.input();
+        Batch input = batchMapper.selectByIdIgnoreTenantForUpdate(inputReq.batchId());
+        if (input == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + inputReq.batchId() + " 的输入批次");
+        }
+        verifyInputConsumable(input, inputReq.quantity(), orgId);
+
+        // 3. 产出产品校验
+        List<Long> outputProductIds = new ArrayList<>();
+        for (BatchOperationItemRequest out : validated.outputs()) {
+            outputProductIds.add(resolveOutputProductId(opType, out, input));
         }
 
-        // 7. 构造操作主表与明细并持久化
-        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
-        String operationNo = generateOperationNo(nowUtc);
-
+        // 4. 持久化操作主表
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS);
         BatchOperation op = new BatchOperation();
         op.setOrgId(orgId);
-        op.setOperationNo(operationNo);
+        op.setOperationNo(generateOperationNo(nowUtc));
         op.setOperationType(opType.name());
-        op.setOccurredAt(req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime().truncatedTo(ChronoUnit.MILLIS));
+        op.setOccurredAt(occurredAtUtc);
         op.setRecordedAt(nowUtc);
         op.setStatus(BatchOperationStatus.DRAFT.name());
-        op.setIdempotencyKey(cleanIdempotencyKey);
-        op.setNote(req.note() != null ? req.note().trim() : null);
+        op.setIdempotencyKey(cleanKey);
+        op.setNote(cleanNote);
         op.setVersion(0L);
         op.setIsDeleted(0);
         op.setCreatedAt(nowUtc);
         op.setCreatedBy(principal.getUserId());
         op.setUpdatedAt(nowUtc);
         op.setUpdatedBy(principal.getUserId());
-
         try {
             operationMapper.insert(op);
         } catch (DuplicateKeyException e) {
-            // 当前读恢复
-            BatchOperation dup = operationMapper.selectByOrgIdAndIdempotencyKeyForUpdate(orgId, cleanIdempotencyKey);
+            BatchOperation dup = operationMapper.selectByOrgIdAndIdempotencyKeyIncludingDeleted(orgId, cleanKey);
             if (dup != null) {
-                List<BatchOperationItem> dupItems = itemMapper.selectByOperationId(dup.getId());
-                if (isSameCreateSemantics(dup, dupItems, req, opType)) {
-                    List<BatchRelation> relations = relationMapper.selectByOperationId(dup.getId());
-                    return buildResponse(dup, dupItems, relations);
-                }
-                throw new BusinessException(
-                        HttpStatus.CONFLICT,
-                        "IDEMPOTENCY_CONFLICT",
-                        "幂等提交冲突",
-                        "并发检测到相同创建幂等键，但请求载荷与已落库数据不一致"
-                );
+                return replayCreateOrConflict(dup, validated, opType, occurredAtUtc, cleanNote);
             }
             throw e;
         }
 
+        // 5. 服务端生成 OUTPUT 草稿批次（PROCESS 产出为 PROCESSING；SPLIT 产出继承输入批次类型）
+        String outputBatchType = opType == BatchOperationType.PROCESS ? BatchType.PROCESSING.name() : input.getBatchType();
+        // 按请求中 OUTPUT 出现顺序一一对应；值相同的 OUTPUT 请求记录彼此相等，不能作为 Map 键
+        List<Long> outputBatchIds = new ArrayList<>();
+        for (int i = 0; i < validated.outputs().size(); i++) {
+            BatchOperationItemRequest out = validated.outputs().get(i);
+            Batch child = new Batch();
+            child.setOrgId(orgId);
+            child.setCreationOrgId(orgId);
+            child.setProductId(outputProductIds.get(i));
+            child.setTraceBatchNo(traceBatchNoGenerator.generate());
+            child.setExternalBatchNo(out.externalBatchNo() != null && !out.externalBatchNo().isBlank() ? out.externalBatchNo().trim() : null);
+            child.setBatchType(outputBatchType);
+            child.setQuantity(out.quantity());
+            child.setUnitCode("kg");
+            child.setOriginType(input.getOriginType());
+            child.setOriginText(input.getOriginText());
+            child.setProductionDate(occurredAtUtc.toLocalDate());
+            child.setCaptureDate(input.getCaptureDate());
+            // 普通 PROCESS 不推导速冻；SPLIT 只拆分身份，均不声明速冻日期
+            child.setFreezeDate(null);
+            child.setShelfLifeDays(out.shelfLifeDays());
+            child.setFlowStatus(BatchFlowStatus.DRAFT.name());
+            child.setRiskStatus(BatchRiskStatus.NORMAL.name());
+            child.setProducedByOperationId(op.getId());
+            child.setConsumedByOperationId(null);
+            child.setCreationIdempotencyKey(null);
+            child.setVersion(0L);
+            child.setIsDeleted(0);
+            child.setCreatedAt(nowUtc);
+            child.setCreatedBy(principal.getUserId());
+            child.setUpdatedAt(nowUtc);
+            child.setUpdatedBy(principal.getUserId());
+            batchMapper.insert(child);
+            outputBatchIds.add(child.getId());
+        }
+
+        // 6. 持久化明细（保持请求顺序）
         List<BatchOperationItem> itemsToInsert = new ArrayList<>();
-        for (BatchOperationItemRequest ir : itemRequests) {
+        int outputIndex = 0;
+        for (BatchOperationItemRequest ir : req.items()) {
+            BatchItemRole role = BatchItemRole.fromCode(ir.role());
             BatchOperationItem item = new BatchOperationItem();
             item.setOperationId(op.getId());
-            item.setBatchId(ir.batchId());
-            item.setRole(BatchItemRole.fromCode(ir.role()).name());
+            item.setBatchId(switch (role) {
+                case INPUT -> ir.batchId();
+                case OUTPUT -> outputBatchIds.get(outputIndex++);
+                default -> null;
+            });
+            item.setRole(role.name());
             item.setQuantity(ir.quantity());
             item.setUnitCode("kg");
-            item.setNormalizedQuantity(ir.quantity()); // 本阶段基准单位为 kg，normalizedQuantity = quantity
+            item.setNormalizedQuantity(ir.quantity());
             item.setConversionRuleId(null);
             item.setVersion(0L);
             item.setIsDeleted(0);
@@ -307,17 +252,23 @@ public class BatchOperationApplicationService {
         }
         itemMapper.insertBatch(itemsToInsert);
 
-        // 重新读取已入库明细以获取生成的自增 ID
-        List<BatchOperationItem> insertedItems = itemMapper.selectByOperationId(op.getId());
-        return buildResponse(op, insertedItems, List.of());
+        return buildResponse(op, itemMapper.selectByOperationId(op.getId()), List.of());
     }
 
+    // =====================================================================================
+    // 提交
+    // =====================================================================================
+
     /**
-     * 提交批次操作草稿并生成谱系边。
+     * 提交批次操作草稿：同一事务内关闭 INPUT、激活 OUTPUT、固化谱系边，PROCESS 自动投影 PROCESS 事件。
      * <p>
-     * 仅限本组织 OPERATOR 角色操作。
-     * 服务端重新计算物料平衡、按稳定顺序对批次加行锁、校验批次活性及声明量/可用量、
-     * 检查输出批次唯一生产来源、利用 MySQL 8.4 递归 CTE 环检测，并原子写入谱系边。
+     * 任一校验或条件更新失败均抛出异常并整体回滚。
+     * </p>
+     *
+     * <p>
+     * 隔离级别为 READ COMMITTED：输入批次行锁（FOR UPDATE）是与 Transfer 新建 / 提交路径的唯一串行化点，
+     * 取得行锁后的未结束交接与已消耗数量检查必须读取最新已提交数据；REPEATABLE READ 下事务早先建立的快照会漏看
+     * 在等待行锁期间已提交的交接。这样无需再对 transfer 加共享锁，避免与 shipment → transfer → batch 锁顺序成环。
      * </p>
      *
      * @param operationId    批次操作 ID
@@ -326,496 +277,629 @@ public class BatchOperationApplicationService {
      * @param principal      当前认证主体
      * @return 提交成功后的批次操作详情及生成的谱系边
      */
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public BatchOperationResponse submitOperation(
             Long operationId,
             BatchOperationSubmitRequest req,
             String idempotencyKey,
             TraceSecurityPrincipal principal
     ) {
-        checkOperatorRole(principal);
-
-        String cleanSubmissionKey = validateIdempotencyKey(idempotencyKey, "Idempotency-Key");
-
+        checkWriteAccess(principal);
+        String cleanSubmissionKey = validateIdempotencyKey(idempotencyKey);
         if (req == null || req.version() == null || req.version() < 0) {
-            throw new BusinessException(
-                    HttpStatus.BAD_REQUEST,
-                    "INVALID_REQUEST",
-                    "参数校验失败",
-                    "乐观锁版本号 version 不能为空且必须非负"
-            );
+            throw badRequest("乐观锁版本号 version 不能为空且必须非负");
         }
-
         Long orgId = principal.getOrgId();
 
-        // 1. 前置查询与安全组织边界校验
-        BatchOperation existing = operationMapper.selectByIdIgnoreTenant(operationId);
-        if (existing == null) {
-            throw new ResourceNotFoundException("未找到 ID 为 " + operationId + " 的批次操作");
+        // 1. 前置查询、组织边界与提交幂等
+        BatchOperation existing = requireOwnOperation(operationId, orgId);
+        BatchOperation replay = replaySubmittedOrNull(existing, cleanSubmissionKey);
+        if (replay != null) {
+            return loadResponse(replay);
         }
-        if (!Objects.equals(existing.getOrgId(), orgId)) {
-            throw new BusinessException(
-                    HttpStatus.FORBIDDEN,
-                    "ORG_SCOPE_DENIED",
-                    "组织数据访问越权",
-                    "无权操作其他组织的批次操作数据"
-            );
+        BatchOperation keyOwner = operationMapper.selectByOrgIdAndSubmissionKey(orgId, cleanSubmissionKey);
+        if (keyOwner != null && !Objects.equals(keyOwner.getId(), operationId)) {
+            throw new BusinessException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "幂等提交冲突",
+                    "当前提交幂等键已被本组织其他批次操作使用");
         }
+        requireDraftAndVersion(existing, req.version());
 
-        // 2. 提交幂等已完成检查
-        if (BatchOperationStatus.SUBMITTED.name().equals(existing.getStatus())) {
-            if (cleanSubmissionKey.equals(existing.getSubmissionIdempotencyKey())) {
-                List<BatchOperationItem> items = itemMapper.selectByOperationId(existing.getId());
-                List<BatchRelation> relations = relationMapper.selectByOperationId(existing.getId());
-                return buildResponse(existing, items, relations);
-            }
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "INVALID_STATE_TRANSITION",
-                    "非法状态流转",
-                    "当前批次操作已处于 SUBMITTED 状态，不可重复提交"
-            );
-        }
-
-        // 检查同组织下提交幂等键是否已被其他操作占用
-        BatchOperation existingSubmission = operationMapper.selectByOrgIdAndSubmissionKey(orgId, cleanSubmissionKey);
-        if (existingSubmission != null && !Objects.equals(existingSubmission.getId(), operationId)) {
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "IDEMPOTENCY_CONFLICT",
-                    "幂等提交冲突",
-                    "当前提交幂等键已被本组织其他批次操作使用"
-            );
-        }
-
-        if (!BatchOperationStatus.DRAFT.name().equals(existing.getStatus())) {
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "INVALID_STATE_TRANSITION",
-                    "非法状态流转",
-                    "仅草稿状态 DRAFT 的批次操作允许提交，当前状态为: " + existing.getStatus()
-            );
-        }
-
-        if (!Objects.equals(existing.getVersion(), req.version())) {
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "VERSION_CONFLICT",
-                    "资源版本冲突",
-                    "当前批次操作版本号为 " + existing.getVersion() + "，请求提交的版本号为 " + req.version()
-            );
-        }
-
-        // 3. 稳定顺序加排他行锁（死锁防范）
-        // 先对批次操作主记录加排他锁
+        // 2. 锁定操作主记录，锁后重新判定
         BatchOperation lockedOp = operationMapper.selectByIdForUpdate(operationId);
         if (lockedOp == null) {
             throw new ResourceNotFoundException("未找到 ID 为 " + operationId + " 的批次操作");
         }
-        if (BatchOperationStatus.SUBMITTED.name().equals(lockedOp.getStatus())) {
-            if (cleanSubmissionKey.equals(lockedOp.getSubmissionIdempotencyKey())) {
-                List<BatchOperationItem> items = itemMapper.selectByOperationId(lockedOp.getId());
-                List<BatchRelation> relations = relationMapper.selectByOperationId(lockedOp.getId());
-                return buildResponse(lockedOp, items, relations);
-            }
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "INVALID_STATE_TRANSITION",
-                    "非法状态流转",
-                    "当前批次操作已并发流转为 SUBMITTED 状态"
-            );
+        replay = replaySubmittedOrNull(lockedOp, cleanSubmissionKey);
+        if (replay != null) {
+            return loadResponse(replay);
         }
+        requireDraftAndVersion(lockedOp, req.version());
+        BatchOperationType opType = resolveSupportedType(lockedOp.getOperationType());
 
+        // 3. 明细与基数
         List<BatchOperationItem> items = itemMapper.selectByOperationId(operationId);
-        if (items.isEmpty()) {
-            throw new BusinessException(
-                    HttpStatus.BAD_REQUEST,
-                    "INVALID_REQUEST",
-                    "操作明细为空",
-                    "当前批次操作不存在任何明细项目"
-            );
+        List<BatchOperationItem> inputItems = new ArrayList<>();
+        List<BatchOperationItem> outputItems = new ArrayList<>();
+        BigDecimal[] totals = sumByRole(items);
+        for (BatchOperationItem item : items) {
+            if (BatchItemRole.INPUT.name().equals(item.getRole())) {
+                inputItems.add(item);
+            } else if (BatchItemRole.OUTPUT.name().equals(item.getRole())) {
+                outputItems.add(item);
+            }
         }
+        validateCardinality(opType, inputItems.size(), outputItems.size());
+        verifyMassBalance(totals);
 
-        // 提取所有涉及的 batchId，升序排序后逐个加排他行锁
-        List<Long> distinctBatchIds = items.stream()
+        // 4. 按批次 ID 升序加排他行锁（INPUT 与 OUTPUT 一并）
+        List<Long> sortedBatchIds = items.stream()
                 .map(BatchOperationItem::getBatchId)
                 .filter(Objects::nonNull)
                 .distinct()
                 .sorted()
                 .toList();
-
-        Map<Long, Batch> lockedBatchMap = new HashMap<>();
-        for (Long bid : distinctBatchIds) {
+        Map<Long, Batch> locked = new LinkedHashMap<>();
+        for (Long bid : sortedBatchIds) {
             Batch b = batchMapper.selectByIdIgnoreTenantForUpdate(bid);
             if (b == null) {
                 throw new ResourceNotFoundException("未找到 ID 为 " + bid + " 的关联批次");
             }
-            if (!Objects.equals(b.getOrgId(), orgId)) {
-                throw new BusinessException(
-                        HttpStatus.FORBIDDEN,
-                        "ORG_SCOPE_DENIED",
-                        "组织数据访问越权",
-                        "关联批次 " + b.getTraceBatchNo() + " 属于其他企业组织，严禁跨组织流转"
-                );
-            }
-            if (!BatchFlowStatus.ACTIVE.name().equals(b.getFlowStatus())
-                    || !BatchRiskStatus.NORMAL.name().equals(b.getRiskStatus())) {
-                throw new BusinessException(
-                        HttpStatus.UNPROCESSABLE_ENTITY,
-                        "BATCH_FLOW_BLOCKED",
-                        "批次状态不可流转",
-                        "批次 " + b.getTraceBatchNo() + " 流转或风险状态不允许操作 (flowStatus="
-                                + b.getFlowStatus() + ", riskStatus=" + b.getRiskStatus() + ")"
-                );
-            }
-            if (transferMapper.countPendingTransfersByBatchId(bid) > 0) {
-                throw new BusinessException(
-                        HttpStatus.CONFLICT,
-                        "BATCH_TRANSFER_PENDING",
-                        "批次存在在途交接",
-                        "批次 " + b.getTraceBatchNo() + " 当前存在正在交接确认中的凭证(PENDING)，已形成排他业务预留，禁止参与批次操作流转"
-                );
-            }
-            lockedBatchMap.put(bid, b);
+            locked.put(bid, b);
         }
 
-        // 4. 服务端独立重新计算物料平衡 (Mass Balance)
-        BigDecimal sumInput = BigDecimal.ZERO;
-        BigDecimal sumOutputAndLoss = BigDecimal.ZERO;
+        // 5. INPUT：责任组织、ACTIVE+NORMAL、未被消耗、无未结束交接、全量消耗
+        BatchOperationItem inputItem = inputItems.get(0);
+        Batch input = locked.get(inputItem.getBatchId());
+        verifyInputConsumable(input, inputItem.getQuantity(), orgId);
 
-        List<BatchOperationItem> inputItems = new ArrayList<>();
-        List<BatchOperationItem> outputItems = new ArrayList<>();
-
-        for (BatchOperationItem item : items) {
-            BatchItemRole role = BatchItemRole.fromCode(item.getRole());
-            BigDecimal normalizedQty = item.getNormalizedQuantity();
-            if (role == BatchItemRole.INPUT) {
-                sumInput = sumInput.add(normalizedQty);
-                inputItems.add(item);
-            } else {
-                sumOutputAndLoss = sumOutputAndLoss.add(normalizedQty);
-                if (role == BatchItemRole.OUTPUT) {
-                    outputItems.add(item);
-                }
-            }
-        }
-
-        BigDecimal balanceDiff = sumInput.subtract(sumOutputAndLoss).abs();
-        if (balanceDiff.compareTo(MASS_BALANCE_TOLERANCE) > 0) {
-            throw new BusinessException(
-                    HttpStatus.UNPROCESSABLE_ENTITY,
-                    "BATCH_MASS_BALANCE_VIOLATION",
-                    "物料平衡校验失败",
-                    String.format("物料不平衡：投入总量(%s kg)与产出损耗总量(%s kg)差值超过容差 0.001 kg",
-                            sumInput.toPlainString(), sumOutputAndLoss.toPlainString())
-            );
-        }
-
-        // 5. 输出批次唯一生产来源与声明数量强校验
+        // 6. OUTPUT：必须是本操作产出的 DRAFT+NORMAL 草稿，数量与明细一致
         for (BatchOperationItem outItem : outputItems) {
-            int upstreamCount = relationMapper.countUpstreamRelationsByChildBatchId(outItem.getBatchId());
-            if (upstreamCount > 0) {
-                Batch outBatch = lockedBatchMap.get(outItem.getBatchId());
-                throw new BusinessException(
-                        HttpStatus.UNPROCESSABLE_ENTITY,
-                        "BATCH_OUTPUT_ALREADY_PRODUCED",
-                        "输出批次已被产出",
-                        "批次 " + outBatch.getTraceBatchNo() + " 已存在上游谱系边，一个批次只能由一次已提交操作产出"
-                );
-            }
-            Batch outBatch = lockedBatchMap.get(outItem.getBatchId());
-            if (outItem.getQuantity().compareTo(outBatch.getQuantity()) != 0) {
-                throw new BusinessException(
-                        HttpStatus.UNPROCESSABLE_ENTITY,
-                        "BATCH_OUTPUT_QUANTITY_MISMATCH",
-                        "输出批次数量不匹配",
-                        String.format("输出项目数量(%s kg)必须严格等于批次初始声明数量(%s kg)",
-                                outItem.getQuantity().toPlainString(), outBatch.getQuantity().toPlainString())
-                );
+            Batch out = locked.get(outItem.getBatchId());
+            if (!Objects.equals(out.getProducedByOperationId(), operationId)
+                    || !Objects.equals(out.getOrgId(), orgId)
+                    || !BatchFlowStatus.DRAFT.name().equals(out.getFlowStatus())
+                    || !BatchRiskStatus.NORMAL.name().equals(out.getRiskStatus())
+                    || out.getQuantity().compareTo(outItem.getQuantity()) != 0) {
+                throw new BusinessException(HttpStatus.CONFLICT, "OPERATION_OUTPUT_STATE_INVALID", "输出批次状态异常",
+                        "输出批次 " + out.getTraceBatchNo() + " 不是本操作产出的草稿批次或数量不一致，无法提交");
             }
         }
 
-        // 6. 输入批次累计占用量校验（历史已提交 INPUT + 本次 INPUT <= 批次声明量）
-        for (BatchOperationItem inItem : inputItems) {
-            BigDecimal historicalUsed = itemMapper.sumSubmittedInputQuantityByBatchId(inItem.getBatchId());
-            BigDecimal totalRequested = historicalUsed.add(inItem.getQuantity());
-            Batch inBatch = lockedBatchMap.get(inItem.getBatchId());
-            if (totalRequested.compareTo(inBatch.getQuantity()) > 0) {
-                throw new BusinessException(
-                        HttpStatus.UNPROCESSABLE_ENTITY,
-                        "BATCH_QUANTITY_EXCEEDED",
-                        "输入批次数量超额",
-                        String.format("输入批次 %s 累计投入量(%s kg)超过声明数量(%s kg)，历史已用 %s kg，本次投入 %s kg",
-                                inBatch.getTraceBatchNo(), totalRequested.toPlainString(), inBatch.getQuantity().toPlainString(),
-                                historicalUsed.toPlainString(), inItem.getQuantity().toPlainString())
-                );
+        // 7. 谱系边（非自环 + recursive CTE 环检测，作为纵深防御）
+        String relationType = opType == BatchOperationType.SPLIT ? BatchRelationType.SPLIT.name() : BatchRelationType.TRANSFORM.name();
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS);
+        List<BatchRelation> relations = new ArrayList<>();
+        for (BatchOperationItem outItem : outputItems) {
+            Long parentId = input.getId();
+            Long childId = outItem.getBatchId();
+            if (Objects.equals(parentId, childId)) {
+                throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "BATCH_RELATION_SELF_LOOP", "谱系关系自环",
+                        "批次 " + parentId + " 试图与自身建立谱系边");
             }
+            if (relationMapper.checkCycleWithCte(childId, parentId) > 0) {
+                throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "BATCH_RELATION_CYCLE", "批次谱系成环",
+                        String.format("检测到循环关系：子批次 %d 已存在到达父批次 %d 的上游路径", childId, parentId));
+            }
+            BatchRelation relation = new BatchRelation();
+            relation.setOperationId(operationId);
+            relation.setParentBatchId(parentId);
+            relation.setChildBatchId(childId);
+            relation.setRelationType(relationType);
+            relation.setCreatedAt(nowUtc);
+            relations.add(relation);
         }
 
-        // 7. 笛卡尔积生成关系边、自环检查与关系类型映射
-        BatchOperationType opType = BatchOperationType.fromCode(lockedOp.getOperationType());
-        String relationType = switch (opType) {
-            case MERGE -> BatchRelationType.MERGE.name();
-            case SPLIT -> BatchRelationType.SPLIT.name();
-            case PROCESS, REPACK -> BatchRelationType.TRANSFORM.name();
-        };
-
-        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
-        List<BatchRelation> relationsToInsert = new ArrayList<>();
-
-        for (BatchOperationItem inItem : inputItems) {
-            for (BatchOperationItem outItem : outputItems) {
-                Long parentId = inItem.getBatchId();
-                Long childId = outItem.getBatchId();
-
-                if (Objects.equals(parentId, childId)) {
-                    throw new BusinessException(
-                            HttpStatus.UNPROCESSABLE_ENTITY,
-                            "BATCH_RELATION_SELF_LOOP",
-                            "谱系关系自环",
-                            "批次 " + parentId + " 试图与自身建立谱系边，违反非自环规则"
-                    );
-                }
-
-                // 8. 基于 MySQL 8.4 recursive CTE 成环检测
-                // 检查拟新增边 parent -> child 是否在现有图中已存在 child ~> parent 的可达路径
-                int cycleCount = relationMapper.checkCycleWithCte(childId, parentId);
-                if (cycleCount > 0) {
-                    throw new BusinessException(
-                            HttpStatus.UNPROCESSABLE_ENTITY,
-                            "BATCH_RELATION_CYCLE",
-                            "批次谱系成环",
-                            String.format("检测到循环关系：子批次 %d 已存在到达父批次 %d 的上游路径，禁止成环", childId, parentId)
-                    );
-                }
-
-                BatchRelation relation = new BatchRelation();
-                relation.setOperationId(operationId);
-                relation.setParentBatchId(parentId);
-                relation.setChildBatchId(childId);
-                relation.setRelationType(relationType);
-                relation.setCreatedAt(nowUtc);
-                relationsToInsert.add(relation);
-            }
-        }
-
-        // 9. 单条原子更新状态流转、记录提交幂等键并递增版本号
+        // 8. 条件更新：操作 DRAFT → SUBMITTED
         int affected;
         try {
-            affected = operationMapper.submitOperation(
-                    operationId,
-                    orgId,
-                    req.version(),
-                    cleanSubmissionKey,
-                    nowUtc,
-                    principal.getUserId()
-            );
+            affected = operationMapper.submitOperation(operationId, orgId, req.version(), cleanSubmissionKey, nowUtc, principal.getUserId());
         } catch (DuplicateKeyException e) {
-            // 捕获提交幂等键唯一索引冲突 (uk_op_org_submission_idempotency)
-            BatchOperation keyOwner = operationMapper.selectByOrgIdAndSubmissionKeyForUpdate(orgId, cleanSubmissionKey);
-            if (keyOwner != null && !keyOwner.getId().equals(operationId)) {
-                throw new BusinessException(
-                        HttpStatus.CONFLICT,
-                        "IDEMPOTENCY_CONFLICT",
-                        "幂等提交冲突",
-                        "提交幂等键已被本组织其他批次操作使用: " + cleanSubmissionKey
-                );
-            }
-            throw e;
+            throw new BusinessException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "幂等提交冲突",
+                    "提交幂等键已被本组织其他批次操作使用");
+        }
+        if (affected != 1) {
+            throw new BusinessException(HttpStatus.CONFLICT, "VERSION_CONFLICT", "资源版本冲突",
+                    "批次操作已被并发修改，请刷新后重试");
         }
 
-        if (affected == 0) {
-            // 当前锁定读排查
-            BatchOperation latest = operationMapper.selectByIdForUpdate(operationId);
-            if (latest == null) {
-                throw new ResourceNotFoundException("未找到 ID 为 " + operationId + " 的批次操作");
+        // 9. 条件更新：INPUT CLOSED、OUTPUT ACTIVE（任一不命中即回滚）
+        if (batchMapper.closeConsumedInput(input.getId(), orgId, operationId, nowUtc, principal.getUserId()) != 1) {
+            throw new BusinessException(HttpStatus.CONFLICT, "BATCH_ALREADY_CONSUMED", "批次已被物料操作消耗",
+                    "输入批次 " + input.getTraceBatchNo() + " 已并发关闭或被其他操作消耗，本次提交已回滚");
+        }
+        for (BatchOperationItem outItem : outputItems) {
+            if (batchMapper.activateOperationOutput(outItem.getBatchId(), orgId, operationId, nowUtc, principal.getUserId()) != 1) {
+                throw new BusinessException(HttpStatus.CONFLICT, "OPERATION_OUTPUT_STATE_INVALID", "输出批次状态异常",
+                        "输出批次 " + outItem.getBatchId() + " 已不是可激活的草稿，本次提交已回滚");
             }
-            if (BatchOperationStatus.SUBMITTED.name().equals(latest.getStatus())) {
-                if (cleanSubmissionKey.equals(latest.getSubmissionIdempotencyKey())) {
-                    List<BatchRelation> existingRelations = relationMapper.selectByOperationId(operationId);
-                    return buildResponse(latest, items, existingRelations);
-                }
-                throw new BusinessException(
-                        HttpStatus.CONFLICT,
-                        "INVALID_STATE_TRANSITION",
-                        "非法状态流转",
-                        "当前批次操作已并发被其他请求提交"
-                );
-            }
-            throw new BusinessException(
-                    HttpStatus.CONFLICT,
-                    "VERSION_CONFLICT",
-                    "资源版本冲突",
-                    "并发修改导致版本冲突，当前版本为 " + latest.getVersion() + "，请刷新后重试"
+        }
+
+        // 10. 谱系边
+        relationMapper.insertBatch(relations);
+
+        // 11. PROCESS 自动投影 PROCESS 事件（每个 OUTPUT 一条）；SPLIT 不生成 PACK / PROCESS
+        if (opType == BatchOperationType.PROCESS) {
+            List<ProcessBatchLine> inputLines = List.of(new ProcessBatchLine(input.getId(), input.getTraceBatchNo(), inputItem.getQuantity()));
+            List<ProcessBatchLine> outputLines = outputItems.stream()
+                    .map(o -> new ProcessBatchLine(o.getBatchId(), locked.get(o.getBatchId()).getTraceBatchNo(), o.getQuantity()))
+                    .toList();
+            ProcessProjection projection = new ProcessProjection(
+                    operationId,
+                    lockedOp.getOperationNo(),
+                    orgId,
+                    lockedOp.getOccurredAt(),
+                    inputLines,
+                    outputLines,
+                    totals[0],
+                    totals[2],
+                    totals[3],
+                    totals[4]
             );
+            for (BatchOperationItem outItem : outputItems) {
+                traceEventService.appendProcessEvent(projection, outItem.getBatchId(), principal.getUserId(), nowUtc);
+            }
         }
 
-        // 10. 批量持久化谱系边
-        if (!relationsToInsert.isEmpty()) {
-            relationMapper.insertBatch(relationsToInsert);
-        }
-
-        // 重新获取更新后的实体与边
-        BatchOperation submittedOp = operationMapper.selectByIdAndOrgId(operationId, orgId);
-        List<BatchRelation> insertedRelations = relationMapper.selectByOperationId(operationId);
-        return buildResponse(submittedOp, items, insertedRelations);
+        return loadResponse(operationMapper.selectByIdAndOrgId(operationId, orgId));
     }
 
-    private void validateCardinality(BatchOperationType opType, int inputCount, int outputCount) {
-        switch (opType) {
-            case MERGE -> {
-                if (inputCount < 2 || outputCount < 1) {
-                    throw new BusinessException(
-                            HttpStatus.BAD_REQUEST,
-                            "INVALID_REQUEST",
-                            "操作基数约束不符",
-                            "MERGE 合并操作必须至少包含 2 个 INPUT 项目且至少包含 1 个 OUTPUT 项目"
-                    );
-                }
+    // =====================================================================================
+    // 删除草稿
+    // =====================================================================================
+
+    /**
+     * 删除批次操作草稿：同一事务内逻辑删除操作、明细及其全部 OUTPUT 草稿批次。
+     *
+     * @param operationId     批次操作 ID
+     * @param expectedVersion 期望版本号
+     * @param principal       当前认证主体
+     */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public void deleteDraftOperation(Long operationId, Long expectedVersion, TraceSecurityPrincipal principal) {
+        checkWriteAccess(principal);
+        if (expectedVersion == null || expectedVersion < 0) {
+            throw badRequest("expectedVersion 不能为空且必须非负");
+        }
+        Long orgId = principal.getOrgId();
+        requireOwnOperation(operationId, orgId);
+
+        BatchOperation locked = operationMapper.selectByIdForUpdate(operationId);
+        if (locked == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + operationId + " 的批次操作");
+        }
+        requireDraftAndVersion(locked, expectedVersion);
+
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS);
+        if (operationMapper.softDeleteDraft(operationId, orgId, expectedVersion, nowUtc, principal.getUserId()) != 1) {
+            throw new BusinessException(HttpStatus.CONFLICT, "VERSION_CONFLICT", "资源版本冲突",
+                    "批次操作已被并发修改，请刷新后重试");
+        }
+        itemMapper.softDeleteByOperationId(operationId, nowUtc, principal.getUserId());
+        batchMapper.softDeleteOperationDraftOutputs(operationId, orgId, nowUtc, principal.getUserId());
+    }
+
+    // =====================================================================================
+    // 读取
+    // =====================================================================================
+
+    /**
+     * 查询批次操作详情。
+     * <p>
+     * 操作所属组织（OPERATOR / QUALITY_MANAGER 等任意本组织用户）始终可读，即使相关批次此后已转出（历史只读）；
+     * 平台只读角色可读；其他组织 403。
+     * </p>
+     */
+    public BatchOperationResponse getOperation(Long operationId, TraceSecurityPrincipal principal) {
+        requirePrincipal(principal);
+        BatchOperation op = operationMapper.selectByIdIgnoreTenant(operationId);
+        if (op == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + operationId + " 的批次操作");
+        }
+        if (!isPlatformScope(principal) && !Objects.equals(op.getOrgId(), principal.getOrgId())) {
+            throw orgScopeDenied("无权访问其他组织的批次操作");
+        }
+        return loadResponse(op);
+    }
+
+    /**
+     * 按批次查询引用该批次（INPUT 或 OUTPUT）的批次操作。
+     * <p>
+     * 企业用户只返回本组织创建的操作，绝不暴露其他企业的内部单据；
+     * 允许条件：当前责任组织，或本组织曾对该批次执行过操作（历史参与，只读）。平台只读角色返回全部。其他组织 403。
+     * </p>
+     */
+    public SuccessEnvelope<List<BatchOperationResponse>> listOperationsByBatch(
+            Long batchId,
+            int page,
+            int size,
+            TraceSecurityPrincipal principal
+    ) {
+        requirePrincipal(principal);
+        if (batchId == null || batchId <= 0) {
+            throw badRequest("batchId 必须为正整数");
+        }
+        if (page < 1) {
+            throw badRequest("页码 page 最小值为 1");
+        }
+        if (size < 1 || size > 100) {
+            throw badRequest("分页大小 size 必须在 1 到 100 之间");
+        }
+        Batch batch = batchMapper.selectByIdIgnoreTenant(batchId);
+        if (batch == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + batchId + " 的批次");
+        }
+        Long scopeOrgId = isPlatformScope(principal) ? null : principal.getOrgId();
+        long total = operationMapper.countByBatchId(batchId, scopeOrgId);
+        if (scopeOrgId != null && !Objects.equals(batch.getOrgId(), scopeOrgId) && total == 0) {
+            throw orgScopeDenied("无权访问其他组织批次的操作记录");
+        }
+        long offset = (long) (page - 1) * size;
+        List<BatchOperationResponse> data = operationMapper.selectPageByBatchId(batchId, scopeOrgId, offset, size).stream()
+                .map(this::loadResponse)
+                .toList();
+        return SuccessEnvelope.ofPage(data, new PageMeta(page, size, total));
+    }
+
+    // =====================================================================================
+    // 校验辅助
+    // =====================================================================================
+
+    private record ValidatedItems(
+            BatchOperationItemRequest input,
+            List<BatchOperationItemRequest> outputs,
+            List<BatchOperationItemRequest> others
+    ) {
+    }
+
+    private BatchOperationType resolveSupportedType(String rawType) {
+        if (rawType == null || !BatchOperationType.isValid(rawType)) {
+            throw badRequest("不支持的批次操作类型: " + rawType);
+        }
+        BatchOperationType type = BatchOperationType.fromCode(rawType);
+        if (!SUPPORTED_TYPES.contains(type)) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "OPERATION_TYPE_NOT_SUPPORTED", "操作类型暂不支持",
+                    type.name() + " 不在当前 Slice（Phase A Slice 3）执行范围内，本 Slice 仅支持 PROCESS 与 SPLIT；"
+                            + "这是当前开发范围限制，不是永久业务规则");
+        }
+        return type;
+    }
+
+    private ValidatedItems validateItems(BatchOperationType opType, List<BatchOperationItemRequest> items) {
+        if (items == null || items.size() < 2) {
+            throw badRequest("操作明细项目 items 不能为空且至少包含 2 个项目");
+        }
+        BatchOperationItemRequest input = null;
+        int inputCount = 0;
+        List<BatchOperationItemRequest> outputs = new ArrayList<>();
+        List<BatchOperationItemRequest> others = new ArrayList<>();
+        for (BatchOperationItemRequest item : items) {
+            if (item == null) {
+                throw badRequest("操作明细项目列表中不得包含空项目");
             }
-            case SPLIT -> {
-                if (inputCount < 1 || outputCount < 2) {
-                    throw new BusinessException(
-                            HttpStatus.BAD_REQUEST,
-                            "INVALID_REQUEST",
-                            "操作基数约束不符",
-                            "SPLIT 拆分操作必须至少包含 1 个 INPUT 项目且至少包含 2 个 OUTPUT 项目"
-                    );
-                }
+            if (!BatchItemRole.isValid(item.role())) {
+                throw badRequest("不支持的项目角色: " + item.role());
             }
-            case PROCESS, REPACK -> {
-                if (inputCount < 1 || outputCount < 1) {
-                    throw new BusinessException(
-                            HttpStatus.BAD_REQUEST,
-                            "INVALID_REQUEST",
-                            "操作基数约束不符",
-                            opType.name() + " 操作必须至少包含 1 个 INPUT 项目且至少包含 1 个 OUTPUT 项目"
-                    );
+            BatchItemRole role = BatchItemRole.fromCode(item.role());
+            if (item.unitCode() == null || !"kg".equalsIgnoreCase(item.unitCode().trim())) {
+                throw badRequest("操作明细计量单位仅允许 kg");
+            }
+            if (item.quantity() == null || item.quantity().signum() <= 0) {
+                throw badRequest("明细数量必须大于 0");
+            }
+            if (item.quantity().stripTrailingZeros().scale() > 3) {
+                throw badRequest("明细数量最多保留 3 位小数");
+            }
+            boolean hasOutputOnlyFields = item.productId() != null
+                    || (item.externalBatchNo() != null && !item.externalBatchNo().isBlank())
+                    || item.shelfLifeDays() != null;
+            switch (role) {
+                case INPUT -> {
+                    if (item.batchId() == null || item.batchId() <= 0) {
+                        throw badRequest("INPUT 项目必须指定有效的 batchId");
+                    }
+                    if (hasOutputOnlyFields) {
+                        throw badRequest("productId / externalBatchNo / shelfLifeDays 仅允许出现在 OUTPUT 项目中");
+                    }
+                    inputCount++;
+                    input = item;
+                }
+                case OUTPUT -> {
+                    if (item.batchId() != null) {
+                        throw new BusinessException(HttpStatus.BAD_REQUEST, "OUTPUT_BATCH_SERVER_GENERATED", "输出批次由服务端生成",
+                                "OUTPUT 项目不得指定 batchId：输出批次由服务端在创建操作草稿时生成，并只能随操作提交激活");
+                    }
+                    outputs.add(item);
+                }
+                default -> {
+                    if (item.batchId() != null) {
+                        throw badRequest(role.name() + " 角色项目严禁关联批次 batchId");
+                    }
+                    if (hasOutputOnlyFields) {
+                        throw badRequest("productId / externalBatchNo / shelfLifeDays 仅允许出现在 OUTPUT 项目中");
+                    }
+                    others.add(item);
                 }
             }
         }
+        validateCardinality(opType, inputCount, outputs.size());
+        BigDecimal[] totals = new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO};
+        for (BatchOperationItemRequest item : items) {
+            int idx = roleIndex(BatchItemRole.fromCode(item.role()));
+            totals[idx] = totals[idx].add(item.quantity());
+        }
+        verifyMassBalance(totals);
+        return new ValidatedItems(input, List.copyOf(outputs), List.copyOf(others));
+    }
+
+    /**
+     * 本 Slice 固定：PROCESS 恰好 1 个 INPUT、至少 1 个 OUTPUT；SPLIT 恰好 1 个 INPUT、至少 2 个 OUTPUT。
+     * 多 INPUT 物料合并属于 MERGE 职责（当前 Slice 未开放）。
+     */
+    private void validateCardinality(BatchOperationType opType, int inputCount, int outputCount) {
+        if (inputCount != 1) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "操作基数约束不符",
+                    opType.name() + " 操作必须恰好包含 1 个 INPUT 项目（当前 " + inputCount + " 个）；多输入物料合并属于 MERGE 职责");
+        }
+        int minOutputs = opType == BatchOperationType.SPLIT ? 2 : 1;
+        if (outputCount < minOutputs) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "操作基数约束不符",
+                    opType.name() + " 操作必须至少包含 " + minOutputs + " 个 OUTPUT 项目（当前 " + outputCount + " 个）");
+        }
+    }
+
+    /**
+     * 精确物料平衡：以 BigDecimal 数值比较（compareTo，忽略 scale 差异）判定 sum(INPUT) = sum(OUTPUT + LOSS + WASTE + SAMPLE)。
+     */
+    private void verifyMassBalance(BigDecimal[] totals) {
+        BigDecimal right = totals[1].add(totals[2]).add(totals[3]).add(totals[4]);
+        if (totals[0].compareTo(right) != 0) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "BATCH_MASS_BALANCE_VIOLATION", "物料平衡校验失败",
+                    String.format("物料不平衡：投入 %s kg ≠ 产出 %s kg + 损耗 %s kg + 废弃 %s kg + 留样 %s kg（合计 %s kg）",
+                            totals[0].toPlainString(), totals[1].toPlainString(), totals[2].toPlainString(),
+                            totals[3].toPlainString(), totals[4].toPlainString(), right.toPlainString()));
+        }
+    }
+
+    /**
+     * INPUT 可全量消耗前提：当前责任组织、ACTIVE+NORMAL、未被操作消耗、无未结束交接、数量等于当前全部剩余量。
+     */
+    private void verifyInputConsumable(Batch input, BigDecimal requestedQuantity, Long orgId) {
+        if (!Objects.equals(input.getOrgId(), orgId)) {
+            throw orgScopeDenied("输入批次 " + input.getTraceBatchNo() + " 不由本组织当前负责，禁止执行批次操作");
+        }
+        if (input.getConsumedByOperationId() != null || BatchFlowStatus.CLOSED.name().equals(input.getFlowStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "BATCH_ALREADY_CONSUMED", "批次已被物料操作消耗",
+                    "输入批次 " + input.getTraceBatchNo() + " 已关闭或已被其他批次操作全量消耗");
+        }
+        if (!BatchFlowStatus.ACTIVE.name().equals(input.getFlowStatus())
+                || !BatchRiskStatus.NORMAL.name().equals(input.getRiskStatus())) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "BATCH_FLOW_BLOCKED", "批次状态不可流转",
+                    "输入批次 " + input.getTraceBatchNo() + " 必须为 ACTIVE+NORMAL (flowStatus="
+                            + input.getFlowStatus() + ", riskStatus=" + input.getRiskStatus() + ")");
+        }
+        if (transferMapper.countActiveTransfersByBatchId(input.getId()) > 0) {
+            throw new BusinessException(HttpStatus.CONFLICT, "BATCH_TRANSFER_OPEN", "批次存在未结束交接",
+                    "输入批次 " + input.getTraceBatchNo() + " 存在草稿(DRAFT)或待接收(PENDING)交接，请先删除草稿或等待交接结束");
+        }
+        BigDecimal remaining = remainingQuantityOf(input);
+        if (requestedQuantity.compareTo(remaining) != 0) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "PARTIAL_INPUT_NOT_ALLOWED", "禁止部分投入",
+                    "INPUT 必须全量消耗输入批次当前剩余 " + remaining.toPlainString() + " kg（本次 "
+                            + requestedQuantity.toPlainString() + " kg）；如需部分加工，请先执行 SPLIT 拆分");
+        }
+    }
+
+    /**
+     * 派生剩余量 = 声明数量 - 已提交操作 INPUT 累计量（Sale 与处置于后续 Slice 加入）。
+     */
+    private BigDecimal remainingQuantityOf(Batch batch) {
+        BigDecimal consumed = itemMapper.sumSubmittedInputQuantityByBatchId(batch.getId());
+        return batch.getQuantity().subtract(consumed != null ? consumed : BigDecimal.ZERO);
+    }
+
+    private Long resolveOutputProductId(BatchOperationType opType, BatchOperationItemRequest out, Batch input) {
+        if (out.productId() == null || Objects.equals(out.productId(), input.getProductId())) {
+            return input.getProductId();
+        }
+        if (opType == BatchOperationType.SPLIT) {
+            throw badRequest("SPLIT 只拆分追溯身份，不改变产品：OUTPUT 的 productId 必须为空或与输入批次产品一致");
+        }
+        Product product = productMapper.selectById(out.productId());
+        if (product == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + out.productId() + " 的产出产品");
+        }
+        if (!"ACTIVE".equals(product.getStatus())) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "PRODUCT_NOT_ACTIVE", "关联产品未启用",
+                    "产出产品必须处于 ACTIVE 启用状态，当前状态为: " + product.getStatus());
+        }
+        return out.productId();
+    }
+
+    private LocalDateTime normalizeOccurredAt(BatchOperationCreateRequest req) {
+        if (req.occurredAt() == null) {
+            throw badRequest("业务发生时间 occurredAt 不能为空");
+        }
+        LocalDateTime occurred = req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime().truncatedTo(ChronoUnit.MILLIS);
+        if (occurred.isAfter(LocalDateTime.now(ZoneOffset.UTC).plus(MAX_FUTURE_SKEW))) {
+            throw badRequest("业务发生时间 occurredAt 不能晚于当前时间");
+        }
+        return occurred;
+    }
+
+    // =====================================================================================
+    // 幂等辅助
+    // =====================================================================================
+
+    private BatchOperationResponse replayCreateOrConflict(
+            BatchOperation existing,
+            ValidatedItems validated,
+            BatchOperationType opType,
+            LocalDateTime occurredAtUtc,
+            String cleanNote
+    ) {
+        if (existing.getIsDeleted() != null && existing.getIsDeleted() != 0) {
+            throw new BusinessException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "幂等提交冲突",
+                    "当前创建幂等键已被一个已删除的批次操作草稿使用，请使用新的幂等键");
+        }
+        List<BatchOperationItem> existingItems = itemMapper.selectByOperationId(existing.getId());
+        if (isSameCreateSemantics(existing, existingItems, validated, opType, occurredAtUtc, cleanNote)) {
+            return loadResponse(existing);
+        }
+        throw new BusinessException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "幂等提交冲突",
+                "当前创建幂等键已被使用且请求载荷与历史记录不一致");
     }
 
     private boolean isSameCreateSemantics(
             BatchOperation existing,
             List<BatchOperationItem> existingItems,
-            BatchOperationCreateRequest req,
-            BatchOperationType opType
+            ValidatedItems validated,
+            BatchOperationType opType,
+            LocalDateTime occurredAtUtc,
+            String cleanNote
     ) {
-        if (!Objects.equals(existing.getOperationType(), opType.name())) {
+        if (!Objects.equals(existing.getOperationType(), opType.name())
+                || !existing.getOccurredAt().isEqual(occurredAtUtc)
+                || !Objects.equals(existing.getNote(), cleanNote)) {
             return false;
         }
-        LocalDateTime reqOccurred = req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime().truncatedTo(ChronoUnit.MILLIS);
-        if (!existing.getOccurredAt().isEqual(reqOccurred)) {
-            return false;
-        }
-        String cleanNote = req.note() != null ? req.note().trim() : null;
-        if (!Objects.equals(existing.getNote(), cleanNote)) {
-            return false;
-        }
-
-        if (existingItems.size() != req.items().size()) {
-            return false;
-        }
-
-        Map<NormalizedItemKey, Integer> existingCounts = new HashMap<>();
+        Map<Long, Batch> itemBatches = loadBatches(existingItems);
+        Long inputProductId = null;
+        Map<ItemKey, Integer> existingCounts = new HashMap<>();
         for (BatchOperationItem ei : existingItems) {
-            existingCounts.merge(NormalizedItemKey.fromEntity(ei), 1, Integer::sum);
+            Batch b = ei.getBatchId() != null ? itemBatches.get(ei.getBatchId()) : null;
+            if (BatchItemRole.INPUT.name().equals(ei.getRole()) && b != null) {
+                inputProductId = b.getProductId();
+            }
+            existingCounts.merge(ItemKey.of(ei, b), 1, Integer::sum);
         }
-
-        Map<NormalizedItemKey, Integer> requestCounts = new HashMap<>();
-        for (BatchOperationItemRequest ri : req.items()) {
-            requestCounts.merge(NormalizedItemKey.fromRequest(ri), 1, Integer::sum);
+        Map<ItemKey, Integer> requestCounts = new HashMap<>();
+        requestCounts.merge(ItemKey.input(validated.input()), 1, Integer::sum);
+        for (BatchOperationItemRequest out : validated.outputs()) {
+            requestCounts.merge(ItemKey.output(out, inputProductId), 1, Integer::sum);
         }
-
-        return Objects.equals(existingCounts, requestCounts);
+        for (BatchOperationItemRequest other : validated.others()) {
+            requestCounts.merge(ItemKey.other(other), 1, Integer::sum);
+        }
+        return existingCounts.equals(requestCounts);
     }
 
-    private record NormalizedItemKey(String role, Long batchId, BigDecimal quantity, String unitCode) {
-        private static NormalizedItemKey fromEntity(BatchOperationItem item) {
-            return new NormalizedItemKey(
-                    item.getRole(),
-                    item.getBatchId(),
-                    item.getQuantity(),
-                    item.getUnitCode() != null ? item.getUnitCode().trim().toLowerCase() : "kg"
-            );
+    private record ItemKey(String role, Long batchId, BigDecimal quantity, Long productId, String externalBatchNo, Integer shelfLifeDays) {
+        static ItemKey of(BatchOperationItem item, Batch outputBatch) {
+            BigDecimal qty = item.getQuantity().stripTrailingZeros();
+            return switch (item.getRole()) {
+                case "INPUT" -> new ItemKey("INPUT", item.getBatchId(), qty, null, null, null);
+                case "OUTPUT" -> new ItemKey("OUTPUT", null, qty,
+                        outputBatch != null ? outputBatch.getProductId() : null,
+                        outputBatch != null ? outputBatch.getExternalBatchNo() : null,
+                        outputBatch != null ? outputBatch.getShelfLifeDays() : null);
+                default -> new ItemKey(item.getRole(), null, qty, null, null, null);
+            };
         }
 
-        private static NormalizedItemKey fromRequest(BatchOperationItemRequest req) {
-            return new NormalizedItemKey(
-                    BatchItemRole.fromCode(req.role()).name(),
-                    req.batchId(),
-                    req.quantity(),
-                    req.unitCode() != null ? req.unitCode().trim().toLowerCase() : "kg"
-            );
+        static ItemKey input(BatchOperationItemRequest req) {
+            return new ItemKey("INPUT", req.batchId(), req.quantity().stripTrailingZeros(), null, null, null);
         }
 
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (!(o instanceof NormalizedItemKey other)) return false;
-            return Objects.equals(role, other.role)
-                    && Objects.equals(batchId, other.batchId)
-                    && (quantity == null ? other.quantity == null : other.quantity != null && quantity.compareTo(other.quantity) == 0)
-                    && Objects.equals(unitCode, other.unitCode);
+        static ItemKey output(BatchOperationItemRequest req, Long inputProductId) {
+            Long productId = req.productId() != null ? req.productId() : inputProductId;
+            String ext = req.externalBatchNo() != null && !req.externalBatchNo().isBlank() ? req.externalBatchNo().trim() : null;
+            return new ItemKey("OUTPUT", null, req.quantity().stripTrailingZeros(), productId, ext, req.shelfLifeDays());
         }
 
-        @Override
-        public int hashCode() {
-            return Objects.hash(
-                    role,
-                    batchId,
-                    quantity != null ? quantity.stripTrailingZeros() : null,
-                    unitCode
-            );
+        static ItemKey other(BatchOperationItemRequest req) {
+            return new ItemKey(BatchItemRole.fromCode(req.role()).name(), null, req.quantity().stripTrailingZeros(), null, null, null);
         }
     }
 
-    private BatchOperationResponse buildResponse(
-            BatchOperation op,
-            List<BatchOperationItem> items,
-            List<BatchRelation> relations
-    ) {
+    // =====================================================================================
+    // 通用辅助
+    // =====================================================================================
+
+    private BatchOperation requireOwnOperation(Long operationId, Long orgId) {
+        BatchOperation op = operationMapper.selectByIdIgnoreTenant(operationId);
+        if (op == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + operationId + " 的批次操作");
+        }
+        if (!Objects.equals(op.getOrgId(), orgId)) {
+            throw orgScopeDenied("无权操作其他组织的批次操作数据");
+        }
+        return op;
+    }
+
+    private BatchOperation replaySubmittedOrNull(BatchOperation op, String submissionKey) {
+        if (!BatchOperationStatus.SUBMITTED.name().equals(op.getStatus())) {
+            return null;
+        }
+        if (submissionKey.equals(op.getSubmissionIdempotencyKey())) {
+            return op;
+        }
+        throw new BusinessException(HttpStatus.CONFLICT, "INVALID_STATE_TRANSITION", "非法状态流转",
+                "当前批次操作已处于 SUBMITTED 状态，不可重复提交");
+    }
+
+    private void requireDraftAndVersion(BatchOperation op, Long expectedVersion) {
+        if (!BatchOperationStatus.DRAFT.name().equals(op.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "INVALID_STATE_TRANSITION", "非法状态流转",
+                    "仅草稿状态 DRAFT 的批次操作允许当前动作，当前状态为: " + op.getStatus());
+        }
+        if (!Objects.equals(op.getVersion(), expectedVersion)) {
+            throw new BusinessException(HttpStatus.CONFLICT, "VERSION_CONFLICT", "资源版本冲突",
+                    "当前批次操作版本号为 " + op.getVersion() + "，请求的版本号为 " + expectedVersion);
+        }
+    }
+
+    private BatchOperationResponse loadResponse(BatchOperation op) {
+        List<BatchOperationItem> items = itemMapper.selectByOperationId(op.getId());
+        List<BatchRelation> relations = relationMapper.selectByOperationId(op.getId());
+        return buildResponse(op, items, relations);
+    }
+
+    private BatchOperationResponse buildResponse(BatchOperation op, List<BatchOperationItem> items, List<BatchRelation> relations) {
+        Map<Long, Batch> batches = loadBatches(items);
         List<BatchOperationItemResponse> itemResponses = items.stream()
-                .map(BatchOperationItemResponse::fromEntity)
+                .map(i -> BatchOperationItemResponse.fromEntity(i, i.getBatchId() != null ? batches.get(i.getBatchId()) : null))
                 .toList();
+        List<BatchRelationResponse> relationResponses = relations.stream().map(BatchRelationResponse::fromEntity).toList();
+        BigDecimal[] totals = sumByRole(items);
+        boolean balanced = totals[0].compareTo(totals[1].add(totals[2]).add(totals[3]).add(totals[4])) == 0;
+        return BatchOperationResponse.fromEntity(op, itemResponses, relationResponses, balanced, totals);
+    }
 
-        List<BatchRelationResponse> relationResponses = relations.stream()
-                .map(BatchRelationResponse::fromEntity)
-                .toList();
+    private Map<Long, Batch> loadBatches(List<BatchOperationItem> items) {
+        List<Long> ids = items.stream().map(BatchOperationItem::getBatchId).filter(Objects::nonNull).distinct().toList();
+        Map<Long, Batch> map = new HashMap<>();
+        if (!ids.isEmpty()) {
+            for (Batch b : batchMapper.selectByIdsIgnoreTenant(ids)) {
+                map.put(b.getId(), b);
+            }
+        }
+        return map;
+    }
 
-        // 从持久化 items 重新计算真实物料平衡 (0.001kg 容差)
-        BigDecimal sumInput = BigDecimal.ZERO;
-        BigDecimal sumOutputAndLoss = BigDecimal.ZERO;
+    /** 按 INPUT、OUTPUT、LOSS、WASTE、SAMPLE 顺序汇总数量。 */
+    private static BigDecimal[] sumByRole(List<BatchOperationItem> items) {
+        BigDecimal[] totals = new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO};
         for (BatchOperationItem item : items) {
             BigDecimal qty = item.getNormalizedQuantity() != null ? item.getNormalizedQuantity() : item.getQuantity();
-            if (qty == null) {
-                qty = BigDecimal.ZERO;
-            }
-            if (BatchItemRole.INPUT.name().equals(item.getRole())) {
-                sumInput = sumInput.add(qty);
-            } else if (BatchItemRole.OUTPUT.name().equals(item.getRole())
-                    || BatchItemRole.LOSS.name().equals(item.getRole())
-                    || BatchItemRole.WASTE.name().equals(item.getRole())
-                    || BatchItemRole.SAMPLE.name().equals(item.getRole())) {
-                sumOutputAndLoss = sumOutputAndLoss.add(qty);
-            }
+            int idx = roleIndex(BatchItemRole.fromCode(item.getRole()));
+            totals[idx] = totals[idx].add(qty);
         }
-
-        BigDecimal diff = sumInput.subtract(sumOutputAndLoss).abs();
-        boolean balanced = diff.compareTo(new BigDecimal("0.001")) <= 0;
-
-        return BatchOperationResponse.fromEntity(op, itemResponses, relationResponses, balanced);
+        return totals;
     }
 
-    private String validateIdempotencyKey(String key, String headerName) {
+    private static int roleIndex(BatchItemRole role) {
+        return switch (role) {
+            case INPUT -> 0;
+            case OUTPUT -> 1;
+            case LOSS -> 2;
+            case WASTE -> 3;
+            case SAMPLE -> 4;
+        };
+    }
+
+    private String validateIdempotencyKey(String key) {
         if (key == null || key.isBlank() || key.trim().length() < 16 || key.trim().length() > 128) {
-            throw new BusinessException(
-                    HttpStatus.BAD_REQUEST,
-                    "INVALID_REQUEST",
-                    "参数校验失败",
-                    headerName + " 请求头必填且长度必须在 16 到 128 个字符之间"
-            );
+            throw badRequest("Idempotency-Key 请求头必填且长度必须在 16 到 128 个字符之间");
         }
         return key.trim();
     }
@@ -824,14 +908,41 @@ public class BatchOperationApplicationService {
         return "OP" + time.format(OP_NO_DATE_FORMAT) + String.format("%04d", RANDOM.nextInt(10000));
     }
 
-    private void checkOperatorRole(TraceSecurityPrincipal principal) {
-        if (principal == null || principal.getRoles() == null || !principal.getRoles().contains("OPERATOR")) {
-            throw new BusinessException(
-                    HttpStatus.FORBIDDEN,
-                    "ACCESS_DENIED",
-                    "权限不足",
-                    "该操作仅限企业操作员（OPERATOR）执行"
-            );
+    /**
+     * 写权限：平台 / 系统管理员不可代办；必须是 OPERATOR；组织类型必须为 PROCESSOR（Demo MVP 路线图 Slice 3）。
+     * 输入批次必须由本组织当前负责，在锁内另行校验。
+     */
+    private void checkWriteAccess(TraceSecurityPrincipal principal) {
+        requirePrincipal(principal);
+        if (principal.getRoles().contains("SYSTEM_ADMIN") || isPlatformScope(principal)) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ADMIN_RESTRICTED", "管理员权限受限",
+                    "平台管理角色不可代办具体企业的加工或拆分");
         }
+        if (!principal.getRoles().contains("OPERATOR")) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ACCESS_DENIED", "权限不足",
+                    "该操作仅限企业操作员（OPERATOR）执行");
+        }
+        if (!"PROCESSOR".equals(principal.getOrgType())) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_TYPE_NOT_ALLOWED", "组织类型不允许当前操作",
+                    "加工与拆分仅限加工企业（PROCESSOR）执行");
+        }
+    }
+
+    private void requirePrincipal(TraceSecurityPrincipal principal) {
+        if (principal == null || principal.getRoles() == null) {
+            throw new BusinessException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "未认证", "请先登录");
+        }
+    }
+
+    private boolean isPlatformScope(TraceSecurityPrincipal principal) {
+        return principal != null && principal.getScopes() != null && principal.getScopes().contains("PLATFORM");
+    }
+
+    private static BusinessException badRequest(String detail) {
+        return new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", detail);
+    }
+
+    private static BusinessException orgScopeDenied(String detail) {
+        return new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权", detail);
     }
 }

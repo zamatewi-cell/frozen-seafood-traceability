@@ -2,9 +2,6 @@ package com.example.traceability.trace;
 
 import com.example.traceability.batch.domain.Batch;
 import com.example.traceability.batch.dto.BatchCreateRequest;
-import com.example.traceability.batch.dto.BatchOperationCreateRequest;
-import com.example.traceability.batch.dto.BatchOperationItemRequest;
-import com.example.traceability.batch.dto.BatchOperationSubmitRequest;
 import com.example.traceability.identity.domain.Organization;
 import com.example.traceability.trace.domain.Transfer;
 import com.example.traceability.trace.domain.TransferStatus;
@@ -233,18 +230,21 @@ class TransferMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT {
     }
 
     @Test
-    @DisplayName("场景 E：PENDING 交接阻断批次操作把该批次作为 INPUT（409 BATCH_TRANSFER_PENDING）")
-    void scenarioE_batchOperationMutex_pendingTransferBlocksInput() throws Exception {
-        Long inputBatchId = createAndSubmitActiveBatch(senderSession, "BAT-IN-" + suffix, new BigDecimal("200.000"));
-        Long outputBatchId = createAndSubmitActiveBatch(senderSession, "BAT-OUT-" + suffix, new BigDecimal("200.000"));
-        preparePendingHandover(inputBatchId);
+    @DisplayName("场景 E：未结束交接（DRAFT / PENDING）阻断批次操作把该批次作为 INPUT（409 BATCH_TRANSFER_OPEN）")
+    void scenarioE_batchOperationMutex_openTransferBlocksInput() throws Exception {
+        Long batchId = processorHeldBatch("BAT-IN-" + suffix, new BigDecimal("200.000"));
+        Organization retailer = createOrg("ORG_E_RT_" + suffix, "零售企业-" + suffix, "RETAILER");
+        Long transferId = createDraftTransfer(receiverSession, batchId, retailer.getId());
 
-        BatchOperationCreateRequest opReq = new BatchOperationCreateRequest(
-                "PROCESS", OffsetDateTime.now(ZoneOffset.UTC), "测试在途批次互斥防御",
-                List.of(new BatchOperationItemRequest("INPUT", inputBatchId, new BigDecimal("100.000")),
-                        new BatchOperationItemRequest("OUTPUT", outputBatchId, new BigDecimal("100.000"))));
-        expectProblem(postJson(senderSession, "/api/v1/batch-operations", key("idem-op-e"), opReq), 409, "BATCH_TRANSFER_PENDING");
-        assertThat(count("SELECT count(*) FROM batch_operation WHERE org_id = ? AND note = '测试在途批次互斥防御'", senderOrg.getId())).isZero();
+        expectProblem(createOperationRequest(receiverSession, key("idem-op-e"), "PROCESS",
+                List.of(opInput(batchId, "200.000"), opOutput("200.000"))), 409, "BATCH_TRANSFER_OPEN");
+        assertThat(count("SELECT count(*) FROM batch_operation WHERE org_id = ?", receiverOrg.getId())).isZero();
+        assertThat(count("SELECT count(*) FROM batch WHERE produced_by_operation_id IS NOT NULL AND creation_org_id = ?", receiverOrg.getId())).isZero();
+
+        // 删除交接草稿后即可全量加工
+        expect(deleteReq(receiverSession, "/api/v1/transfers/" + transferId).param("expectedVersion", String.valueOf(transferVersion(transferId))), 204);
+        createAndSubmitOperation("PROCESS", List.of(opInput(batchId, "200.000"), opOutput("200.000")));
+        assertThat(jdbcTemplate.queryForObject("SELECT flow_status FROM batch WHERE id = ?", String.class, batchId)).isEqualTo("CLOSED");
     }
 
     @Test
@@ -328,31 +328,19 @@ class TransferMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT {
         assertThat(batchOrgId(batchId2)).isEqualTo(senderOrg.getId());
     }
 
-    private void createAndSubmitProcessOperation(Long inputBatchId, Long outputBatchId, BigDecimal quantity) throws Exception {
-        BatchOperationCreateRequest opReq = new BatchOperationCreateRequest(
-                "PROCESS", OffsetDateTime.now(ZoneOffset.UTC), "测试物料消耗",
-                List.of(new BatchOperationItemRequest("INPUT", inputBatchId, quantity),
-                        new BatchOperationItemRequest("OUTPUT", outputBatchId, quantity)));
-        Long opId = expect(postJson(senderSession, "/api/v1/batch-operations", key("idem-op-c"), opReq), 201).get("data").get("id").asLong();
-        createdOperationIds.add(opId);
-        expect(postJson(senderSession, "/api/v1/batch-operations/" + opId + "/submit", key("idem-op-s"), new BatchOperationSubmitRequest(0L)), 200);
-    }
-
     @Test
-    @DisplayName("场景 G：已被消耗的批次禁止新建交接；已绑定草稿在批次被消耗后禁止提交")
-    void scenarioG_consumedBatchMutex_blocksTransferCreationAndSubmission() throws Exception {
-        Long inBatch1 = createAndSubmitActiveBatch(senderSession, "BAT-IN1-" + suffix, new BigDecimal("300.000"));
-        Long outBatch1 = createAndSubmitActiveBatch(senderSession, "BAT-OUT1-" + suffix, new BigDecimal("300.000"));
-        createAndSubmitProcessOperation(inBatch1, outBatch1, new BigDecimal("300.000"));
-        expectProblem(postJson(senderSession, "/api/v1/transfers", key("idem-g-c1"), new TransferCreateRequest(inBatch1, receiverOrg.getId())), 409, "BATCH_ALREADY_CONSUMED");
+    @DisplayName("场景 G：已被批次操作全量消耗（CLOSED）的批次禁止新建交接；已绑定交接草稿阻断批次操作")
+    void scenarioG_consumedBatchMutex_blocksTransferCreationAndOperation() throws Exception {
+        Organization retailer = createOrg("ORG_G_RT_" + suffix, "零售企业-" + suffix, "RETAILER");
+        Long inBatch1 = processorHeldBatch("BAT-IN1-" + suffix, new BigDecimal("300.000"));
+        createAndSubmitOperation("PROCESS", List.of(opInput(inBatch1, "300.000"), opOutput("300.000")));
+        expectProblem(postJson(receiverSession, "/api/v1/transfers", key("idem-g-c1"), new TransferCreateRequest(inBatch1, retailer.getId())), 409, "BATCH_NOT_ACTIVE");
 
-        Long inBatch2 = createAndSubmitActiveBatch(senderSession, "BAT-IN2-" + suffix, new BigDecimal("300.000"));
-        Long outBatch2 = createAndSubmitActiveBatch(senderSession, "BAT-OUT2-" + suffix, new BigDecimal("300.000"));
-        Long transferId = createDraftTransfer(senderSession, inBatch2, receiverOrg.getId());
-        Long shipmentId = createShipment(senderSession);
-        bind(shipmentId, transferId);
-        createAndSubmitProcessOperation(inBatch2, outBatch2, new BigDecimal("300.000"));
-        expectProblem(submitRequest(senderSession, transferId, 1L), 409, "BATCH_ALREADY_CONSUMED");
+        Long inBatch2 = processorHeldBatch("BAT-IN2-" + suffix, new BigDecimal("300.000"));
+        createDraftTransfer(receiverSession, inBatch2, retailer.getId());
+        expectProblem(createOperationRequest(receiverSession, key("idem-g-op"), "SPLIT",
+                List.of(opInput(inBatch2, "300.000"), opOutput("100.000"), opOutput("200.000"))), 409, "BATCH_TRANSFER_OPEN");
+        assertThat(jdbcTemplate.queryForObject("SELECT flow_status FROM batch WHERE id = ?", String.class, inBatch2)).isEqualTo("ACTIVE");
     }
 
     @Test

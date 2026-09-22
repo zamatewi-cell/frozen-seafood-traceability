@@ -27,11 +27,13 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -68,10 +70,11 @@ public class TraceEventApplicationService {
 
     /**
      * 只能由结构化业务对象自动投影、人工普通事件接口不得伪造的事件类型（统一业务契约 v1.1 §11）：
-     * SOURCE 由来源批次激活产生；TRANSPORT / ARRIVAL 由 Shipment 发运 / 到达产生。
+     * SOURCE 由来源批次激活产生；PROCESS 由 PROCESS 批次操作提交产生；TRANSPORT / ARRIVAL 由 Shipment 发运 / 到达产生。
      */
     private static final Set<String> AUTO_ONLY_EVENT_TYPES = Set.of(
             TraceEventType.SOURCE.name(),
+            TraceEventType.PROCESS.name(),
             TraceEventType.TRANSPORT.name(),
             TraceEventType.ARRIVAL.name()
     );
@@ -527,7 +530,7 @@ public class TraceEventApplicationService {
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "EVENT_TYPE_NOT_MANUAL",
                     "事件类型不允许人工录入",
-                    "事件类型 " + normalizedEventType + " 只能由业务单据自动生成（SOURCE 由来源批次提交激活自动产生，TRANSPORT / ARRIVAL 由运输任务发运 / 到达自动产生），人工事件接口不得创建或更正为该类型"
+                    "事件类型 " + normalizedEventType + " 只能由业务单据自动生成（SOURCE 由来源批次提交激活自动产生，PROCESS 由加工批次操作提交自动产生，TRANSPORT / ARRIVAL 由运输任务发运 / 到达自动产生），人工事件接口不得创建或更正为该类型"
             );
         }
     }
@@ -920,6 +923,154 @@ public class TraceEventApplicationService {
      */
     public static String sourceEventIdempotencyKey(Long batchId) {
         return RESERVED_IDEMPOTENCY_PREFIX + "SOURCE:BATCH:" + batchId;
+    }
+
+    /**
+     * PROCESS 批次操作提交成功时，在调用方事务内为一个 OUTPUT 批次自动投影唯一一条 PROCESS 事件。
+     * <p>
+     * 唯一可靠触发源：PROCESS BatchOperation 成功提交（统一业务契约 v1.1 §11）。事件落在产出批次上，
+     * 输入批次的全量消耗由批次 {@code consumedByOperationId} 与谱系边表达，不伪造额外事件。
+     * 普通 PROCESS 不推导 FREEZE；SPLIT 不调用本方法（不伪装成 PACK 或 PROCESS）。
+     * 幂等身份由 {@link #processEventIdempotencyKey(Long, Long)} 决定，并由唯一约束
+     * {@code uk_trace_event_org_idempotency} 保证同一操作同一产出批次至多一条 PROCESS。
+     * 摘要只包含数量事实，不含内部标识。
+     * </p>
+     *
+     * @param projection      批次操作投影上下文
+     * @param outputBatchId   产出批次 ID
+     * @param operatorId      提交操作的操作人 ID
+     * @param recordedAtUtc   系统登记时间 (UTC)
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void appendProcessEvent(ProcessProjection projection, Long outputBatchId, Long operatorId, LocalDateTime recordedAtUtc) {
+        String outputTraceBatchNo = null;
+        BigDecimal outputQuantity = null;
+        List<Map<String, Object>> outputs = new ArrayList<>();
+        for (ProcessBatchLine line : projection.outputs()) {
+            outputs.add(line.toDetails());
+            if (Objects.equals(line.batchId(), outputBatchId)) {
+                outputTraceBatchNo = line.traceBatchNo();
+                outputQuantity = line.quantity();
+            }
+        }
+        if (outputQuantity == null) {
+            throw new IllegalArgumentException("批次 " + outputBatchId + " 不是操作 " + projection.operationNo() + " 的产出批次");
+        }
+        List<Map<String, Object>> inputs = projection.inputs().stream().map(ProcessBatchLine::toDetails).toList();
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("sourceObjectType", "BATCH_OPERATION");
+        details.put("sourceObjectId", projection.operationId());
+        details.put("operationNo", projection.operationNo());
+        details.put("operationType", "PROCESS");
+        details.put("traceBatchNo", outputTraceBatchNo);
+        details.put("inputs", inputs);
+        details.put("outputs", outputs);
+        details.put("lossQuantity", projection.lossQuantity().toPlainString());
+        details.put("wasteQuantity", projection.wasteQuantity().toPlainString());
+        details.put("sampleQuantity", projection.sampleQuantity().toPlainString());
+        details.put("unitCode", "kg");
+        details.put("occurredAtBasis", "OPERATION_OCCURRED");
+
+        StringBuilder summary = new StringBuilder("加工产出 ")
+                .append(plain(outputQuantity)).append(" kg（投入 ").append(plain(projection.inputTotal())).append(" kg");
+        appendIfPositive(summary, "损耗", projection.lossQuantity());
+        appendIfPositive(summary, "废弃", projection.wasteQuantity());
+        appendIfPositive(summary, "留样", projection.sampleQuantity());
+        summary.append("）");
+
+        TraceEvent event = new TraceEvent();
+        event.setBatchId(outputBatchId);
+        event.setOrgId(projection.orgId());
+        event.setSiteId(null);
+        event.setEventType(TraceEventType.PROCESS.name());
+        event.setOccurredAt(projection.occurredAtUtc());
+        event.setRecordedAt(recordedAtUtc);
+        event.setOperatorId(operatorId);
+        // 加工单由企业操作员在页面填写并提交，沿用既有 MANUAL 语义
+        event.setDataSource(DataSource.MANUAL.name());
+        event.setStatus(TraceEventStatus.SUBMITTED.name());
+        event.setIdempotencyKey(processEventIdempotencyKey(projection.operationId(), outputBatchId));
+        event.setCorrectsEventId(null);
+        event.setCorrectionReason(null);
+        event.setSummary(summary.toString());
+        event.setDetailsJson(objectMapper.writeValueAsString(details));
+        event.setVersion(0L);
+        event.setIsDeleted(0);
+        event.setCreatedAt(recordedAtUtc);
+        event.setCreatedBy(operatorId);
+        event.setUpdatedAt(recordedAtUtc);
+        event.setUpdatedBy(operatorId);
+
+        try {
+            traceEventMapper.insert(event);
+        } catch (DuplicateKeyException e) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "PROCESS_EVENT_CONFLICT",
+                    "加工追溯事件冲突",
+                    "批次操作 " + projection.operationNo() + " 对产出批次 " + outputBatchId
+                            + " 的 PROCESS 追溯事件身份已被占用，批次操作提交已回滚"
+            );
+        }
+    }
+
+    /**
+     * PROCESS 事件的服务端幂等身份（保留前缀 {@code SYS:}，人工接口不可使用）。
+     */
+    public static String processEventIdempotencyKey(Long operationId, Long outputBatchId) {
+        return RESERVED_IDEMPOTENCY_PREFIX + "PROCESS:OPERATION:" + operationId + ":BATCH:" + outputBatchId;
+    }
+
+    private static String plain(BigDecimal value) {
+        BigDecimal stripped = value.stripTrailingZeros();
+        return (stripped.scale() < 0 ? stripped.setScale(0) : stripped).toPlainString();
+    }
+
+    private static void appendIfPositive(StringBuilder sb, String label, BigDecimal value) {
+        if (value != null && value.signum() > 0) {
+            sb.append("，").append(label).append(" ").append(plain(value)).append(" kg");
+        }
+    }
+
+    /**
+     * PROCESS 事件投影所需的批次操作结构化事实快照。
+     *
+     * @param operationId    批次操作 ID
+     * @param operationNo    操作单号
+     * @param orgId          执行组织（当前责任组织），作为事件记录组织
+     * @param occurredAtUtc  操作业务发生时间 (UTC)
+     * @param inputs         INPUT 批次行
+     * @param outputs        OUTPUT 批次行
+     * @param inputTotal     INPUT 合计
+     * @param lossQuantity   LOSS 合计
+     * @param wasteQuantity  WASTE 合计
+     * @param sampleQuantity SAMPLE 合计
+     */
+    public record ProcessProjection(
+            Long operationId,
+            String operationNo,
+            Long orgId,
+            LocalDateTime occurredAtUtc,
+            List<ProcessBatchLine> inputs,
+            List<ProcessBatchLine> outputs,
+            BigDecimal inputTotal,
+            BigDecimal lossQuantity,
+            BigDecimal wasteQuantity,
+            BigDecimal sampleQuantity
+    ) {
+    }
+
+    /**
+     * PROCESS 事件中的一条批次数量事实。
+     */
+    public record ProcessBatchLine(Long batchId, String traceBatchNo, BigDecimal quantity) {
+        Map<String, Object> toDetails() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("traceBatchNo", traceBatchNo);
+            m.put("quantity", quantity.toPlainString());
+            return m;
+        }
     }
 
     /**

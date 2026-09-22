@@ -6,9 +6,13 @@ import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 批次操作明细项目持久层访问接口。
@@ -52,4 +56,33 @@ public interface BatchOperationItemMapper extends BaseMapper<BatchOperationItem>
             "</foreach>" +
             "</script>")
     int insertBatch(@Param("items") List<BatchOperationItem> items);
+
+    /**
+     * 批量统计各批次在已提交操作中的累计 INPUT 数量，用于派生 remainingQuantity。
+     *
+     * @param batchIds 批次 ID 集合（非空）
+     * @return 每行包含 batchId 与 total
+     */
+    @Select("<script>" +
+            "SELECT i.batch_id AS batchId, SUM(i.quantity) AS total " +
+            "FROM batch_operation_item i " +
+            "JOIN batch_operation op ON i.operation_id = op.id " +
+            "WHERE i.role = 'INPUT' AND i.is_deleted = 0 AND op.status = 'SUBMITTED' AND op.is_deleted = 0 " +
+            "AND i.batch_id IN <foreach collection='batchIds' item='id' open='(' separator=',' close=')'>#{id}</foreach> " +
+            "GROUP BY i.batch_id" +
+            "</script>")
+    List<Map<String, Object>> sumSubmittedInputQuantityByBatchIds(@Param("batchIds") Collection<Long> batchIds);
+
+    /**
+     * 删除批次操作草稿时逻辑删除其全部明细（释放 uk_item_output_batch 唯一产出占用）。
+     *
+     * @return 影响行数
+     */
+    @Update("UPDATE batch_operation_item SET is_deleted = 1, updated_at = #{nowUtc}, updated_by = #{updatedBy} " +
+            "WHERE operation_id = #{operationId} AND is_deleted = 0")
+    int softDeleteByOperationId(
+            @Param("operationId") Long operationId,
+            @Param("nowUtc") LocalDateTime nowUtc,
+            @Param("updatedBy") Long updatedBy
+    );
 }
