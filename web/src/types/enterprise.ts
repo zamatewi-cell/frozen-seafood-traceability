@@ -37,7 +37,10 @@ export interface Batch {
   /** 企业可选外部批号，可重复 */
   externalBatchNo?: string
   batchType: string
+  /** 声明数量（创建或产出时声明，提交后不原地改写） */
   quantity: number
+  /** 派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量；CLOSED 为 0 */
+  remainingQuantity?: number
   unitCode: string
   originType: string
   originText: string
@@ -47,6 +50,10 @@ export interface Batch {
   shelfLifeDays?: number
   flowStatus: BatchFlowStatus
   riskStatus: BatchRiskStatus
+  /** 产出该批次的批次操作（仅操作输出批次） */
+  producedByOperationId?: number
+  /** 全量消耗该批次的已提交批次操作（非空时批次必为 CLOSED） */
+  consumedByOperationId?: number
   version: number
   createdAt?: string
   createdBy?: number
@@ -226,4 +233,73 @@ export interface ShipmentListQuery {
   status?: ShipmentStatus
   page: number
   size: number
+}
+
+/** 批次操作类型；当前 Slice 仅执行 PROCESS 与 SPLIT（MERGE / REPACK 由服务端返回 OPERATION_TYPE_NOT_SUPPORTED）。 */
+export type BatchOperationType = 'PROCESS' | 'SPLIT' | 'MERGE' | 'REPACK'
+export type SupportedOperationType = 'PROCESS' | 'SPLIT'
+export type BatchOperationStatus = 'DRAFT' | 'SUBMITTED' | 'CORRECTED'
+export type BatchItemRole = 'INPUT' | 'OUTPUT' | 'LOSS' | 'WASTE' | 'SAMPLE'
+
+/**
+ * 批次操作明细请求：INPUT 必须带 batchId 且数量等于剩余量；OUTPUT 不带 batchId（服务端生成），
+ * 可选 productId（仅 PROCESS）、externalBatchNo、shelfLifeDays；LOSS / WASTE / SAMPLE 只有数量。
+ */
+export interface BatchOperationItemRequest {
+  role: BatchItemRole
+  batchId?: number
+  quantity: number
+  unitCode: 'kg'
+  productId?: number
+  externalBatchNo?: string
+  shelfLifeDays?: number
+}
+
+export interface BatchOperationItem {
+  id: number
+  operationId: number
+  batchId?: number
+  role: BatchItemRole
+  quantity: number
+  unitCode: string
+  normalizedQuantity: number
+  traceBatchNo?: string
+  externalBatchNo?: string
+  productId?: number
+  batchType?: string
+  batchFlowStatus?: BatchFlowStatus
+  batchRiskStatus?: BatchRiskStatus
+}
+
+export interface BatchRelation {
+  id: number
+  operationId: number
+  parentBatchId: number
+  childBatchId: number
+  relationType: 'TRANSFORM' | 'SPLIT' | 'MERGE'
+  createdAt: string
+}
+
+export interface BatchOperation {
+  id: number
+  orgId: number
+  operationNo: string
+  operationType: BatchOperationType
+  occurredAt: string
+  recordedAt: string
+  status: BatchOperationStatus
+  note?: string
+  balanced: boolean
+  inputTotal?: number
+  outputTotal?: number
+  lossTotal?: number
+  wasteTotal?: number
+  sampleTotal?: number
+  version: number
+  createdAt: string
+  createdBy?: number
+  updatedAt: string
+  updatedBy?: number
+  items: BatchOperationItem[]
+  relations: BatchRelation[]
 }

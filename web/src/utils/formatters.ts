@@ -243,6 +243,51 @@ export function formatShipmentStatus(status: string | null | undefined): StatusB
 }
 
 /**
+ * 批次操作类型字典。
+ */
+export function formatOperationType(type: string | null | undefined): string {
+  if (!type) return '未标明'
+  const map: Record<string, string> = {
+    PROCESS: '加工',
+    SPLIT: '拆分',
+    MERGE: '合并',
+    REPACK: '分装'
+  }
+  return map[type] || type
+}
+
+/**
+ * 批次操作状态标签。
+ */
+export function formatOperationStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'DRAFT':
+      return { label: '草稿', tone: 'neutral', description: '输出批次为草稿，输入批次尚未消耗；提交后原子生效' }
+    case 'SUBMITTED':
+      return { label: '已提交', tone: 'success', description: '输入批次已全量消耗并关闭，输出批次已激活，谱系已固化' }
+    case 'CORRECTED':
+      return { label: '已更正', tone: 'neutral', description: '该操作已被更正' }
+    default:
+      return { label: status || '未知', tone: 'neutral', description: '未识别的操作状态' }
+  }
+}
+
+/**
+ * 批次操作明细角色字典。
+ */
+export function formatItemRole(role: string | null | undefined): string {
+  if (!role) return '未标明'
+  const map: Record<string, string> = {
+    INPUT: '投入',
+    OUTPUT: '产出',
+    LOSS: '损耗',
+    WASTE: '废弃',
+    SAMPLE: '留样'
+  }
+  return map[role] || role
+}
+
+/**
  * 场所类型字典。
  */
 export function formatSiteType(siteType: string | null | undefined): string {

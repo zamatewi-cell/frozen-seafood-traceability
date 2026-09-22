@@ -374,6 +374,61 @@ function verifySlice2Database(master, b0Id) {
     .split('\n').map((line) => `  ${line}`).join('\n'))
 }
 
+/**
+ * Slice 3 最终数据库事实：B0 → PROCESS → B1（960 + LOSS 30 + SAMPLE 10）→ SPLIT → B2 600 / B3 360。
+ * 只由真实浏览器操作产生：INPUT 全量消耗并 CLOSED、OUTPUT ACTIVE、谱系边、PROCESS 事件恰好一条、SPLIT 无事件。
+ */
+function verifySlice3Database(master, b0Id) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const [op1, b0Flow, b0Risk, b0Qty] = q(`SELECT IFNULL(consumed_by_operation_id, 0), flow_status, risk_status, quantity FROM batch WHERE id = ${b0Id};`).split('\t')
+  const [op1Type, op1Status, op1Org] = q(`SELECT operation_type, status, org_id FROM batch_operation WHERE id = ${op1};`).split('\t')
+  const op1Sums = q(`SELECT role, SUM(quantity) FROM batch_operation_item WHERE operation_id = ${op1} AND is_deleted = 0 GROUP BY role ORDER BY role;`)
+  const b1 = q(`SELECT id FROM batch WHERE produced_by_operation_id = ${op1} AND is_deleted = 0;`).split('\n').filter(Boolean)
+  const b1Id = Number(b1[0] || 0)
+  const [op2, b1Flow, b1Risk, b1Qty, b1Type, b1Org] = b1Id
+    ? q(`SELECT IFNULL(consumed_by_operation_id, 0), flow_status, risk_status, quantity, batch_type, org_id = ${master.processorOrgId} FROM batch WHERE id = ${b1Id};`).split('\t')
+    : ['0', '', '', '0', '', '0']
+  const [op2Type, op2Status] = Number(op2) ? q(`SELECT operation_type, status FROM batch_operation WHERE id = ${op2};`).split('\t') : ['', '']
+  const children = Number(op2)
+    ? q(`SELECT id, quantity, flow_status, risk_status, batch_type FROM batch WHERE produced_by_operation_id = ${op2} AND is_deleted = 0 ORDER BY quantity DESC;`).split('\n').filter(Boolean).map((l) => l.split('\t'))
+    : []
+  const childIds = children.map((c) => c[0])
+  const allIds = [b0Id, b1Id, ...childIds].filter(Boolean).join(',')
+  const relations = q(`SELECT parent_batch_id, child_batch_id, relation_type FROM batch_relation WHERE parent_batch_id IN (${allIds}) ORDER BY id;`)
+  const events = q(`SELECT
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id = ${b1Id || 0} AND event_type = 'PROCESS'),
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id = ${b1Id || 0} AND event_type = 'PROCESS' AND org_id = ${master.processorOrgId}
+         AND idempotency_key = CONCAT('SYS:PROCESS:OPERATION:', ${op1}, ':BATCH:', ${b1Id || 0})),
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id IN (${childIds.join(',') || 0})),
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id IN (${allIds}) AND event_type IN ('PACK', 'FREEZE')),
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id = ${b0Id} AND event_type = 'PROCESS');`).split('\t')
+  const facts = {
+    'B0 = CLOSED + NORMAL，1000kg，consumed_by = OP1': Number(op1) > 0 && b0Flow === 'CLOSED' && b0Risk === 'NORMAL' && Number(b0Qty) === 1000,
+    'OP1 = PROCESS SUBMITTED（加工企业）': op1Type === 'PROCESS' && op1Status === 'SUBMITTED' && Number(op1Org) === master.processorOrgId,
+    'OP1 物料平衡 1000 = 960 + 30 + 10': op1Sums === 'INPUT\t1000.000\nLOSS\t30.000\nOUTPUT\t960.000\nSAMPLE\t10.000',
+    'B1 = 960kg PROCESSING，加工企业负责': b1.length === 1 && Number(b1Qty) === 960 && b1Type === 'PROCESSING' && b1Org === '1',
+    'B1 = CLOSED + NORMAL，consumed_by = OP2': Number(op2) > 0 && b1Flow === 'CLOSED' && b1Risk === 'NORMAL',
+    'OP2 = SPLIT SUBMITTED': op2Type === 'SPLIT' && op2Status === 'SUBMITTED',
+    'B2 = 600kg ACTIVE + NORMAL，B3 = 360kg ACTIVE + NORMAL（类型继承 PROCESSING）': children.length === 2
+      && Number(children[0][1]) === 600 && Number(children[1][1]) === 360
+      && children.every((c) => c[2] === 'ACTIVE' && c[3] === 'NORMAL' && c[4] === 'PROCESSING'),
+    '谱系：B0→B1 TRANSFORM，B1→B2 / B1→B3 SPLIT': relations === [
+      `${b0Id}\t${b1Id}\tTRANSFORM`, `${b1Id}\t${childIds[0]}\tSPLIT`, `${b1Id}\t${childIds[1]}\tSPLIT`
+    ].join('\n'),
+    'PROCESS = 1（仅 B1，记录组织为加工企业，系统幂等键）': events[0] === '1' && events[1] === '1',
+    'B0 无 PROCESS 事件': events[4] === '0',
+    'SPLIT 不产生任何事件（B2 / B3 事件 = 0）': events[2] === '0',
+    'PACK = 0，FREEZE = 0（加工不推导速冻，拆分不声称包装）': events[3] === '0'
+  }
+  for (const [fact, ok] of Object.entries(facts)) console.log(`[smoke] MySQL ${ok ? '✔' : '✘'} ${fact}`)
+  if (Object.values(facts).some((ok) => !ok)) {
+    throw new Error(`Slice 3 数据库事实不符合预期: op1=${op1} b1=${b1Id} op2=${op2} relations=${JSON.stringify(relations)} sums=${JSON.stringify(op1Sums)}`)
+  }
+  console.log('[smoke] MySQL batch（B0 → B1 → B2 / B3）:')
+  console.log(q(`SELECT id, trace_batch_no, batch_type, quantity, flow_status, risk_status, produced_by_operation_id, consumed_by_operation_id FROM batch WHERE id IN (${allIds}) ORDER BY id;`)
+    .split('\n').map((line) => `  ${line}`).join('\n'))
+}
+
 function startViteDevServer() {
   const npmCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm'
   const npmArgs = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm.cmd run dev'] : ['run', 'dev']
@@ -456,10 +511,16 @@ try {
     console.log(`[smoke] 承运企业 ${slice2.carrierOrgName}: ${slice2.usernames.carrier} / ${slice2Passwords.carrier}`)
     console.log(`[smoke] 加工企业 ${slice2.processorOrgName}: ${slice2.usernames.processor} / ${slice2Passwords.processor}`)
     console.log(`[smoke] B0: /app/batches/${b0.id}  (${b0.traceBatchNo}, 1000 kg ACTIVE/NORMAL)`)
-    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 数据库事实，再停止服务并删除 schema。')
+    console.log('[smoke] Slice 3：加工企业接受 B0 后，在 B0 详情执行“加工”（产出 960，损耗 30，留样 10），再对 B1 执行“拆分”（600 + 360）。')
+    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 / Slice 3 数据库事实，再停止服务并删除 schema。')
     await waitForInterrupt()
     try {
       verifySlice2Database(slice2, b0.id)
+    } catch (verifyError) {
+      console.error(verifyError.message)
+    }
+    try {
+      verifySlice3Database(slice2, b0.id)
     } catch (verifyError) {
       console.error(verifyError.message)
     }
@@ -507,6 +568,14 @@ try {
   }, 'tests/e2e/real-slice2.spec.ts')
   verifySlice2Database(slice2, b0.id)
   console.log('[smoke] Slice 2 真实三账号 Transfer + Shipment 浏览器验收与 MySQL 事实校验通过')
+
+  await runBrowserSmoke({
+    SLICE3_PROCESSOR_USERNAME: slice2.usernames.processor,
+    SLICE3_PROCESSOR_PASSWORD: slice2Passwords.processor,
+    SLICE3_EXPECTED: JSON.stringify({ b0Id: b0.id, b0TraceBatchNo: b0.traceBatchNo })
+  }, 'tests/e2e/real-slice3.spec.ts')
+  verifySlice3Database(slice2, b0.id)
+  console.log('[smoke] Slice 3 真实加工企业 PROCESS / SPLIT 浏览器验收与 MySQL 事实校验通过')
   }
 } catch (error) {
   primaryError = error

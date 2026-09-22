@@ -12,6 +12,8 @@ import ShipmentListView from '@/views/enterprise/ShipmentListView.vue'
 import ShipmentCreateView from '@/views/enterprise/ShipmentCreateView.vue'
 import ShipmentDetailView from '@/views/enterprise/ShipmentDetailView.vue'
 import InboundTransferListView from '@/views/enterprise/InboundTransferListView.vue'
+import BatchOperationWizardView from '@/views/enterprise/BatchOperationWizardView.vue'
+import BatchOperationDetailView from '@/views/enterprise/BatchOperationDetailView.vue'
 import { installAuthGuard } from './guards'
 
 declare module 'vue-router' {
@@ -88,6 +90,20 @@ export const routes: RouteRecordRaw[] = [
         component: TransferCreateView,
         props: true,
         meta: { title: '发起交接' }
+      },
+      {
+        path: 'batches/:id/operations/new',
+        name: 'BatchOperationCreate',
+        component: BatchOperationWizardView,
+        props: (route) => ({ id: String(route.params.id), type: route.query.type === 'SPLIT' ? 'SPLIT' : 'PROCESS' }),
+        meta: { title: '加工 / 拆分' }
+      },
+      {
+        path: 'batch-operations/:id',
+        name: 'BatchOperationDetail',
+        component: BatchOperationDetailView,
+        props: true,
+        meta: { title: '批次操作详情' }
       },
       {
         path: 'shipments',

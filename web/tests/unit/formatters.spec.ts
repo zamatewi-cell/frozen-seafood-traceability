@@ -14,7 +14,10 @@ import {
   formatSiteType,
   formatTraceEventType,
   formatTransferStatus,
-  formatTemperatureResult
+  formatTemperatureResult,
+  formatOperationType,
+  formatOperationStatus,
+  formatItemRole
 } from '@/utils/formatters'
 
 describe('Display Formatters', () => {
@@ -95,5 +98,21 @@ describe('Slice 2 transfer / shipment labels', () => {
     expect(formatTraceEventType('TRANSPORT')).toBe('冷链运输')
     expect(formatTraceEventType('ARRIVAL')).toBe('运输到达')
     expect(formatTraceEventType('ARRIVAL')).not.toContain('验收')
+  })
+
+  it('labels Slice 3 batch operations without claiming packing or freezing', () => {
+    expect(formatOperationType('PROCESS')).toBe('加工')
+    expect(formatOperationType('SPLIT')).toBe('拆分')
+    expect(formatOperationType('MERGE')).toBe('合并')
+    expect(formatOperationType(null)).toBe('未标明')
+    expect(formatOperationStatus('DRAFT').label).toBe('草稿')
+    expect(formatOperationStatus('SUBMITTED').tone).toBe('success')
+    expect(formatOperationStatus('SUBMITTED').description).toContain('全量消耗')
+    expect(formatItemRole('INPUT')).toBe('投入')
+    expect(formatItemRole('OUTPUT')).toBe('产出')
+    expect(formatItemRole('LOSS')).toBe('损耗')
+    expect(formatItemRole('WASTE')).toBe('废弃')
+    expect(formatItemRole('SAMPLE')).toBe('留样')
+    expect(formatTraceEventType('PROCESS')).toBe('加工')
   })
 })

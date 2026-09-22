@@ -12,6 +12,7 @@ import com.example.traceability.batch.dto.BatchQueryCriteria;
 import com.example.traceability.batch.dto.BatchResponse;
 import com.example.traceability.batch.dto.BatchSubmitRequest;
 import com.example.traceability.batch.mapper.BatchMapper;
+import com.example.traceability.batch.mapper.BatchOperationItemMapper;
 import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
@@ -73,6 +74,9 @@ class BatchApplicationServiceTest {
 
     @Mock
     private TraceEventApplicationService traceEventApplicationService;
+
+    @Mock
+    private BatchOperationItemMapper batchOperationItemMapper;
 
     @InjectMocks
     private BatchApplicationService batchService;
@@ -1278,5 +1282,65 @@ class BatchApplicationServiceTest {
         SuccessEnvelope<List<BatchResponse>> result = batchService.listBatches(criteria, operatorPrincipal);
         assertThat(result.data()).hasSize(1);
         verify(batchMapper).countBatches(eq(10L), eq("TB-ABC"), eq("EXT-123"), eq("ACTIVE"), eq("NORMAL"));
+    }
+
+    // =========================================================================
+    // Phase A Slice 3：批次操作产出草稿守卫与派生剩余量
+    // =========================================================================
+
+    @Test
+    @DisplayName("批次操作产出的 OUTPUT 草稿不得通过普通接口修改 (409 BATCH_OWNED_BY_OPERATION)")
+    void patchDraftBatch_operationOutput_rejected() {
+        Batch output = sourceDraft(300L, 10L, 500L, 0L);
+        output.setProducedByOperationId(77L);
+        when(batchMapper.selectByIdIgnoreTenant(300L)).thenReturn(output);
+
+        BatchPatchRequest patchReq = new BatchPatchRequest(0L, new BigDecimal("60.000"), null, null, null, null, null, null);
+        assertThatThrownBy(() -> batchService.patchDraftBatch(300L, patchReq, operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(be.getCode()).isEqualTo("BATCH_OWNED_BY_OPERATION");
+                });
+        verify(batchMapper, never()).updateDraftBatch(any(), any());
+    }
+
+    @Test
+    @DisplayName("批次操作产出的 OUTPUT 草稿（即便继承 SOURCE 类型）不得通过普通提交激活，也不生成 SOURCE 事件 (409)")
+    void submitDraftBatch_operationOutput_rejected() {
+        Batch output = sourceDraft(301L, 10L, 500L, 0L);
+        output.setProducedByOperationId(78L);
+        when(batchMapper.selectByIdIgnoreTenant(301L)).thenReturn(output);
+
+        assertThatThrownBy(() -> batchService.submitDraftBatch(301L, new BatchSubmitRequest(0L), operatorPrincipal))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo("BATCH_OWNED_BY_OPERATION"));
+        verify(batchMapper, never()).submitDraftBatch(anyLong(), anyLong(), anyLong(), any(), anyLong());
+        verify(traceEventApplicationService, never()).appendSourceEvent(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("详情返回派生剩余量：声明 1000 - 已提交 INPUT 400 = 600；CLOSED 批次剩余量为 0")
+    void getBatchById_remainingQuantityDerived() {
+        Batch active = sourceDraft(302L, 10L, 500L, 2L);
+        active.setFlowStatus("ACTIVE");
+        when(batchMapper.selectByIdIgnoreTenant(302L)).thenReturn(active);
+        when(batchOperationItemMapper.sumSubmittedInputQuantityByBatchIds(List.of(302L)))
+                .thenReturn(List.of(java.util.Map.of("batchId", java.math.BigInteger.valueOf(302L), "total", new BigDecimal("400.000"))));
+
+        BatchResponse resp = batchService.getBatchById(302L, operatorPrincipal);
+        assertThat(resp.quantity()).isEqualByComparingTo("1000");
+        assertThat(resp.remainingQuantity()).isEqualByComparingTo("600");
+
+        Batch closed = sourceDraft(303L, 10L, 500L, 3L);
+        closed.setFlowStatus("CLOSED");
+        closed.setConsumedByOperationId(79L);
+        when(batchMapper.selectByIdIgnoreTenant(303L)).thenReturn(closed);
+        when(batchOperationItemMapper.sumSubmittedInputQuantityByBatchIds(List.of(303L)))
+                .thenReturn(List.of(java.util.Map.of("batchId", 303L, "total", new BigDecimal("1000.000"))));
+        BatchResponse closedResp = batchService.getBatchById(303L, operatorPrincipal);
+        assertThat(closedResp.remainingQuantity()).isEqualByComparingTo("0");
+        assertThat(closedResp.consumedByOperationId()).isEqualTo(79L);
     }
 }

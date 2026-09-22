@@ -1,5 +1,9 @@
 package com.example.traceability.trace;
 
+import com.example.traceability.trace.dto.TransferAcceptRequest;
+import com.example.traceability.batch.dto.BatchOperationSubmitRequest;
+import com.example.traceability.batch.dto.BatchOperationItemRequest;
+import com.example.traceability.batch.dto.BatchOperationCreateRequest;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.traceability.batch.dto.BatchCreateRequest;
 import com.example.traceability.batch.dto.BatchSubmitRequest;
@@ -178,15 +182,23 @@ abstract class AbstractTransferShipmentMysqlIT {
         clean("DELETE FROM public_trace_code_idempotency WHERE org_id = ?", createdOrgIds);
         clean("DELETE FROM public_trace_code WHERE batch_id = ?", createdBatchIds);
         clean("DELETE FROM trace_event WHERE batch_id = ?", createdBatchIds);
+        // 批次操作产出的输出批次由服务端生成（不在 createdBatchIds 中），按创建组织兜底清理其事件
+        clean("DELETE FROM trace_event WHERE batch_id IN (SELECT id FROM batch WHERE creation_org_id = ?)", createdOrgIds);
 
+        // V10 外键：batch.produced_by / consumed_by → batch_operation；item / relation → batch。
+        // 先断开批次对操作的引用，再删谱系边与明细，最后删操作
+        clean("UPDATE batch SET produced_by_operation_id = NULL, consumed_by_operation_id = NULL WHERE id = ?", createdBatchIds);
+        clean("UPDATE batch SET produced_by_operation_id = NULL, consumed_by_operation_id = NULL WHERE creation_org_id = ? OR org_id = ?", createdOrgIds, 2);
         for (Long bId : createdBatchIds) {
             jdbcTemplate.update("DELETE FROM batch_relation WHERE parent_batch_id = ? OR child_batch_id = ?", bId, bId);
         }
+        clean("DELETE FROM batch_relation WHERE operation_id IN (SELECT id FROM batch_operation WHERE org_id = ?)", createdOrgIds);
         for (Long opId : createdOperationIds) {
             jdbcTemplate.update("DELETE FROM batch_relation WHERE operation_id = ?", opId);
         }
         clean("DELETE FROM batch_operation_item WHERE batch_id = ?", createdBatchIds);
         clean("DELETE FROM batch_operation_item WHERE operation_id = ?", createdOperationIds);
+        clean("DELETE FROM batch_operation_item WHERE operation_id IN (SELECT id FROM batch_operation WHERE org_id = ?)", createdOrgIds);
         clean("DELETE FROM batch_operation WHERE org_id = ?", createdOrgIds);
 
         // transfer.shipment_id 外键指向 shipment：先删交接，再删运输任务
@@ -195,6 +207,7 @@ abstract class AbstractTransferShipmentMysqlIT {
         clean("DELETE FROM shipment WHERE sender_org_id = ?", createdOrgIds);
         clean("DELETE FROM shipment WHERE id = ?", createdShipmentIds);
         clean("DELETE FROM batch WHERE id = ?", createdBatchIds);
+        clean("DELETE FROM batch WHERE creation_org_id = ?", createdOrgIds);
         clean("DELETE FROM product WHERE id = ?", createdProductIds);
 
         clean("DELETE FROM user_role WHERE user_id = ?", createdUserIds);
@@ -356,6 +369,68 @@ abstract class AbstractTransferShipmentMysqlIT {
         dispatch(h.shipmentId());
         arrive(h.shipmentId());
         return h;
+    }
+
+    /**
+     * 来源企业建批 → Transfer + Shipment 送达 → 加工企业（receiverOrg，PROCESSOR）ACCEPT，返回已由加工企业负责的批次。
+     */
+    protected Long processorHeldBatch(String externalBatchNo, BigDecimal quantity) throws Exception {
+        Long batchId = createAndSubmitActiveBatch(senderSession, externalBatchNo, quantity);
+        Handover h = prepareDeliveredHandover(batchId);
+        expect(postJson(receiverSession, "/api/v1/transfers/" + h.transferId() + "/accept", key("idem-trf-acc"),
+                new TransferAcceptRequest(quantity, "kg", OffsetDateTime.now(ZoneOffset.UTC), null, transferVersion(h.transferId()))), 200);
+        assertThat(batchOrgId(batchId)).isEqualTo(receiverOrg.getId());
+        return batchId;
+    }
+
+    protected MockHttpServletRequestBuilder createOperationRequest(MockHttpSession session, String idemKey, String type, List<BatchOperationItemRequest> items) throws Exception {
+        return postJson(session, "/api/v1/batch-operations", idemKey,
+                new BatchOperationCreateRequest(type, OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(5), "Slice 3 测试", items));
+    }
+
+    /**
+     * 以加工企业身份创建批次操作草稿，返回响应 data。
+     */
+    protected JsonNode createOperation(String type, List<BatchOperationItemRequest> items) throws Exception {
+        JsonNode data = expect(createOperationRequest(receiverSession, key("idem-op-c"), type, items), 201).get("data");
+        registerOperation(data);
+        return data;
+    }
+
+    /**
+     * 登记操作及其服务端生成的 OUTPUT 批次，便于 teardown 清理。
+     */
+    protected void registerOperation(JsonNode operationData) {
+        createdOperationIds.add(operationData.get("id").asLong());
+        for (JsonNode item : operationData.get("items")) {
+            if ("OUTPUT".equals(item.get("role").asString())) {
+                createdBatchIds.add(item.get("batchId").asLong());
+            }
+        }
+    }
+
+    protected MockHttpServletRequestBuilder submitOperationRequest(MockHttpSession session, Long operationId, long version, String idemKey) throws Exception {
+        return postJson(session, "/api/v1/batch-operations/" + operationId + "/submit", idemKey, new BatchOperationSubmitRequest(version));
+    }
+
+    /**
+     * 以加工企业身份创建并提交批次操作，返回提交后的响应 data。
+     */
+    protected JsonNode createAndSubmitOperation(String type, List<BatchOperationItemRequest> items) throws Exception {
+        JsonNode draft = createOperation(type, items);
+        return expect(submitOperationRequest(receiverSession, draft.get("id").asLong(), draft.get("version").asLong(), key("idem-op-s")), 200).get("data");
+    }
+
+    protected static BatchOperationItemRequest opInput(Long batchId, String qty) {
+        return new BatchOperationItemRequest("INPUT", batchId, new BigDecimal(qty));
+    }
+
+    protected static BatchOperationItemRequest opOutput(String qty) {
+        return new BatchOperationItemRequest("OUTPUT", null, new BigDecimal(qty));
+    }
+
+    protected static BatchOperationItemRequest opOther(String role, String qty) {
+        return new BatchOperationItemRequest(role, null, new BigDecimal(qty));
     }
 
     protected long transferVersion(Long transferId) {
@@ -522,9 +597,18 @@ abstract class AbstractTransferShipmentMysqlIT {
     }
 
     private void clean(String sql, List<Long> ids) {
+        clean(sql, ids, 1);
+    }
+
+    /**
+     * 按 ID 逐条执行清理语句；{@code bindCount} 表示同一 ID 在语句中绑定的次数。
+     */
+    private void clean(String sql, List<Long> ids, int bindCount) {
         for (Long id : ids) {
             try {
-                jdbcTemplate.update(sql, id);
+                Object[] args = new Object[bindCount];
+                java.util.Arrays.fill(args, id);
+                jdbcTemplate.update(sql, args);
             } catch (Exception ignored) {
                 // 清理阶段容错：依赖顺序已保证，个别表不存在对应行时忽略
             }

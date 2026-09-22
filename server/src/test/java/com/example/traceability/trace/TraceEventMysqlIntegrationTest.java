@@ -403,7 +403,7 @@ class TraceEventMysqlIntegrationTest {
         jdbcTemplate.update("UPDATE batch SET flow_status = 'CLOSED', risk_status = 'NORMAL' WHERE id = ?", batchIdA);
 
         CreateTraceEventRequest closedNewReq = new CreateTraceEventRequest(
-                "PROCESS", occurredAt, siteA.getId(), "MANUAL", "归档批次追加事件", null
+                "FREEZE", occurredAt, siteA.getId(), "MANUAL", "归档批次追加事件", null
         );
         mockMvc.perform(post("/api/v1/batches/" + batchIdA + "/events")
                         .session((MockHttpSession) sessionA)
@@ -472,7 +472,7 @@ class TraceEventMysqlIntegrationTest {
         // 插入待更正的原始事件
         OffsetDateTime occurredAt = OffsetDateTime.parse("2026-09-09T12:00:00Z");
         CreateTraceEventRequest createReq = new CreateTraceEventRequest(
-                "PROCESS", occurredAt, site.getId(), "MANUAL", "初始加工工序", null
+                "FREEZE", occurredAt, site.getId(), "MANUAL", "初始加工工序", null
         );
         MvcResult origResult = mockMvc.perform(post("/api/v1/batches/" + batch.getId() + "/events")
                         .session((MockHttpSession) session)
@@ -487,7 +487,7 @@ class TraceEventMysqlIntegrationTest {
 
         String sameCorrectionKey = "idem-same-corr-" + suffix;
         CorrectTraceEventRequest corrReq = new CorrectTraceEventRequest(
-                "PROCESS", occurredAt, site.getId(), "MANUAL", "并发修正加工参数", null, "传感器零点校准"
+                "FREEZE", occurredAt, site.getId(), "MANUAL", "并发修正加工参数", null, "传感器零点校准"
         );
 
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -584,7 +584,7 @@ class TraceEventMysqlIntegrationTest {
 
         OffsetDateTime occurredAt = OffsetDateTime.parse("2026-09-09T14:00:00Z");
         CreateTraceEventRequest createReq = new CreateTraceEventRequest(
-                "PROCESS", occurredAt, site.getId(), "MANUAL", "初始分拣", null
+                "FREEZE", occurredAt, site.getId(), "MANUAL", "初始分拣", null
         );
         MvcResult origResult = mockMvc.perform(post("/api/v1/batches/" + batch.getId() + "/events")
                         .session((MockHttpSession) session)
@@ -601,10 +601,10 @@ class TraceEventMysqlIntegrationTest {
         String key2 = "idem-diff-corr-2-" + suffix;
 
         CorrectTraceEventRequest corrReq1 = new CorrectTraceEventRequest(
-                "PROCESS", occurredAt, site.getId(), "MANUAL", "更正A分支", null, "原因A"
+                "FREEZE", occurredAt, site.getId(), "MANUAL", "更正A分支", null, "原因A"
         );
         CorrectTraceEventRequest corrReq2 = new CorrectTraceEventRequest(
-                "PROCESS", occurredAt, site.getId(), "MANUAL", "更正B分支", null, "原因B"
+                "FREEZE", occurredAt, site.getId(), "MANUAL", "更正B分支", null, "原因B"
         );
 
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -696,7 +696,7 @@ class TraceEventMysqlIntegrationTest {
         String origKey = "idem-orig-rr-" + suffix;
         jdbcTemplate.update("""
                 INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, idempotency_key)
-                VALUES (?, ?, 'PROCESS', '2026-09-09 10:00:00', '2026-09-09 10:00:00', 'MANUAL', 'SUBMITTED', '原事件', ?)
+                VALUES (?, ?, 'FREEZE', '2026-09-09 10:00:00', '2026-09-09 10:00:00', 'MANUAL', 'SUBMITTED', '原事件', ?)
                 """, batch.getId(), org.getId(), origKey);
 
         Long origEventId = jdbcTemplate.queryForObject(
@@ -726,7 +726,7 @@ class TraceEventMysqlIntegrationTest {
             connB.setAutoCommit(false);
             try (PreparedStatement stmtB1 = connB.prepareStatement("""
                     INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, corrects_event_id, correction_reason, idempotency_key)
-                    VALUES (?, ?, 'PROCESS', '2026-09-09 10:00:00', '2026-09-09 10:05:00', 'MANUAL', 'SUBMITTED', '更正记录', ?, '修正原因', ?)
+                    VALUES (?, ?, 'FREEZE', '2026-09-09 10:00:00', '2026-09-09 10:05:00', 'MANUAL', 'SUBMITTED', '更正记录', ?, '修正原因', ?)
                     """)) {
                 stmtB1.setLong(1, batch.getId());
                 stmtB1.setLong(2, org.getId());
@@ -833,7 +833,7 @@ class TraceEventMysqlIntegrationTest {
         DataAccessException exSource = assertThrows(DataAccessException.class, () ->
                 jdbcTemplate.update("""
                         INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, idempotency_key)
-                        VALUES (?, ?, 'PROCESS', NOW(), NOW(), 'UNKNOWN_SOURCE', 'SUBMITTED', '摘要', 'idem-chk-2')
+                        VALUES (?, ?, 'FREEZE', NOW(), NOW(), 'UNKNOWN_SOURCE', 'SUBMITTED', '摘要', 'idem-chk-2')
                         """, batchId, orgId)
         );
         assertThat(exSource.getMessage()).containsIgnoringCase("chk_trace_event_data_source");
@@ -842,7 +842,7 @@ class TraceEventMysqlIntegrationTest {
         DataAccessException exStatus = assertThrows(DataAccessException.class, () ->
                 jdbcTemplate.update("""
                         INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, idempotency_key)
-                        VALUES (?, ?, 'PROCESS', NOW(), NOW(), 'MANUAL', 'DRAFT', '摘要', 'idem-chk-3')
+                        VALUES (?, ?, 'FREEZE', NOW(), NOW(), 'MANUAL', 'DRAFT', '摘要', 'idem-chk-3')
                         """, batchId, orgId)
         );
         assertThat(exStatus.getMessage()).containsIgnoringCase("chk_trace_event_status");
@@ -851,7 +851,7 @@ class TraceEventMysqlIntegrationTest {
         DataAccessException exShape1 = assertThrows(DataAccessException.class, () ->
                 jdbcTemplate.update("""
                         INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, correction_reason, idempotency_key)
-                        VALUES (?, ?, 'PROCESS', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '摘要', '原因非空但更正ID为空', 'idem-chk-4')
+                        VALUES (?, ?, 'FREEZE', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '摘要', '原因非空但更正ID为空', 'idem-chk-4')
                         """, batchId, orgId)
         );
         assertThat(exShape1.getMessage()).containsIgnoringCase("chk_trace_event_correction_shape");
@@ -860,7 +860,7 @@ class TraceEventMysqlIntegrationTest {
         DataAccessException exShape2 = assertThrows(DataAccessException.class, () ->
                 jdbcTemplate.update("""
                         INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, corrects_event_id, idempotency_key)
-                        VALUES (?, ?, 'PROCESS', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '摘要', 99999, 'idem-chk-5')
+                        VALUES (?, ?, 'FREEZE', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '摘要', 99999, 'idem-chk-5')
                         """, batchId, orgId)
         );
         assertThat(exShape2.getMessage()).containsIgnoringCase("chk_trace_event_correction_shape");
@@ -868,7 +868,7 @@ class TraceEventMysqlIntegrationTest {
         // 6. 插入合法基础事件
         jdbcTemplate.update("""
                 INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, idempotency_key)
-                VALUES (?, ?, 'PROCESS', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '基准事件', 'idem-chk-base')
+                VALUES (?, ?, 'FREEZE', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '基准事件', 'idem-chk-base')
                 """, batchId, orgId);
         Long baseEventId = jdbcTemplate.queryForObject(
                 "SELECT id FROM trace_event WHERE org_id = ? AND idempotency_key = 'idem-chk-base'", Long.class, orgId);
@@ -877,7 +877,7 @@ class TraceEventMysqlIntegrationTest {
         // 插入首次更正 (成功)
         jdbcTemplate.update("""
                 INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, corrects_event_id, correction_reason, idempotency_key)
-                VALUES (?, ?, 'PROCESS', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '首次更正', ?, '首次更正原因', 'idem-chk-corr-1')
+                VALUES (?, ?, 'FREEZE', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '首次更正', ?, '首次更正原因', 'idem-chk-corr-1')
                 """, batchId, orgId, baseEventId);
         Long firstCorrId = jdbcTemplate.queryForObject(
                 "SELECT id FROM trace_event WHERE org_id = ? AND idempotency_key = 'idem-chk-corr-1'", Long.class, orgId);
@@ -887,7 +887,7 @@ class TraceEventMysqlIntegrationTest {
         DataAccessException exFork = assertThrows(DataAccessException.class, () ->
                 jdbcTemplate.update("""
                         INSERT INTO trace_event (batch_id, org_id, event_type, occurred_at, recorded_at, data_source, status, summary, corrects_event_id, correction_reason, idempotency_key)
-                        VALUES (?, ?, 'PROCESS', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '分叉更正', ?, '分叉原因', 'idem-chk-corr-2')
+                        VALUES (?, ?, 'FREEZE', NOW(), NOW(), 'MANUAL', 'SUBMITTED', '分叉更正', ?, '分叉原因', 'idem-chk-corr-2')
                         """, batchId, orgId, baseEventId)
         );
         assertThat(exFork.getMessage()).containsIgnoringCase("uk_trace_event_corrects");
@@ -1181,7 +1181,7 @@ class TraceEventMysqlIntegrationTest {
         List<Long> eventIds = new ArrayList<>();
         for (int i = 1; i <= 3; i++) {
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS", occurredAt, site.getId(), "MANUAL", "排序测试事件 " + i, null
+                    "FREEZE", occurredAt, site.getId(), "MANUAL", "排序测试事件 " + i, null
             );
             MvcResult res = mockMvc.perform(post("/api/v1/batches/" + batch.getId() + "/events")
                             .session((MockHttpSession) session)

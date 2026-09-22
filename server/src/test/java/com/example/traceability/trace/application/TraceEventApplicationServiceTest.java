@@ -134,7 +134,7 @@ class TraceEventApplicationServiceTest {
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS",
+                    "FREEZE",
                     OCCURRED_AT,
                     null,
                     "MANUAL",
@@ -147,7 +147,7 @@ class TraceEventApplicationServiceTest {
             assertThat(resp).isNotNull();
             assertThat(resp.batchId()).isEqualTo(1000L);
             assertThat(resp.orgId()).isEqualTo(10L);
-            assertThat(resp.eventType()).isEqualTo("PROCESS");
+            assertThat(resp.eventType()).isEqualTo("FREEZE");
             assertThat(resp.occurredAt()).isEqualTo(OCCURRED_AT);
             assertThat(resp.recordedAt()).isNotNull();
             assertThat(resp.operatorId()).isEqualTo(100L);
@@ -374,7 +374,7 @@ class TraceEventApplicationServiceTest {
             dup.setBatchId(1000L);
             dup.setOrgId(10L);
             dup.setOperatorId(100L);
-            dup.setEventType("PROCESS");
+            dup.setEventType("FREEZE");
             dup.setOccurredAt(OCCURRED_AT.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
             dup.setRecordedAt(LocalDateTime.now(ZoneOffset.UTC));
             dup.setSiteId(null);
@@ -388,7 +388,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.selectByOrgIdAndIdempotencyKeyForUpdate(10L, VALID_KEY)).thenReturn(dup);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "并发加工", null
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "并发加工", null
             );
 
             TraceEventResponse resp = eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1);
@@ -415,7 +415,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.updateStatusToCorrected(eq(500L), eq(1000L), eq(10L), anyLong(), any())).thenReturn(1);
 
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS",
+                    "FREEZE",
                     OCCURRED_AT,
                     null,
                     "MANUAL",
@@ -450,7 +450,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.updateStatusToCorrected(eq(500L), eq(1000L), eq(10L), anyLong(), any())).thenReturn(1);
 
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "归档批次更正", null, "审计补充修正"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "归档批次更正", null, "审计补充修正"
             );
 
             TraceEventResponse resp = eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1);
@@ -464,7 +464,7 @@ class TraceEventApplicationServiceTest {
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(batch);
 
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "冻结批次更正", null, "补充说明"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "冻结批次更正", null, "补充说明"
             );
 
             assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1))
@@ -485,7 +485,7 @@ class TraceEventApplicationServiceTest {
             existingCorrection.setBatchId(1000L);
             existingCorrection.setOrgId(10L);
             existingCorrection.setOperatorId(100L);
-            existingCorrection.setEventType("PROCESS");
+            existingCorrection.setEventType("FREEZE");
             existingCorrection.setOccurredAt(OCCURRED_AT.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
             existingCorrection.setRecordedAt(LocalDateTime.now(ZoneOffset.UTC));
             existingCorrection.setSiteId(null);
@@ -500,7 +500,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.selectByOrgIdAndIdempotencyKey(10L, VALID_KEY)).thenReturn(existingCorrection);
 
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "更正摘要", null, "修正原因"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "更正摘要", null, "修正原因"
             );
 
             // 即使未查 batch 和 targetEvent，也能直接识别原更正结果
@@ -526,7 +526,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.selectByIdIgnoreTenantForUpdate(500L)).thenReturn(oldEvent);
 
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "试图分叉更正", null, "非法分叉更正原因"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "试图分叉更正", null, "非法分叉更正原因"
             );
 
             assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1))
@@ -555,7 +555,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.updateStatusToCorrected(eq(500L), eq(1000L), eq(10L), anyLong(), any())).thenReturn(0);
 
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", null, "原因"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", null, "原因"
             );
 
             assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1))
@@ -594,7 +594,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.selectByCorrectsEventIdForUpdate(500L)).thenReturn(existingCorrection);
 
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", null, "原因"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", null, "原因"
             );
 
             assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1))
@@ -630,7 +630,7 @@ class TraceEventApplicationServiceTest {
             existingCorrection.setBatchId(1000L);
             existingCorrection.setOrgId(10L);
             existingCorrection.setOperatorId(100L);
-            existingCorrection.setEventType("PROCESS");
+            existingCorrection.setEventType("FREEZE");
             existingCorrection.setOccurredAt(OCCURRED_AT.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
             existingCorrection.setRecordedAt(LocalDateTime.now(ZoneOffset.UTC));
             existingCorrection.setSiteId(null);
@@ -645,7 +645,7 @@ class TraceEventApplicationServiceTest {
             when(traceEventMapper.selectByOrgIdAndIdempotencyKeyForUpdate(10L, VALID_KEY)).thenReturn(existingCorrection);
 
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "更正摘要", null, "修正原因"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "更正摘要", null, "修正原因"
             );
 
             TraceEventResponse resp = eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1);
@@ -673,7 +673,7 @@ class TraceEventApplicationServiceTest {
             existingCorrection.setBatchId(1000L);
             existingCorrection.setOrgId(10L);
             existingCorrection.setOperatorId(100L);
-            existingCorrection.setEventType("PROCESS");
+            existingCorrection.setEventType("FREEZE");
             existingCorrection.setOccurredAt(OCCURRED_AT.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
             existingCorrection.setRecordedAt(LocalDateTime.now(ZoneOffset.UTC));
             existingCorrection.setSiteId(null);
@@ -689,7 +689,7 @@ class TraceEventApplicationServiceTest {
 
             // 新请求的摘要不同
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "不同的更正摘要", null, "原修正原因"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "不同的更正摘要", null, "原修正原因"
             );
 
             assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1))
@@ -705,7 +705,7 @@ class TraceEventApplicationServiceTest {
         @DisplayName("非 OPERATOR 角色或平台角色更正操作被拦截 (403 ACCESS_DENIED)")
         void correctEvent_NonOperator_Denied() {
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "修正后的加工摘要", null, "补充说明温度"
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "修正后的加工摘要", null, "补充说明温度"
             );
 
             // 1. 平台管理员拦截
@@ -755,7 +755,7 @@ class TraceEventApplicationServiceTest {
             }
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", map
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", map
             );
 
             assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
@@ -773,7 +773,7 @@ class TraceEventApplicationServiceTest {
             // 大写开头
             Map<String, Object> mapUpper = Map.of("InvalidKey", "val");
             CreateTraceEventRequest reqUpper = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", mapUpper
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", mapUpper
             );
             assertThatThrownBy(() -> eventService.createEvent(1000L, reqUpper, VALID_KEY, operatorOrg1))
                     .isInstanceOf(BusinessException.class)
@@ -782,7 +782,7 @@ class TraceEventApplicationServiceTest {
             // 下划线
             Map<String, Object> mapUnder = Map.of("line_number", "L1");
             CreateTraceEventRequest reqUnder = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", mapUnder
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", mapUnder
             );
             assertThatThrownBy(() -> eventService.createEvent(1000L, reqUnder, VALID_KEY, operatorOrg1))
                     .isInstanceOf(BusinessException.class)
@@ -794,7 +794,7 @@ class TraceEventApplicationServiceTest {
         void detailsJson_ForbiddenKeys_Rejected() {
             Map<String, Object> map = Map.of("batchId", 123);
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", map
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", map
             );
             assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
                     .isInstanceOf(BusinessException.class)
@@ -806,7 +806,7 @@ class TraceEventApplicationServiceTest {
         void detailsJson_NestedStructure_Rejected() {
             Map<String, Object> mapNested = Map.of("nested", Map.of("child", 1));
             CreateTraceEventRequest reqNested = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", mapNested
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", mapNested
             );
             assertThatThrownBy(() -> eventService.createEvent(1000L, reqNested, VALID_KEY, operatorOrg1))
                     .isInstanceOf(BusinessException.class)
@@ -814,7 +814,7 @@ class TraceEventApplicationServiceTest {
 
             Map<String, Object> mapList = Map.of("items", List.of("a", "b"));
             CreateTraceEventRequest reqList = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", mapList
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", mapList
             );
             assertThatThrownBy(() -> eventService.createEvent(1000L, reqList, VALID_KEY, operatorOrg1))
                     .isInstanceOf(BusinessException.class)
@@ -826,7 +826,7 @@ class TraceEventApplicationServiceTest {
         void detailsJson_StringLengthExceeds500_Rejected() {
             Map<String, Object> map = Map.of("longText", "A".repeat(501));
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, null, "MANUAL", "摘要", map
+                    "FREEZE", OCCURRED_AT, null, "MANUAL", "摘要", map
             );
             assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
                     .isInstanceOf(BusinessException.class)
@@ -846,7 +846,7 @@ class TraceEventApplicationServiceTest {
             when(siteMapper.selectByIdIgnoreTenant(999L)).thenReturn(null);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, 999L, "MANUAL", "摘要", null
+                    "FREEZE", OCCURRED_AT, 999L, "MANUAL", "摘要", null
             );
 
             assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
@@ -862,7 +862,7 @@ class TraceEventApplicationServiceTest {
             when(siteMapper.selectByIdIgnoreTenant(888L)).thenReturn(otherSite);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, 888L, "MANUAL", "摘要", null
+                    "FREEZE", OCCURRED_AT, 888L, "MANUAL", "摘要", null
             );
 
             assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
@@ -879,7 +879,7 @@ class TraceEventApplicationServiceTest {
             when(siteMapper.selectByIdIgnoreTenant(888L)).thenReturn(inactiveSite);
 
             CreateTraceEventRequest req = new CreateTraceEventRequest(
-                    "PROCESS", OCCURRED_AT, 888L, "MANUAL", "摘要", null
+                    "FREEZE", OCCURRED_AT, 888L, "MANUAL", "摘要", null
             );
 
             assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
@@ -1133,6 +1133,122 @@ class TraceEventApplicationServiceTest {
                     .isInstanceOf(BusinessException.class)
                     .satisfies(e -> assertThat(((BusinessException) e).getCode()).isEqualTo("INVALID_REQUEST"));
             verify(traceEventMapper, never()).insert(any(TraceEvent.class));
+        }
+    }
+
+    @Nested
+    @DisplayName("自动投影类型全集（SOURCE / PROCESS / TRANSPORT / ARRIVAL）禁止人工伪造，PROCESS 仅由批次操作投影")
+    class AutoOnlyAndProcessProjectionTests {
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL", "process", " Transport "})
+        @DisplayName("人工创建自动投影类型被拒绝 (422 EVENT_TYPE_NOT_MANUAL)，不读取批次、不落库")
+        void createEvent_AutoOnlyType_Rejected(String eventType) {
+            CreateTraceEventRequest req = new CreateTraceEventRequest(eventType, OCCURRED_AT, null, "MANUAL", "伪造自动事件", null);
+            assertThatThrownBy(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> {
+                        BusinessException be = (BusinessException) e;
+                        assertThat(be.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+                        assertThat(be.getCode()).isEqualTo("EVENT_TYPE_NOT_MANUAL");
+                    });
+            verify(batchMapper, never()).selectByIdIgnoreTenantForUpdate(anyLong());
+            verify(traceEventMapper, never()).insert(any(TraceEvent.class));
+        }
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL"})
+        @DisplayName("人工更正为自动投影类型被拒绝 (422 EVENT_TYPE_NOT_MANUAL)")
+        void correctEvent_ToAutoOnlyType_Rejected(String eventType) {
+            CorrectTraceEventRequest req = new CorrectTraceEventRequest(eventType, OCCURRED_AT, null, "MANUAL", "改为自动事件", null, "伪造");
+            assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, req, VALID_KEY, operatorOrg1))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> assertThat(((BusinessException) e).getCode()).isEqualTo("EVENT_TYPE_NOT_MANUAL"));
+            verify(traceEventMapper, never()).insert(any(TraceEvent.class));
+        }
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL"})
+        @DisplayName("更正（作废）既有自动投影事件被拒绝 (422 AUTO_EVENT_NOT_CORRECTABLE)")
+        void correctEvent_ExistingAutoOnlyEvent_Rejected(String eventType) {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            TraceEvent auto = new TraceEvent();
+            auto.setId(500L);
+            auto.setBatchId(1000L);
+            auto.setOrgId(10L);
+            auto.setEventType(eventType);
+            auto.setStatus(TraceEventStatus.SUBMITTED.name());
+            when(traceEventMapper.selectByIdIgnoreTenantForUpdate(500L)).thenReturn(auto);
+
+            CorrectTraceEventRequest overwrite = new CorrectTraceEventRequest("FREEZE", OCCURRED_AT, null, "MANUAL", "覆盖自动事件", null, "试图作废");
+            assertThatThrownBy(() -> eventService.correctEvent(1000L, 500L, overwrite, VALID_KEY, operatorOrg1))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> assertThat(((BusinessException) e).getCode()).isEqualTo("AUTO_EVENT_NOT_CORRECTABLE"));
+            verify(traceEventMapper, never()).insert(any(TraceEvent.class));
+            verify(traceEventMapper, never()).updateStatusToCorrected(anyLong(), anyLong(), anyLong(), anyLong(), any());
+        }
+
+        private TraceEventApplicationService.ProcessProjection projection() {
+            return new TraceEventApplicationService.ProcessProjection(
+                    77L, "OP-77", 10L, LocalDateTime.of(2026, 9, 22, 8, 0),
+                    List.of(new TraceEventApplicationService.ProcessBatchLine(1000L, "TB-B0", new java.math.BigDecimal("1000.000"))),
+                    List.of(new TraceEventApplicationService.ProcessBatchLine(2000L, "TB-B1", new java.math.BigDecimal("960.000"))),
+                    new java.math.BigDecimal("1000.000"),
+                    new java.math.BigDecimal("30.000"),
+                    java.math.BigDecimal.ZERO,
+                    new java.math.BigDecimal("10.000"));
+        }
+
+        @Test
+        @DisplayName("appendProcessEvent：落在产出批次、执行组织记录、系统幂等键、操作业务时间、结构化来源为 BATCH_OPERATION、摘要不含内部标识")
+        void appendProcessEvent_WritesStructuredFacts() throws Exception {
+            LocalDateTime recordedAt = LocalDateTime.of(2026, 9, 22, 8, 5);
+            eventService.appendProcessEvent(projection(), 2000L, 100L, recordedAt);
+
+            ArgumentCaptor<TraceEvent> captor = ArgumentCaptor.forClass(TraceEvent.class);
+            verify(traceEventMapper).insert(captor.capture());
+            TraceEvent event = captor.getValue();
+            assertThat(event.getEventType()).isEqualTo("PROCESS");
+            assertThat(event.getBatchId()).isEqualTo(2000L);
+            assertThat(event.getOrgId()).isEqualTo(10L);
+            assertThat(event.getOperatorId()).isEqualTo(100L);
+            assertThat(event.getSiteId()).isNull();
+            assertThat(event.getIdempotencyKey()).isEqualTo("SYS:PROCESS:OPERATION:77:BATCH:2000");
+            assertThat(event.getOccurredAt()).isEqualTo(LocalDateTime.of(2026, 9, 22, 8, 0));
+            assertThat(event.getRecordedAt()).isEqualTo(recordedAt);
+            assertThat(event.getSummary()).isEqualTo("加工产出 960 kg（投入 1000 kg，损耗 30 kg，留样 10 kg）");
+            Map<String, Object> details = objectMapper.readValue(event.getDetailsJson(), new tools.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            assertThat(details)
+                    .containsEntry("sourceObjectType", "BATCH_OPERATION")
+                    .containsEntry("sourceObjectId", 77)
+                    .containsEntry("operationNo", "OP-77")
+                    .containsEntry("operationType", "PROCESS")
+                    .containsEntry("traceBatchNo", "TB-B1")
+                    .containsEntry("lossQuantity", "30.000")
+                    .containsEntry("sampleQuantity", "10.000")
+                    .containsEntry("occurredAtBasis", "OPERATION_OCCURRED")
+                    .doesNotContainKeys("freezeDate");
+        }
+
+        @Test
+        @DisplayName("appendProcessEvent：身份冲突转为 409 PROCESS_EVENT_CONFLICT；非本操作产出批次被拒绝")
+        void appendProcessEvent_ConflictAndForeignBatch() {
+            when(traceEventMapper.insert(any(TraceEvent.class))).thenThrow(new DuplicateKeyException("uk_trace_event_org_idempotency"));
+            assertThatThrownBy(() -> eventService.appendProcessEvent(projection(), 2000L, 100L, LocalDateTime.now()))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> assertThat(((BusinessException) e).getCode()).isEqualTo("PROCESS_EVENT_CONFLICT"));
+            assertThatThrownBy(() -> eventService.appendProcessEvent(projection(), 1000L, 100L, LocalDateTime.now()))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        @Test
+        @DisplayName("appendProcessEvent 必须在既有事务中调用 (Propagation.MANDATORY)")
+        void appendProcessEvent_RequiresExistingTransaction() throws Exception {
+            var method = TraceEventApplicationService.class.getMethod("appendProcessEvent",
+                    TraceEventApplicationService.ProcessProjection.class, Long.class, Long.class, LocalDateTime.class);
+            var tx = method.getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+            assertThat(tx).isNotNull();
+            assertThat(tx.propagation()).isEqualTo(org.springframework.transaction.annotation.Propagation.MANDATORY);
         }
     }
 }

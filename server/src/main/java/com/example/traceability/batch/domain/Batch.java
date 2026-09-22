@@ -84,6 +84,14 @@ public class Batch {
     @TableField("risk_status")
     private String riskStatus;
 
+    /** 产出该批次的批次操作 ID；仅服务端生成的操作输出批次非空（Slice 3 起）。 */
+    @TableField("produced_by_operation_id")
+    private Long producedByOperationId;
+
+    /** 全量消耗该批次的已提交批次操作 ID；非空时批次必为 CLOSED（Slice 3 起）。 */
+    @TableField("consumed_by_operation_id")
+    private Long consumedByOperationId;
+
     @TableField("creation_idempotency_key")
     private String creationIdempotencyKey;
 
@@ -297,5 +305,21 @@ public class Batch {
 
     public void setUpdatedBy(Long updatedBy) {
         this.updatedBy = updatedBy;
+    }
+
+    public Long getProducedByOperationId() {
+        return producedByOperationId;
+    }
+
+    public void setProducedByOperationId(Long producedByOperationId) {
+        this.producedByOperationId = producedByOperationId;
+    }
+
+    public Long getConsumedByOperationId() {
+        return consumedByOperationId;
+    }
+
+    public void setConsumedByOperationId(Long consumedByOperationId) {
+        this.consumedByOperationId = consumedByOperationId;
     }
 }

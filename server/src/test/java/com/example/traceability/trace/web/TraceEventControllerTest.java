@@ -182,7 +182,7 @@ class TraceEventControllerTest {
     @DisplayName("写操作未携带 CSRF 凭据被拦截 (403 ACCESS_DENIED)")
     void createEvent_WithoutCsrf_Returns403() throws Exception {
         CreateTraceEventRequest req = new CreateTraceEventRequest(
-                "PROCESS", OCCURRED_AT, null, "MANUAL", "加工切片", null
+                "FREEZE", OCCURRED_AT, null, "MANUAL", "加工切片", null
         );
 
         mockMvc.perform(post("/api/v1/batches/1000/events")
@@ -198,11 +198,11 @@ class TraceEventControllerTest {
     @DisplayName("企业操作员创建普通事件成功 (201 Created，白名单响应投影与时间格式)")
     void createEvent_Success() throws Exception {
         CreateTraceEventRequest req = new CreateTraceEventRequest(
-                "PROCESS", OCCURRED_AT, null, "MANUAL", "车间速冻", Map.of("temperature", -35.0)
+                "FREEZE", OCCURRED_AT, null, "MANUAL", "车间速冻", Map.of("temperature", -35.0)
         );
 
         TraceEventResponse mockResponse = new TraceEventResponse(
-                501L, 1000L, 10L, null, "PROCESS",
+                501L, 1000L, 10L, null, "FREEZE",
                 OCCURRED_AT, OCCURRED_AT, 101L, "MANUAL", "SUBMITTED",
                 "车间速冻", Map.of("temperature", -35.0), null, null
         );
@@ -220,7 +220,7 @@ class TraceEventControllerTest {
                 .andExpect(jsonPath("$.data.id").value(501L))
                 .andExpect(jsonPath("$.data.batchId").value(1000L))
                 .andExpect(jsonPath("$.data.orgId").value(10L))
-                .andExpect(jsonPath("$.data.eventType").value("PROCESS"))
+                .andExpect(jsonPath("$.data.eventType").value("FREEZE"))
                 .andExpect(jsonPath("$.data.occurredAt").value("2026-09-09T10:00:00.000Z"))
                 .andExpect(jsonPath("$.data.recordedAt").value("2026-09-09T10:00:00.000Z"))
                 .andExpect(jsonPath("$.data.status").value("SUBMITTED"))
@@ -236,7 +236,7 @@ class TraceEventControllerTest {
     @DisplayName("平台管理员尝试写入追溯事件被拦截 (403 ACCESS_DENIED)")
     void createEvent_PlatformAdmin_Returns403() throws Exception {
         CreateTraceEventRequest req = new CreateTraceEventRequest(
-                "PROCESS", OCCURRED_AT, null, "MANUAL", "车间速冻", null
+                "FREEZE", OCCURRED_AT, null, "MANUAL", "车间速冻", null
         );
 
         when(traceEventService.createEvent(eq(1000L), any(), eq(VALID_KEY), any()))
@@ -256,7 +256,7 @@ class TraceEventControllerTest {
     @DisplayName("平台角色尝试更正追溯事件被拦截 (403 ACCESS_DENIED)")
     void correctEvent_PlatformAdmin_Returns403() throws Exception {
         CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                "PROCESS", OCCURRED_AT, null, "MANUAL", "修正摘要", null, "原因说明"
+                "FREEZE", OCCURRED_AT, null, "MANUAL", "修正摘要", null, "原因说明"
         );
 
         when(traceEventService.correctEvent(eq(1000L), eq(501L), any(), eq(VALID_KEY), any()))
@@ -276,11 +276,11 @@ class TraceEventControllerTest {
     @DisplayName("企业操作员更正事件成功 (201 Created，包含 correctsEventId 与 correctionReason)")
     void correctEvent_Success() throws Exception {
         CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                "PROCESS", OCCURRED_AT, null, "MANUAL", "修正后的加工摘要", null, "补充说明温度"
+                "FREEZE", OCCURRED_AT, null, "MANUAL", "修正后的加工摘要", null, "补充说明温度"
         );
 
         TraceEventResponse mockResponse = new TraceEventResponse(
-                502L, 1000L, 10L, null, "PROCESS",
+                502L, 1000L, 10L, null, "FREEZE",
                 OCCURRED_AT, OCCURRED_AT, 101L, "MANUAL", "SUBMITTED",
                 "修正后的加工摘要", null, 501L, "补充说明温度"
         );
@@ -307,7 +307,7 @@ class TraceEventControllerTest {
     @DisplayName("更正请求缺少更正原因 correctionReason 校验失败 (400 INVALID_REQUEST)")
     void correctEvent_MissingReason_Returns400() throws Exception {
         CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                "PROCESS", OCCURRED_AT, null, "MANUAL", "修正后的加工摘要", null, ""
+                "FREEZE", OCCURRED_AT, null, "MANUAL", "修正后的加工摘要", null, ""
         );
 
         mockMvc.perform(post("/api/v1/batches/1000/events/501/corrections")
@@ -416,7 +416,7 @@ class TraceEventControllerTest {
     @DisplayName("更正已更正事件返回 409 EVENT_ALREADY_CORRECTED")
     void correctEvent_AlreadyCorrected_Returns409() throws Exception {
         CorrectTraceEventRequest req = new CorrectTraceEventRequest(
-                "PROCESS", OCCURRED_AT, null, "MANUAL", "再次更正", null, "原因"
+                "FREEZE", OCCURRED_AT, null, "MANUAL", "再次更正", null, "原因"
         );
 
         when(traceEventService.correctEvent(eq(1000L), eq(500L), any(), eq(VALID_KEY), any()))

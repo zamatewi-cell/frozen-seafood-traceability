@@ -91,6 +91,9 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 - [x] 确认统一业务契约 v1.1 与 Demo MVP 实施路线图
 - [x] 完成 Phase A Slice 2：Transfer + Shipment（Flyway V9；运输任务 PLANNED → IN_TRANSIT → DELIVERED / CANCELLED；提交前必须绑定 PLANNED 运输任务、到达后接收方才能接受或拒收；TRANSPORT / ARRIVAL 仅由运输任务发运 / 到达按批次各生成一条，ACCEPT 不再生成 ARRIVAL；发出交接、运输任务、承运与待接收生产页面；真实三账号浏览器验收 `npm run test:smoke`，手工验收 `SMOKE_KEEP=true npm run test:smoke`）
   - Demo MVP Phase A 阶段性限制：承运方必须是独立的 `CARRIER` 类型组织，承运组织不能作为发货方或交接接收方。统一业务契约 v1.1 未规定承运方必须与发送 / 接收方不同，因此该限制只在应用层执行，没有写入数据库永久约束。
+- [x] 完成 Phase A Slice 3：PROCESS / SPLIT（Flyway V10；PROCESS / SPLIT 恰好一个 INPUT 且必须全量消耗剩余量，禁止部分 INPUT；OUTPUT 批次由服务端生成为 DRAFT，提交时同一事务关闭 INPUT、激活 OUTPUT、固化谱系；PROCESS 自动生成 PROCESS 事件，SPLIT 不生成 PACK / PROCESS，普通 PROCESS 不推导 FREEZE；SPLIT 产出继承输入批次类型；服务端按数值精确校验物料平衡；加工 / 拆分向导与操作详情页；原加工企业在批次转出后仍可只读查询本组织操作；真实浏览器验收 1000 = 960 + 30 + 10、960 = 600 + 360）
+  - Slice 3 实现规则（已知契约歧义）：SOURCE 批次拆分得到的 SOURCE 类型子批次随批次操作激活时，当前实现不生成新的 SOURCE 事件，来源出处通过 BatchRelation / 谱系追溯到祖先批次。统一业务契约 v1.1 把 SOURCE 触发源写为“SOURCE Batch 从 DRAFT/NORMAL 激活为 ACTIVE/NORMAL 且来源字段完整”，同时规定 SPLIT 谱系由 BatchOperation / BatchRelation 表达，但未明确处理这一情形；这是当前实现选择，不是 v1.1 已明确保证的规范规则，可在后续契约修订中澄清。
+  - 当前 Slice 范围限制：`MERGE` / `REPACK` 仍保留在操作类型枚举中，但执行时返回 422 `OPERATION_TYPE_NOT_SUPPORTED`；这是本 Slice 的开发范围限制，不是永久业务规则。多输入加工的来源字段与产品继承规则将在后续单独定义。
 - [ ] 完成 Phase 0：Batch 双状态、双编号及企业端基础壳纠偏
 - [ ] 完成 Phase A：来源建批至消费者查询的正常业务闭环
 - [ ] 完成 Phase B：温度异常、隔离与模拟召回闭环
@@ -100,4 +103,4 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 
 按照 [Demo MVP 实施路线图](docs/DEMO_MVP_ROADMAP.md) 从 Phase 0 开始：先收敛 Batch 双状态、双编号和企业端基础壳，再按“来源建批 → Transfer + Shipment → PROCESS/SPLIT → 自有冷库 → 终端 Sale → PublicTraceCode 与消费者查询”的纵向 Slice 推进 Phase A。
 
-在 Phase A 完成并通过 3～5 分钟真实业务演示前，暂停 FR-COLD-001A、TemperatureRecord、Alert、QUARANTINED、Freeze/Recall、InspectionReport、第三方仓储和企业端完整图谱。当前 Shipment 只有数据库表、Sale 尚不存在，TemperatureRecord、Alert、InspectionReport、Recall 也没有可执行 Java/API，不得描述为已完成功能。
+在 Phase A 完成并通过 3～5 分钟真实业务演示前，暂停 FR-COLD-001A、TemperatureRecord、Alert、QUARANTINED、Freeze/Recall、InspectionReport、第三方仓储和企业端完整图谱。当前 Sale 尚不存在，TemperatureRecord、Alert、InspectionReport、Recall 也没有可执行 Java/API，不得描述为已完成功能。

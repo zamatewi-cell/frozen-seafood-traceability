@@ -297,4 +297,83 @@ public interface BatchMapper extends BaseMapper<Batch> {
     @Select("<script>SELECT * FROM batch WHERE is_deleted = 0 AND id IN " +
             "<foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach></script>")
     List<Batch> selectByIdsIgnoreTenant(@Param("ids") java.util.Collection<Long> ids);
+
+    /**
+     * 批次操作提交时原子关闭被全量消耗的 INPUT 批次（ACTIVE+NORMAL -> CLOSED+NORMAL）。
+     * <p>
+     * 同时约束责任组织、ACTIVE+NORMAL 与尚未被任何操作全量消耗，影响行数不为 1 时调用方必须回滚整个操作提交。
+     * </p>
+     *
+     * @return 影响行数（1 为成功）
+     */
+    @Update("""
+            UPDATE batch
+            SET flow_status = 'CLOSED',
+                consumed_by_operation_id = #{operationId},
+                version = version + 1,
+                updated_at = #{nowUtc},
+                updated_by = #{updatedBy}
+            WHERE id = #{id}
+              AND org_id = #{orgId}
+              AND flow_status = 'ACTIVE'
+              AND risk_status = 'NORMAL'
+              AND consumed_by_operation_id IS NULL
+              AND is_deleted = 0
+            """)
+    int closeConsumedInput(
+            @Param("id") Long id,
+            @Param("orgId") Long orgId,
+            @Param("operationId") Long operationId,
+            @Param("nowUtc") LocalDateTime nowUtc,
+            @Param("updatedBy") Long updatedBy
+    );
+
+    /**
+     * 批次操作提交时原子激活该操作产出的 OUTPUT 草稿批次（DRAFT+NORMAL -> ACTIVE+NORMAL）。
+     *
+     * @return 影响行数（1 为成功）
+     */
+    @Update("""
+            UPDATE batch
+            SET flow_status = 'ACTIVE',
+                version = version + 1,
+                updated_at = #{nowUtc},
+                updated_by = #{updatedBy}
+            WHERE id = #{id}
+              AND org_id = #{orgId}
+              AND produced_by_operation_id = #{operationId}
+              AND flow_status = 'DRAFT'
+              AND risk_status = 'NORMAL'
+              AND is_deleted = 0
+            """)
+    int activateOperationOutput(
+            @Param("id") Long id,
+            @Param("orgId") Long orgId,
+            @Param("operationId") Long operationId,
+            @Param("nowUtc") LocalDateTime nowUtc,
+            @Param("updatedBy") Long updatedBy
+    );
+
+    /**
+     * 删除批次操作草稿时，逻辑删除该操作产出的全部 OUTPUT 草稿批次。
+     *
+     * @return 影响行数
+     */
+    @Update("""
+            UPDATE batch
+            SET is_deleted = 1,
+                version = version + 1,
+                updated_at = #{nowUtc},
+                updated_by = #{updatedBy}
+            WHERE produced_by_operation_id = #{operationId}
+              AND org_id = #{orgId}
+              AND flow_status = 'DRAFT'
+              AND is_deleted = 0
+            """)
+    int softDeleteOperationDraftOutputs(
+            @Param("operationId") Long operationId,
+            @Param("orgId") Long orgId,
+            @Param("nowUtc") LocalDateTime nowUtc,
+            @Param("updatedBy") Long updatedBy
+    );
 }

@@ -31,6 +31,19 @@ export function canInitiateTransfer(user: CurrentUser | null | undefined, batch:
     && batch.riskStatus === 'NORMAL')
 }
 
+/**
+ * 加工企业（PROCESSOR）的操作员可以对本组织负责、ACTIVE + NORMAL 且仍有剩余量的批次执行加工 / 拆分；
+ * 是否存在未结束交接由页面结合交接列表判断，服务端仍独立校验全部前提。
+ */
+export function canOperateBatch(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
+  return Boolean(isOperator(user) && user.orgType === 'PROCESSOR' && batch
+    && batch.orgId === user.orgId
+    && batch.flowStatus === 'ACTIVE'
+    && batch.riskStatus === 'NORMAL'
+    && !batch.consumedByOperationId
+    && (batch.remainingQuantity === undefined || Number(batch.remainingQuantity) > 0))
+}
+
 /** 交接接收方的操作员或质量管理员可以接受 / 拒收（运输任务必须已到达，服务端校验）。 */
 export function canDecideTransfer(user: CurrentUser | null | undefined, transfer: Transfer | null | undefined): boolean {
   return Boolean(user && transfer

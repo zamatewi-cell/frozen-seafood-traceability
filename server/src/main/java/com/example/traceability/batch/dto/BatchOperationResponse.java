@@ -3,6 +3,7 @@ package com.example.traceability.batch.dto;
 import com.example.traceability.batch.domain.BatchOperation;
 import com.fasterxml.jackson.annotation.JsonFormat;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -29,6 +30,11 @@ public record BatchOperationResponse(
         String status,
         String note,
         Boolean balanced,
+        BigDecimal inputTotal,
+        BigDecimal outputTotal,
+        BigDecimal lossTotal,
+        BigDecimal wasteTotal,
+        BigDecimal sampleTotal,
         Long version,
         @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX", timezone = "UTC")
         OffsetDateTime createdAt,
@@ -46,6 +52,21 @@ public record BatchOperationResponse(
             List<BatchRelationResponse> relations,
             Boolean balanced
     ) {
+        return fromEntity(op, items, relations, balanced, null);
+    }
+
+    /**
+     * 批次操作白名单投影。
+     *
+     * @param totals 各角色数量合计（按 INPUT、OUTPUT、LOSS、WASTE、SAMPLE 顺序；为 null 时合计字段输出 null）
+     */
+    public static BatchOperationResponse fromEntity(
+            BatchOperation op,
+            List<BatchOperationItemResponse> items,
+            List<BatchRelationResponse> relations,
+            Boolean balanced,
+            BigDecimal[] totals
+    ) {
         if (op == null) {
             return null;
         }
@@ -59,6 +80,11 @@ public record BatchOperationResponse(
                 op.getStatus(),
                 op.getNote(),
                 balanced,
+                totals != null ? totals[0] : null,
+                totals != null ? totals[1] : null,
+                totals != null ? totals[2] : null,
+                totals != null ? totals[3] : null,
+                totals != null ? totals[4] : null,
                 op.getVersion(),
                 op.getCreatedAt() != null ? op.getCreatedAt().atOffset(ZoneOffset.UTC) : null,
                 op.getCreatedBy(),

@@ -27,6 +27,7 @@ public record BatchResponse(
         String externalBatchNo,
         String batchType,
         BigDecimal quantity,
+        BigDecimal remainingQuantity,
         String unitCode,
         String originType,
         String originText,
@@ -36,6 +37,8 @@ public record BatchResponse(
         Integer shelfLifeDays,
         String flowStatus,
         String riskStatus,
+        Long producedByOperationId,
+        Long consumedByOperationId,
         Long version,
         @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ssXXX", timezone = "UTC")
         OffsetDateTime createdAt,
@@ -45,7 +48,26 @@ public record BatchResponse(
         Long updatedBy
 ) {
 
+    /**
+     * 不查询操作台账的简化投影：CLOSED 批次剩余量为 0，其余批次剩余量等于声明数量。
+     * 仅适用于尚未参与任何已提交批次操作的批次（例如刚创建或刚激活的草稿）；
+     * 其余场景必须使用 {@link #fromEntity(Batch, BigDecimal)} 传入由已提交记录派生的剩余量。
+     */
     public static BatchResponse fromEntity(Batch b) {
+        if (b == null) {
+            return null;
+        }
+        BigDecimal remaining = "CLOSED".equals(b.getFlowStatus()) ? BigDecimal.ZERO : b.getQuantity();
+        return fromEntity(b, remaining);
+    }
+
+    /**
+     * 批次白名单投影。
+     *
+     * @param b                 批次实体
+     * @param remainingQuantity 派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量（Sale 与处置于后续 Slice 加入）
+     */
+    public static BatchResponse fromEntity(Batch b, BigDecimal remainingQuantity) {
         if (b == null) {
             return null;
         }
@@ -57,6 +79,7 @@ public record BatchResponse(
                 b.getExternalBatchNo(),
                 b.getBatchType(),
                 b.getQuantity(),
+                remainingQuantity,
                 b.getUnitCode(),
                 b.getOriginType(),
                 b.getOriginText(),
@@ -66,6 +89,8 @@ public record BatchResponse(
                 b.getShelfLifeDays(),
                 b.getFlowStatus(),
                 b.getRiskStatus(),
+                b.getProducedByOperationId(),
+                b.getConsumedByOperationId(),
                 b.getVersion(),
                 b.getCreatedAt() != null ? b.getCreatedAt().atOffset(ZoneOffset.UTC) : null,
                 b.getCreatedBy(),

@@ -5,18 +5,21 @@ import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
 
 import java.math.BigDecimal;
 
 /**
  * 批次操作明细项目请求 DTO。
  * <p>
- * 项目规则：
+ * 项目规则（Phase A Slice 3）：
  * <ul>
  *   <li>{@code role}：INPUT、OUTPUT、LOSS、WASTE、SAMPLE</li>
- *   <li>{@code batchId}：INPUT/OUTPUT 必须提供且为正数；LOSS/WASTE/SAMPLE 严禁提供</li>
- *   <li>{@code quantity}：必须大于 0，最多 3 位小数</li>
- *   <li>{@code unitCode}：Phase 1 严格限定为 {@code kg}</li>
+ *   <li>{@code batchId}：仅 INPUT 必须提供；OUTPUT 批次由服务端生成，严禁提供；LOSS/WASTE/SAMPLE 严禁提供</li>
+ *   <li>{@code quantity}：必须大于 0，最多 3 位小数；INPUT 必须等于输入批次当前全部剩余量</li>
+ *   <li>{@code unitCode}：严格限定为 {@code kg}</li>
+ *   <li>{@code productId} / {@code externalBatchNo} / {@code shelfLifeDays}：仅 OUTPUT 可选提供，
+ *       分别表示产出批次的产品（PROCESS 默认沿用输入产品；SPLIT 只能沿用输入产品）、企业外部批号与保质期天数</li>
  * </ul>
  * </p>
  *
@@ -36,9 +39,22 @@ public record BatchOperationItemRequest(
         BigDecimal quantity,
 
         @NotBlank(message = "计量单位 unitCode 不能为空")
-        String unitCode
+        String unitCode,
+
+        @Positive(message = "产出产品 ID 必须为正整数")
+        Long productId,
+
+        @Size(max = 64, message = "产出批次外部批号最多 64 个字符")
+        String externalBatchNo,
+
+        @Positive(message = "保质期天数必须大于 0")
+        Integer shelfLifeDays
 ) {
     public BatchOperationItemRequest(String role, Long batchId, BigDecimal quantity) {
-        this(role, batchId, quantity, "kg");
+        this(role, batchId, quantity, "kg", null, null, null);
+    }
+
+    public BatchOperationItemRequest(String role, Long batchId, BigDecimal quantity, String unitCode) {
+        this(role, batchId, quantity, unitCode, null, null, null);
     }
 }
