@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: 冷冻海产品溯源系统 API
-  version: 0.3.0-phaseA-slice2
+  version: 0.4.0-phaseA-slice3
   description: |
     教学演练原型接口，不代表真实物联网、防伪或第三方认证能力。
 
-    本文档仅描述当前仓库中已真实实现的接口（Phase 0 + Phase A Slice 1/2 基线），业务语义以
+    本文档仅描述当前仓库中已真实实现的接口（Phase 0 + Phase A Slice 1/2/3 基线），业务语义以
     `docs/BUSINESS_CONTRACT_V1.1.md` 为准。Sale、温度记录、告警、冻结、隔离 (QUARANTINED)、召回、
     检验报告及企业端谱系图等尚未实现的能力不在本文档中声明。
 
@@ -20,6 +20,22 @@ info:
     **Demo MVP Phase A 阶段性限制**：承运方必须是独立的 `CARRIER` 类型组织，承运组织不能作为发货方创建运输任务，
     也不能作为交接接收方。统一业务契约 v1.1 未规定承运方必须与发送 / 接收方不同，因此该限制仅由应用层执行，
     未写入数据库永久约束，后续版本可以放开。
+
+    ## BatchOperation：PROCESS / SPLIT（Phase A Slice 3）
+
+    - 本 Slice 仅执行 `PROCESS` 与 `SPLIT`，且**恰好一个 INPUT**：PROCESS 至少 1 个 OUTPUT，SPLIT 至少 2 个 OUTPUT。
+      多输入物料合并属于 MERGE 职责。`MERGE` / `REPACK` 仍在枚举中，但执行时返回 422 `OPERATION_TYPE_NOT_SUPPORTED`——
+      **这是当前 Slice 的开发范围限制，不是永久业务规则**。
+    - INPUT 必须全量消耗输入批次当前剩余量（`remainingQuantity`），禁止部分 INPUT（422 `PARTIAL_INPUT_NOT_ALLOWED`）；
+      需要部分加工时先 SPLIT。
+    - OUTPUT 批次由服务端在创建操作草稿时生成为 `DRAFT` + `NORMAL`（客户端不得指定 OUTPUT 的 `batchId`），
+      不能通过普通批次接口修改或激活（409 `BATCH_OWNED_BY_OPERATION`）。PROCESS 产出 `batchType=PROCESSING`；
+      SPLIT 产出继承输入批次的 `batchType`（SPLIT 只创建新的追溯身份，不声明发生了加工）。
+    - 提交在同一事务内：全部 INPUT 变为 `CLOSED`、全部 OUTPUT 变为 `ACTIVE`、固化 BatchRelation；
+      PROCESS 为每个 OUTPUT 自动生成一条 PROCESS 追溯事件；SPLIT 不生成 PACK 或 PROCESS。普通 PROCESS 不推导 FREEZE。
+    - 物料平衡由服务端按数值精确校验：`sum(INPUT) = sum(OUTPUT) + sum(LOSS) + sum(WASTE) + sum(SAMPLE)`（不设容差，
+      `1000.0` 与 `1000.000` 视为相等）。
+    - 写操作仅限当前责任组织为 `PROCESSOR` 的 `OPERATOR`；读取对操作所属组织开放，批次转出后仍可只读查询本组织历史操作。
 
     ## 会话与 CSRF
 
@@ -460,7 +476,7 @@ paths:
     patch:
       tags: [Batches]
       summary: 更新批次草稿（仅限企业操作员）
-      description: 仅允许当前责任组织更新 `DRAFT` + `NORMAL` 批次的可变字段；`traceBatchNo` 不可修改。
+      description: 仅允许当前责任组织更新 `DRAFT` + `NORMAL` 批次的可变字段；`traceBatchNo` 不可修改。批次操作产出的 OUTPUT 草稿只能随操作提交激活，普通接口修改返回 409 `BATCH_OWNED_BY_OPERATION`。
       operationId: updateDraftBatch
       requestBody:
         required: true
@@ -561,9 +577,21 @@ paths:
   /batch-operations:
     post:
       tags: [Batches]
-      summary: 创建拆分、合并、加工或分装操作草稿（仅限企业操作员）
+      summary: 创建加工 (PROCESS) / 拆分 (SPLIT) 操作草稿，并由服务端生成 OUTPUT 草稿批次
+      description: |
+        仅限当前责任组织为 `PROCESSOR` 的 `OPERATOR`（平台 / 系统管理员 403 `ADMIN_RESTRICTED`；非操作员 403 `ACCESS_DENIED`；
+        其他组织类型 403 `ORG_TYPE_NOT_ALLOWED`；输入批次不由本组织负责 403 `ORG_SCOPE_DENIED`）。
+        - 恰好 1 个 INPUT；PROCESS 至少 1 个 OUTPUT，SPLIT 至少 2 个 OUTPUT，否则 400 `INVALID_REQUEST`；
+        - `MERGE` / `REPACK`：422 `OPERATION_TYPE_NOT_SUPPORTED`（当前 Slice 范围限制，不是永久业务规则）；
+        - OUTPUT 携带 `batchId`：400 `OUTPUT_BATCH_SERVER_GENERATED`；
+        - INPUT 数量不等于当前剩余量：422 `PARTIAL_INPUT_NOT_ALLOWED`；物料不平衡：422 `BATCH_MASS_BALANCE_VIOLATION`；
+        - 输入批次已关闭或已被消耗：409 `BATCH_ALREADY_CONSUMED`；非 ACTIVE+NORMAL：422 `BATCH_FLOW_BLOCKED`；
+          存在草稿或待接收交接：409 `BATCH_TRANSFER_OPEN`。
+        创建阶段不改变输入批次状态。同组织相同 `Idempotency-Key` 且语义相同时重放原操作；语义不同或该键属于已删除草稿时
+        409 `IDEMPOTENCY_CONFLICT`。
       operationId: createBatchOperation
       parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
@@ -572,7 +600,7 @@ paths:
             schema: {$ref: '#/components/schemas/CreateBatchOperationRequest'}
       responses:
         '201':
-          description: 操作草稿
+          description: 操作草稿（OUTPUT 批次已生成为 DRAFT）
           content:
             application/json:
               schema:
@@ -584,18 +612,98 @@ paths:
         '400': {$ref: '#/components/responses/Problem'}
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
+    get:
+      tags: [Batches]
+      summary: 按批次查询引用该批次（INPUT 或 OUTPUT）的批次操作
+      description: |
+        企业用户只返回**本组织创建**的操作，绝不暴露其他企业的内部单据。允许条件：当前责任组织，
+        或本组织曾对该批次执行过操作（历史参与，只读）；其他组织 403 `ORG_SCOPE_DENIED`。PLATFORM 只读角色返回全部。
+      operationId: listBatchOperations
+      parameters:
+        - name: batchId
+          in: query
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+      responses:
+        '200':
+          description: 批次操作分页列表（按 ID 倒序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: '#/components/schemas/BatchOperation'}}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /batch-operations/{operationId}:
+    get:
+      tags: [Batches]
+      summary: 查询批次操作详情
+      description: |
+        操作所属组织的任意用户（含 `QUALITY_MANAGER`）可读，即使相关批次此后已转出（历史只读）；PLATFORM 只读角色可读；
+        其他组织 403 `ORG_SCOPE_DENIED`；不存在 404。
+      operationId: getBatchOperation
+      parameters:
+        - {name: operationId, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        '200':
+          description: 批次操作详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/BatchOperation'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+    delete:
+      tags: [Batches]
+      summary: 删除批次操作草稿
+      description: |
+        仅 `DRAFT` 可删除（否则 409 `INVALID_STATE_TRANSITION`），版本不一致 409 `VERSION_CONFLICT`。
+        同一事务内逻辑删除操作、明细及其服务端生成的全部 OUTPUT 草稿批次；输入批次状态不变。写权限同创建。
+      operationId: deleteBatchOperation
+      parameters:
+        - {name: operationId, in: path, required: true, schema: {type: integer, format: int64}}
+        - {name: expectedVersion, in: query, required: true, schema: {type: integer, format: int64, minimum: 0}}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      responses:
+        '204': {description: 草稿已删除}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
   /batch-operations/{operationId}/submit:
     post:
       tags: [Batches]
-      summary: 提交批次操作并生成谱系边（仅限企业操作员）
+      summary: 提交批次操作：原子关闭 INPUT、激活 OUTPUT、固化谱系边；PROCESS 自动生成 PROCESS 追溯事件
+      description: |
+        写权限同创建；锁内重新校验全部前提（输入批次仍由本组织负责、ACTIVE+NORMAL、未被消耗、无未结束交接、
+        INPUT = 当前剩余量；OUTPUT 仍是本操作产出的 DRAFT 草稿，否则 409 `OPERATION_OUTPUT_STATE_INVALID`；精确物料平衡）。
+        同一事务内：INPUT → `CLOSED`（记录 `consumedByOperationId`），OUTPUT → `ACTIVE`，写入 BatchRelation
+        （PROCESS 为 `TRANSFORM`，SPLIT 为 `SPLIT`）；PROCESS 为每个 OUTPUT 生成一条 PROCESS 事件（记录组织为执行组织，
+        业务时间为操作 `occurredAt`），SPLIT 不生成 PACK / PROCESS。任一步失败整体回滚（PROCESS 事件身份冲突时 409
+        `PROCESS_EVENT_CONFLICT`）。同一 `Idempotency-Key` 重放返回原结果；已提交后换键再提交 409 `INVALID_STATE_TRANSITION`。
       operationId: submitBatchOperation
       parameters:
         - name: operationId
           in: path
           required: true
           schema: {type: integer, format: int64}
+        - {$ref: '#/components/parameters/CsrfHeader'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
@@ -604,7 +712,7 @@ paths:
             schema: {$ref: '#/components/schemas/SubmitBatchOperationRequest'}
       responses:
         '200':
-          description: 数量平衡且谱系边已创建
+          description: 已提交，INPUT 已关闭、OUTPUT 已激活、谱系边已创建
           content:
             application/json:
               schema:
@@ -625,7 +733,7 @@ paths:
       summary: 查询批次追溯事件
       description: |
         读取范围（统一业务契约 v1.1 §14）：
-        - 当前责任组织与 PLATFORM 只读角色：该批次完整时间线，包括前序责任组织记录的 SOURCE / TRANSPORT / ARRIVAL；
+        - 当前责任组织与 PLATFORM 只读角色：该批次完整时间线，包括前序责任组织记录的 SOURCE / TRANSPORT / ARRIVAL / PROCESS；
         - 历史参与组织（批次已转出，但本组织曾在该批次记录事件）：只返回本组织记录的历史事件，只读；
         - 其他组织：403 `ORG_SCOPE_DENIED`。
       operationId: listBatchEvents
@@ -1530,7 +1638,13 @@ components:
           example: TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ
         externalBatchNo: {type: string, maxLength: 64, description: 企业可选的外部批号，可重复，不作为批次身份；未填写时字段省略}
         batchType: {$ref: '#/components/schemas/BatchType'}
-        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次声明数量（剩余量由业务记录派生，本接口不返回）}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 批次声明数量（创建或产出时声明，提交后不原地改写）}
+        remainingQuantity:
+          type: number
+          minimum: 0
+          description: |
+            派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量（Sale 与处置将在后续 Slice 加入）；`CLOSED` 批次为 0。
+            批次操作 INPUT 必须等于该值。
         unitCode: {type: string, example: kg}
         originType: {$ref: '#/components/schemas/OriginType'}
         originText: {type: string, maxLength: 255}
@@ -1540,6 +1654,8 @@ components:
         shelfLifeDays: {type: integer, minimum: 1}
         flowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
         riskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
+        producedByOperationId: {type: integer, format: int64, description: 产出该批次的批次操作ID（仅操作输出批次；未产出时省略）}
+        consumedByOperationId: {type: integer, format: int64, description: 全量消耗该批次的已提交批次操作ID（非空时批次必为 CLOSED）}
         version: {type: integer, format: int64, minimum: 0}
         createdAt: {type: string, format: date-time}
         createdBy: {type: integer, format: int64}
@@ -1609,37 +1725,58 @@ components:
         operationId: {type: integer, format: int64, description: 关联批次操作ID}
         parentBatchId: {type: integer, format: int64, description: 原料父批次ID}
         childBatchId: {type: integer, format: int64, description: 产出子批次ID}
-        relationType: {type: string, enum: [MERGE, SPLIT, TRANSFORM], description: 关系类型}
+        relationType: {type: string, enum: [MERGE, SPLIT, TRANSFORM], description: "关系类型（PROCESS → TRANSFORM，SPLIT → SPLIT）"}
         createdAt: {type: string, format: date-time, description: "创建时间（ISO 8601 带明确时区偏移）"}
     BatchOperationItem:
       type: object
       required: [id, operationId, role, quantity, unitCode, normalizedQuantity]
+      description: 操作明细。INPUT / OUTPUT 项目附带关联批次摘要；LOSS / WASTE / SAMPLE 的批次字段省略。
       properties:
         id: {type: integer, format: int64, description: 操作明细项目ID}
         operationId: {type: integer, format: int64, description: 关联批次操作ID}
-        batchId: {type: [integer, 'null'], format: int64, description: "关联批次ID（INPUT与OUTPUT必有，LOSS/WASTE/SAMPLE为null）"}
+        batchId: {type: integer, format: int64, description: "关联批次ID（INPUT 与 OUTPUT 必有；OUTPUT 为服务端生成的批次）"}
         role: {type: string, enum: [INPUT, OUTPUT, LOSS, WASTE, SAMPLE], description: 项目角色}
         quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: "数量（kg），严格大于0，最多3位小数", example: 100.000}
         unitCode: {type: string, enum: [kg], example: kg, description: "计量单位，当前阶段仅支持 kg"}
-        normalizedQuantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: "折算基准数量（kg），严格大于0，最多3位小数", example: 100.000}
+        normalizedQuantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: "折算基准数量（kg）", example: 100.000}
+        traceBatchNo: {type: string, description: 关联批次追溯批次号}
+        externalBatchNo: {type: string, description: 关联批次外部批号}
+        productId: {type: integer, format: int64, description: 关联批次产品ID}
+        batchType: {$ref: '#/components/schemas/BatchType'}
+        batchFlowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
+        batchRiskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
     BatchOperationItemRequest:
       type: object
       required: [role, quantity, unitCode]
+      description: |
+        - INPUT：必须提供 `batchId`，数量必须等于该批次当前全部剩余量；
+        - OUTPUT：**不得**提供 `batchId`（输出批次由服务端生成）；可选 `productId`（仅 PROCESS 可改为其他 ACTIVE 产品，
+          默认沿用输入产品；SPLIT 只能沿用输入产品）、`externalBatchNo`、`shelfLifeDays`；
+        - LOSS / WASTE / SAMPLE：不得提供 `batchId` 与 OUTPUT 专属字段。
       properties:
-        batchId: {type: [integer, 'null'], format: int64, description: "关联批次ID（INPUT与OUTPUT必须提供，LOSS/WASTE/SAMPLE可省略或为null）"}
+        batchId: {type: integer, format: int64, description: "INPUT 必填；OUTPUT / LOSS / WASTE / SAMPLE 禁止"}
         role: {type: string, enum: [INPUT, OUTPUT, LOSS, WASTE, SAMPLE], description: 项目角色}
         quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: "数量（kg），严格大于0，最多3位小数", example: 100.000}
         unitCode: {type: string, enum: [kg], example: kg, description: "计量单位，当前阶段仅支持 kg"}
+        productId: {type: integer, format: int64, minimum: 1, description: "仅 OUTPUT：产出产品"}
+        externalBatchNo: {type: string, maxLength: 64, description: "仅 OUTPUT：产出批次外部批号"}
+        shelfLifeDays: {type: integer, minimum: 1, description: "仅 OUTPUT：产出批次保质期天数"}
     CreateBatchOperationRequest:
       type: object
       required: [operationType, occurredAt, items]
       properties:
-        operationType: {type: string, enum: [MERGE, SPLIT, PROCESS, REPACK], description: 操作类型}
-        occurredAt: {type: string, format: date-time, description: "业务发生时间（ISO 8601 带毫秒与明确时区偏移，如 2026-09-09T12:00:00.123Z）"}
-        note: {type: [string, 'null'], maxLength: 500, description: 操作备注}
+        operationType:
+          type: string
+          enum: [MERGE, SPLIT, PROCESS, REPACK]
+          description: |
+            操作类型。当前 Slice 仅执行 PROCESS 与 SPLIT；MERGE / REPACK 返回 422 `OPERATION_TYPE_NOT_SUPPORTED`
+            （当前 Slice 范围限制，不是永久业务规则）。
+        occurredAt: {type: string, format: date-time, description: "业务发生时间（ISO 8601 带毫秒与明确时区偏移，不得晚于当前时间）"}
+        note: {type: string, maxLength: 500, description: 操作备注}
         items:
           type: array
           minItems: 2
+          description: 恰好 1 个 INPUT；PROCESS 至少 1 个 OUTPUT，SPLIT 至少 2 个 OUTPUT。
           items: {$ref: '#/components/schemas/BatchOperationItemRequest'}
     BatchOperation:
       type: object
@@ -1652,8 +1789,13 @@ components:
         occurredAt: {type: string, format: date-time, description: "业务实际发生时间（ISO 8601 带毫秒与明确UTC偏移，如 yyyy-MM-dd'T'HH:mm:ss.SSSXXX）"}
         recordedAt: {type: string, format: date-time, description: "系统登记时间（ISO 8601 带毫秒与明确UTC偏移）"}
         status: {type: string, enum: [DRAFT, SUBMITTED, CORRECTED], description: 生命周期状态}
-        note: {type: [string, 'null'], maxLength: 500, description: 操作备注}
-        balanced: {type: boolean, description: 物料平衡计算结果（基于持久化明细与0.001kg容差）}
+        note: {type: string, maxLength: 500, description: 操作备注}
+        balanced: {type: boolean, description: "物料平衡结果：sum(INPUT) 与 sum(OUTPUT+LOSS+WASTE+SAMPLE) 数值精确相等"}
+        inputTotal: {type: number, description: INPUT 合计（kg）}
+        outputTotal: {type: number, description: OUTPUT 合计（kg）}
+        lossTotal: {type: number, description: LOSS 合计（kg）}
+        wasteTotal: {type: number, description: WASTE 合计（kg）}
+        sampleTotal: {type: number, description: SAMPLE 合计（kg）}
         version: {type: integer, format: int64, minimum: 0, description: 乐观锁版本号}
         createdAt: {type: string, format: date-time, description: "创建时间（ISO 8601 带毫秒与明确UTC偏移）"}
         createdBy: {type: integer, format: int64, description: 创建人用户ID}
@@ -1676,7 +1818,13 @@ components:
         - SALE
       description: |
         追溯事件类型枚举（仅限系统规定的10个环节）。自动投影类型（人工事件接口不得创建或更正）：
-        SOURCE 由来源批次提交激活生成；TRANSPORT 由运输任务 PLANNED → IN_TRANSIT 为每个 Batch 生成一条；
+        SOURCE 由来源批次提交激活生成（`POST /batches/{batchId}/submit`）。
+        **Slice 3 实现规则（已知契约歧义）**：SPLIT 产出继承输入批次类型，因此 SOURCE 批次拆分会得到 SOURCE 类型的子批次；
+        这些子批次随批次操作提交激活时当前实现**不**生成新的 SOURCE 事件，其来源出处通过 BatchRelation / 谱系追溯到祖先批次。
+        统一业务契约 v1.1 一方面把 SOURCE 触发源写为“SOURCE Batch 从 DRAFT/NORMAL 激活为 ACTIVE/NORMAL 且来源字段完整”，
+        另一方面规定 SPLIT 谱系由 BatchOperation / BatchRelation 表达，并未明确处理 SOURCE 类型 SPLIT 子批次的情形；
+        这是当前实现选择而非 v1.1 已明确保证的规范规则，可在后续契约修订中澄清。PROCESS 由 PROCESS 批次操作提交为每个 OUTPUT 批次生成一条
+        （SPLIT 不生成 PACK / PROCESS，普通 PROCESS 不推导 FREEZE）；TRANSPORT 由运输任务 PLANNED → IN_TRANSIT 为每个 Batch 生成一条；
         ARRIVAL 由运输任务 IN_TRANSIT → DELIVERED 为每个 Batch 生成一条。Transfer ACCEPTED 不生成 ARRIVAL。
     TraceEventDetailsJson:
       type: [object, 'null']
