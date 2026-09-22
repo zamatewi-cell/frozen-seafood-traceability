@@ -1,13 +1,25 @@
 openapi: 3.1.0
 info:
   title: 冷冻海产品溯源系统 API
-  version: 0.2.0-phase0
+  version: 0.3.0-phaseA-slice2
   description: |
     教学演练原型接口，不代表真实物联网、防伪或第三方认证能力。
 
-    本文档仅描述当前仓库中已真实实现的接口（Phase 0 基线），业务语义以
-    `docs/BUSINESS_CONTRACT_V1.1.md` 为准。Shipment、Sale、温度记录、告警、冻结、召回、
+    本文档仅描述当前仓库中已真实实现的接口（Phase 0 + Phase A Slice 1/2 基线），业务语义以
+    `docs/BUSINESS_CONTRACT_V1.1.md` 为准。Sale、温度记录、告警、冻结、隔离 (QUARANTINED)、召回、
     检验报告及企业端谱系图等尚未实现的能力不在本文档中声明。
+
+    ## Transfer 与 Shipment（Phase A Slice 2）
+
+    唯一动作顺序：发货方创建 Transfer DRAFT → 创建 Shipment PLANNED 并绑定 → 提交 Transfer 为 PENDING
+    → 承运商确认装载发运 (Shipment IN_TRANSIT，每个 Batch 自动生成一条 TRANSPORT)
+    → 承运商确认到达 (Shipment DELIVERED，每个 Batch 自动生成一条 ARRIVAL)
+    → 接收方 ACCEPT / REJECT。只有 ACCEPT 改变 Batch 当前责任组织；Shipment 与承运商从不改变责任组织；
+    ACCEPT 不生成 ARRIVAL。所有改变装载清单的操作遵循 shipment → transfer → batch 行锁顺序并递增运输任务版本。
+
+    **Demo MVP Phase A 阶段性限制**：承运方必须是独立的 `CARRIER` 类型组织，承运组织不能作为发货方创建运输任务，
+    也不能作为交接接收方。统一业务契约 v1.1 未规定承运方必须与发送 / 接收方不同，因此该限制仅由应用层执行，
+    未写入数据库永久约束，后续版本可以放开。
 
     ## 会话与 CSRF
 
@@ -120,6 +132,61 @@ paths:
                     properties:
                       data: {$ref: '#/components/schemas/CurrentUser'}
         '401': {$ref: '#/components/responses/Problem'}
+  /organizations:
+    get:
+      tags: [Organizations]
+      summary: 查询启用组织目录（交接接收方与承运方选择）
+      description: |
+        已认证企业用户可读取全部启用组织的白名单摘要，可按 `orgType` 筛选。
+        只返回 `id/orgNo/name/orgType/status`；不提供创建、修改或删除能力。
+      operationId: listOrganizations
+      parameters:
+        - name: orgType
+          in: query
+          schema:
+            type: string
+            enum: [SOURCE, PROCESSOR, WAREHOUSE, CARRIER, DISTRIBUTOR, RETAILER]
+      responses:
+        '200':
+          description: 启用组织白名单摘要列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: {$ref: '#/components/schemas/OrganizationSummary'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+  /organizations/{orgId}/sites:
+    parameters:
+      - name: orgId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+    get:
+      tags: [Organizations]
+      summary: 查询组织启用场所目录（运输任务起止场所选择）
+      description: 只返回场所白名单摘要，不含详细地址、版本号与审计字段。
+      operationId: listOrganizationSites
+      responses:
+        '200':
+          description: 启用场所白名单摘要列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/SuccessEnvelope'}
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: {$ref: '#/components/schemas/SiteSummary'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
   /organizations/{orgId}:
     parameters:
       - name: orgId
@@ -130,12 +197,9 @@ paths:
       tags: [Organizations]
       summary: 读取组织白名单摘要（最小只读目录）
       description: |
-        权限规则：
-        - 企业用户（非 PLATFORM 作用域）只能读取本组织（`orgId` 等于当前登录组织）；
-          读取其他组织一律返回 403 `ORG_SCOPE_DENIED`，且不区分目标组织是否存在；
-        - PLATFORM 作用域可读取任意组织；目标不存在或已逻辑删除返回 404 `RESOURCE_NOT_FOUND`；
-        - 只返回 `id/orgNo/name/orgType/status`，绝不返回统一社会信用代码、版本号、审计人等字段；
-        - 不提供组织列表、创建、修改或删除能力。
+        已认证企业用户可读取任意组织的白名单摘要（交接与运输页面需要展示交易对手名称）；
+        目标不存在或已逻辑删除返回 404 `RESOURCE_NOT_FOUND`。
+        只返回 `id/orgNo/name/orgType/status`，绝不返回统一社会信用代码、版本号、审计人等字段。
       operationId: getOrganization
       responses:
         '200':
@@ -559,6 +623,11 @@ paths:
     get:
       tags: [Trace]
       summary: 查询批次追溯事件
+      description: |
+        读取范围（统一业务契约 v1.1 §14）：
+        - 当前责任组织与 PLATFORM 只读角色：该批次完整时间线，包括前序责任组织记录的 SOURCE / TRANSPORT / ARRIVAL；
+        - 历史参与组织（批次已转出，但本组织曾在该批次记录事件）：只返回本组织记录的历史事件，只读；
+        - 其他组织：403 `ORG_SCOPE_DENIED`。
       operationId: listBatchEvents
       parameters:
         - {$ref: '#/components/parameters/BatchId'}
@@ -582,13 +651,15 @@ paths:
       tags: [Trace]
       summary: 提交批次追溯事件（仅限企业操作员）
       description: |
-        受控人工事件接口。`eventType=SOURCE` 只能由来源批次提交激活自动生成，本接口拒绝创建，返回 422 `EVENT_TYPE_NOT_MANUAL`。
+        受控人工事件接口。`SOURCE`（来源批次激活）、`TRANSPORT`（运输任务发运）、`ARRIVAL`（运输任务到达）只能由结构化业务对象自动生成，
+        本接口拒绝创建，返回 422 `EVENT_TYPE_NOT_MANUAL`。
         `Idempotency-Key` 不得以服务端保留前缀 `SYS:` 开头（400 `INVALID_REQUEST`）。
         批次必须为 `ACTIVE` + `NORMAL`，否则 422 `BATCH_FLOW_BLOCKED`；跨组织 403 `ORG_SCOPE_DENIED`；同 key 不同载荷 409 `IDEMPOTENCY_CONFLICT`。
       operationId: createTraceEvent
       parameters:
         - {$ref: '#/components/parameters/BatchId'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
       requestBody:
         required: true
         content:
@@ -623,11 +694,13 @@ paths:
       tags: [Trace]
       summary: 对历史追溯事件提交追加式更正记录（仅限企业操作员）
       description: |
-        不能把事件更正为 `SOURCE`（422 `EVENT_TYPE_NOT_MANUAL`），也不能更正由系统自动生成的 SOURCE 事件（422 `AUTO_EVENT_NOT_CORRECTABLE`）。
+        不能把事件更正为 `SOURCE` / `TRANSPORT` / `ARRIVAL`（422 `EVENT_TYPE_NOT_MANUAL`），
+        也不能更正由系统自动生成的这三类事件（422 `AUTO_EVENT_NOT_CORRECTABLE`）。
         `Idempotency-Key` 不得以服务端保留前缀 `SYS:` 开头（400 `INVALID_REQUEST`）。
       operationId: correctTraceEvent
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
       requestBody:
         required: true
         content:
@@ -667,6 +740,10 @@ paths:
           description: 交接状态过滤
           schema:
             $ref: '#/components/schemas/TransferStatus'
+        - name: batchId
+          in: query
+          description: 仅返回指定批次的交接（批次详情页交接记录；交接结束后发送方仍可只读查询）
+          schema: {type: integer, format: int64, minimum: 1}
         - {$ref: '#/components/parameters/Page'}
         - {$ref: '#/components/parameters/Size'}
       responses:
@@ -680,9 +757,13 @@ paths:
     post:
       tags: [Transfers]
       summary: 发货企业创建交接凭证草稿
+      description: |
+        仅当前责任组织的 OPERATOR 可对 `ACTIVE + NORMAL` 批次发起；同一批次同时最多一张未结束交接。
+        接收方必须为启用的非承运组织（422 `RECEIVER_ORG_TYPE_NOT_ALLOWED`）：承运商不会成为批次当前责任组织。
       operationId: createTransferDraft
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
       requestBody:
         required: true
         content:
@@ -721,7 +802,10 @@ paths:
     patch:
       tags: [Transfers]
       summary: 发货企业修改交接凭证草稿
+      description: 已绑定运输任务的草稿禁止修改接收方（409 `TRANSFER_BOUND_TO_SHIPMENT`），需先解绑。
       operationId: patchTransferDraft
+      parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
       requestBody:
         required: true
         content:
@@ -742,8 +826,12 @@ paths:
     delete:
       tags: [Transfers]
       summary: 发货企业逻辑删除交接凭证草稿
+      description: |
+        已绑定运输任务的草稿：按 shipment → transfer 顺序加锁，运输任务必须仍为 PLANNED（否则 409 `SHIPMENT_NOT_PLANNED`），
+        删除时清除绑定并递增运输任务版本，使持有旧版本号的发运请求被检测为冲突。
       operationId: deleteTransferDraft
       parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
         - name: expectedVersion
           in: query
           required: true
@@ -765,7 +853,12 @@ paths:
     post:
       tags: [Transfers]
       summary: 发货企业提交交接凭证（DRAFT -> PENDING）
+      description: |
+        前提：交接已绑定 PLANNED 运输任务（未绑定 409 `SHIPMENT_NOT_BOUND`，运输任务非 PLANNED 409 `SHIPMENT_NOT_PLANNED`）。
+        提交不发运运输任务、不生成 TRANSPORT，也不改变批次责任组织。
       operationId: submitTransfer
+      parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
       requestBody:
         required: true
         content:
@@ -793,7 +886,13 @@ paths:
     post:
       tags: [Transfers]
       summary: 接收企业确认接受交接（PENDING -> ACCEPTED）
+      description: |
+        前提：关联运输任务已 DELIVERED（否则 409 `SHIPMENT_NOT_DELIVERED`），批次仍为 `ACTIVE + NORMAL`。
+        原子转移批次当前责任组织与公开追溯码归属；批次数量不变；**不生成 ARRIVAL**（ARRIVAL 唯一来源为运输任务到达）。
+        承运组织与发货组织不能接受交接（403 `ORG_SCOPE_DENIED`）。
       operationId: acceptTransfer
+      parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
       requestBody:
         required: true
         content:
@@ -801,7 +900,7 @@ paths:
             schema: {$ref: '#/components/schemas/TransferAcceptRequest'}
       responses:
         '200':
-          description: 确认接受交接成功，批次所有权已转移
+          description: 确认接受交接成功，批次当前责任组织已转移为接收方
           content:
             application/json:
               schema: {$ref: '#/components/schemas/TransferEnvelope'}
@@ -821,7 +920,10 @@ paths:
     post:
       tags: [Transfers]
       summary: 接收企业拒收交接（PENDING -> REJECTED）
+      description: 前提：关联运输任务已 DELIVERED（否则 409 `SHIPMENT_NOT_DELIVERED`）。拒收不改变批次责任组织，不生成追溯事件。
       operationId: rejectTransfer
+      parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
       requestBody:
         required: true
         content:
@@ -839,6 +941,228 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
+  /shipments:
+    get:
+      tags: [Shipments]
+      summary: 分页查询当前组织参与的运输任务
+      description: 发货方、承运方与接收方均可读取本组织参与的运输任务（包括历史记录）；无关组织看不到任何记录。
+      operationId: listShipments
+      parameters:
+        - name: role
+          in: query
+          description: 视角（SENDER=我发起的, CARRIER=我承运的, RECEIVER=发往我的）；省略表示任一参与方
+          schema: {type: string, enum: [SENDER, CARRIER, RECEIVER]}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/ShipmentStatus'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Size'}
+      responses:
+        '200':
+          description: 运输任务分页列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShipmentListEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [Shipments]
+      summary: 发货方创建 PLANNED 运输任务
+      description: |
+        发送组织为当前登录组织；接收组织由目的场所所属组织确定。
+        - 承运组织必须为启用的 `CARRIER` 类型组织（422 `CARRIER_ORG_INVALID`，Demo MVP Phase A 限制）；
+        - 启运场所必须属于发货方且启用（422 `SITE_ORG_MISMATCH` / `SITE_NOT_ACTIVE`）；
+        - 目的场所必须属于其他启用的非承运组织（422 `SHIPMENT_SAME_ORGANIZATION` / `RECEIVER_ORG_TYPE_NOT_ALLOWED`）；
+        - 承运组织不能作为发货方（403 `ROLE_NOT_ALLOWED`）。
+      operationId: createShipment
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ShipmentCreateRequest'}
+      responses:
+        '201':
+          description: 运输任务已创建（PLANNED）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShipmentEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /shipments/{shipmentId}:
+    parameters:
+      - {$ref: '#/components/parameters/ShipmentId'}
+    get:
+      tags: [Shipments]
+      summary: 查询运输任务详情（含装载清单）
+      description: 仅发货方、承运方、接收方可读（存在但无权 403 `ORG_SCOPE_DENIED`，不存在 404）。
+      operationId: getShipment
+      responses:
+        '200':
+          description: 运输任务详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShipmentEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /shipments/{shipmentId}/transfers:
+    parameters:
+      - {$ref: '#/components/parameters/ShipmentId'}
+    post:
+      tags: [Shipments]
+      summary: 发货方把本组织 DRAFT 交接绑定到 PLANNED 运输任务
+      description: |
+        锁顺序 shipment → transfer → batch；绑定递增运输任务与交接版本。
+        - 运输任务非 PLANNED：409 `SHIPMENT_NOT_PLANNED`（发运后禁止增删交接）；
+        - 交接非 DRAFT：409 `INVALID_STATE_TRANSITION`；已绑定：409 `TRANSFER_BOUND_TO_SHIPMENT`；
+        - 交接接收方与运输任务不一致：422 `SHIPMENT_PARTY_MISMATCH`（数据库复合外键兜底）；
+        - 同一批次已在装载清单中：409 `SHIPMENT_BATCH_DUPLICATE`（数据库唯一约束兜底）。
+      operationId: bindShipmentTransfer
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ShipmentBindTransferRequest'}
+      responses:
+        '200':
+          description: 已绑定，返回最新运输任务
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShipmentEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /shipments/{shipmentId}/transfers/{transferId}:
+    parameters:
+      - {$ref: '#/components/parameters/ShipmentId'}
+      - name: transferId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+    delete:
+      tags: [Shipments]
+      summary: 发货方把 DRAFT 交接从 PLANNED 运输任务解绑
+      description: 锁顺序 shipment → transfer；已提交 (PENDING) 的交接不能移出装载清单；解绑递增运输任务版本。
+      operationId: unbindShipmentTransfer
+      parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
+        - name: expectedTransferVersion
+          in: query
+          required: true
+          schema: {type: integer, format: int64, minimum: 0}
+      responses:
+        '200':
+          description: 已解绑，返回最新运输任务
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShipmentEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /shipments/{shipmentId}/dispatch:
+    parameters:
+      - {$ref: '#/components/parameters/ShipmentId'}
+    post:
+      tags: [Shipments]
+      summary: 承运商确认装载发运（PLANNED -> IN_TRANSIT）
+      description: |
+        仅运输任务指定的承运组织可操作。装载清单不能为空（409 `SHIPMENT_EMPTY`），全部交接必须已 PENDING
+        （409 `SHIPMENT_TRANSFER_NOT_PENDING`）；`expectedVersion` 与当前版本不一致（装载清单已变化）返回 409 `VERSION_CONFLICT`。
+        成功时为装载清单中每个 Batch 生成且仅生成一条 TRANSPORT（`occurredAt = loadedAt`，来源对象为该运输任务）；
+        交接状态与批次责任组织均不变。
+      operationId: dispatchShipment
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ShipmentDispatchRequest'}
+      responses:
+        '200':
+          description: 已发运（IN_TRANSIT）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShipmentEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /shipments/{shipmentId}/arrive:
+    parameters:
+      - {$ref: '#/components/parameters/ShipmentId'}
+    post:
+      tags: [Shipments]
+      summary: 承运商确认物理到达（IN_TRANSIT -> DELIVERED）
+      description: |
+        仅运输任务指定的承运组织可操作；`unloadedAt` 不得早于 `loadedAt`（422 `INVALID_BUSINESS_TIME`）。
+        成功时为每个 Batch 生成且仅生成一条 ARRIVAL（只表示物理到达）；交接保持 PENDING，由接收方另行 ACCEPT / REJECT。
+      operationId: arriveShipment
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ShipmentArriveRequest'}
+      responses:
+        '200':
+          description: 已到达（DELIVERED）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShipmentEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /shipments/{shipmentId}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/ShipmentId'}
+    post:
+      tags: [Shipments]
+      summary: 发货方取消 PLANNED 运输任务（PLANNED -> CANCELLED）
+      description: 装载清单中全部交接必须仍为 DRAFT（否则 409 `SHIPMENT_TRANSFER_NOT_DRAFT`）；取消时一并解绑这些草稿。
+      operationId: cancelShipment
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ShipmentCancelRequest'}
+      responses:
+        '200':
+          description: 已取消
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShipmentEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
   /public/traces/{publicTraceId}:
     servers:
       - url: /api/public/v1
@@ -880,6 +1204,11 @@ components:
   parameters:
     BatchId:
       name: batchId
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    ShipmentId:
+      name: shipmentId
       in: path
       required: true
       schema: {type: integer, format: int64}
@@ -1345,7 +1674,10 @@ components:
         - TRANSPORT
         - ARRIVAL
         - SALE
-      description: 追溯事件类型枚举（仅限系统规定的10个环节）；SOURCE 只由来源批次提交激活自动生成，人工事件接口不得创建或更正为 SOURCE
+      description: |
+        追溯事件类型枚举（仅限系统规定的10个环节）。自动投影类型（人工事件接口不得创建或更正）：
+        SOURCE 由来源批次提交激活生成；TRANSPORT 由运输任务 PLANNED → IN_TRANSIT 为每个 Batch 生成一条；
+        ARRIVAL 由运输任务 IN_TRANSIT → DELIVERED 为每个 Batch 生成一条。Transfer ACCEPTED 不生成 ARRIVAL。
     TraceEventDetailsJson:
       type: [object, 'null']
       maxProperties: 20
@@ -1501,6 +1833,16 @@ components:
         id: {type: integer, format: int64}
         transferNo: {type: string}
         batchId: {type: integer, format: int64}
+        traceBatchNo: {type: string, description: 批次追溯批次号（接收方在取得批次权限前识别货物）}
+        shipmentId:
+          type: [integer, "null"]
+          format: int64
+          description: 绑定的运输任务 ID；DRAFT 可未绑定，提交后必然存在
+        shipmentNo: {type: [string, "null"]}
+        shipmentStatus:
+          oneOf:
+            - {$ref: '#/components/schemas/ShipmentStatus'}
+            - {type: 'null'}
         senderOrgId: {type: integer, format: int64}
         receiverOrgId: {type: integer, format: int64}
         quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
@@ -1509,6 +1851,7 @@ components:
         shippedAt:
           type: [string, "null"]
           format: date-time
+          description: 仅历史数据；物理发运时间以运输任务 loadedAt 为准，Slice 2 之后的交接不再写入
         submittedRecordedAt:
           type: [string, "null"]
           format: date-time
@@ -1564,10 +1907,9 @@ components:
         expectedVersion: {type: integer, format: int64, minimum: 0}
     TransferSubmitRequest:
       type: object
-      required: [shippedAt, expectedVersion]
+      required: [expectedVersion]
       additionalProperties: false
       properties:
-        shippedAt: {type: string, format: date-time}
         expectedVersion: {type: integer, format: int64, minimum: 0}
     TransferAcceptRequest:
       type: object
@@ -1587,6 +1929,123 @@ components:
       properties:
         reason: {type: string, minLength: 1, maxLength: 500}
         occurredAt: {type: string, format: date-time}
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+    SiteSummary:
+      type: object
+      additionalProperties: false
+      required: [id, orgId, siteNo, name, siteType, status]
+      properties:
+        id: {type: integer, format: int64}
+        orgId: {type: integer, format: int64}
+        siteNo: {type: string}
+        name: {type: string}
+        siteType: {type: string, enum: [PORT, FARM, FACTORY, COLD_STORE, LOGISTICS_HUB, STORE]}
+        status: {type: string}
+    ShipmentStatus:
+      type: string
+      enum: [PLANNED, IN_TRANSIT, DELIVERED, CANCELLED]
+    ShipmentPartyRef:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer, format: int64}
+        orgNo: {type: string}
+        name: {type: string}
+        orgType: {type: string}
+    ShipmentTransferItem:
+      type: object
+      required: [transferId, transferNo, batchId, quantity, unitCode, status, version]
+      properties:
+        transferId: {type: integer, format: int64}
+        transferNo: {type: string}
+        batchId: {type: integer, format: int64}
+        traceBatchNo: {type: string}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        unitCode: {type: string, enum: [kg]}
+        status: {$ref: '#/components/schemas/TransferStatus'}
+        version: {type: integer, format: int64, minimum: 0}
+    Shipment:
+      type: object
+      additionalProperties: false
+      required: [id, shipmentNo, status, senderOrg, receiverOrg, carrierOrg, vehicleOrContainerNo, originSite, destinationSite, transfers, version, createdAt, updatedAt]
+      description: 一次物理冷链运输；不改变 Batch 当前责任组织。值为 null 的字段在响应中省略。
+      properties:
+        id: {type: integer, format: int64}
+        shipmentNo: {type: string}
+        status: {$ref: '#/components/schemas/ShipmentStatus'}
+        senderOrg: {$ref: '#/components/schemas/ShipmentPartyRef'}
+        receiverOrg: {$ref: '#/components/schemas/ShipmentPartyRef'}
+        carrierOrg: {$ref: '#/components/schemas/ShipmentPartyRef'}
+        vehicleOrContainerNo: {type: string}
+        originSite: {$ref: '#/components/schemas/SiteSummary'}
+        destinationSite: {$ref: '#/components/schemas/SiteSummary'}
+        loadedAt: {type: string, format: date-time, description: 装载发运业务时间（PLANNED 阶段省略）}
+        unloadedAt: {type: string, format: date-time, description: 到达卸货业务时间}
+        dispatchedRecordedAt: {type: string, format: date-time}
+        dispatchedBy: {type: integer, format: int64}
+        deliveredRecordedAt: {type: string, format: date-time}
+        deliveredBy: {type: integer, format: int64}
+        cancelledRecordedAt: {type: string, format: date-time}
+        cancelledBy: {type: integer, format: int64}
+        cancelReason: {type: string}
+        transfers:
+          type: array
+          description: 装载清单（同一运输任务中的交接具有相同发送方、接收方、起点与终点）
+          items: {$ref: '#/components/schemas/ShipmentTransferItem'}
+        version: {type: integer, format: int64, minimum: 0, description: 乐观锁版本号；装载清单每次变化都会递增}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    ShipmentEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Shipment'}
+    ShipmentListEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/Shipment'}
+            meta: {$ref: '#/components/schemas/PagedResponseMeta'}
+    ShipmentCreateRequest:
+      type: object
+      required: [carrierOrgId, originSiteId, destinationSiteId, vehicleOrContainerNo]
+      additionalProperties: false
+      properties:
+        carrierOrgId: {type: integer, format: int64}
+        originSiteId: {type: integer, format: int64}
+        destinationSiteId: {type: integer, format: int64}
+        vehicleOrContainerNo: {type: string, minLength: 1, maxLength: 64}
+    ShipmentBindTransferRequest:
+      type: object
+      required: [transferId, expectedTransferVersion]
+      additionalProperties: false
+      properties:
+        transferId: {type: integer, format: int64}
+        expectedTransferVersion: {type: integer, format: int64, minimum: 0}
+    ShipmentDispatchRequest:
+      type: object
+      required: [loadedAt, expectedVersion]
+      additionalProperties: false
+      properties:
+        loadedAt: {type: string, format: date-time, description: 装载发运业务时间，不得晚于服务端时钟 5 分钟以上}
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+    ShipmentArriveRequest:
+      type: object
+      required: [unloadedAt, expectedVersion]
+      additionalProperties: false
+      properties:
+        unloadedAt: {type: string, format: date-time, description: 到达卸货业务时间，不得早于 loadedAt}
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+    ShipmentCancelRequest:
+      type: object
+      required: [reason, expectedVersion]
+      additionalProperties: false
+      properties:
+        reason: {type: string, minLength: 1, maxLength: 500}
         expectedVersion: {type: integer, format: int64, minimum: 0}
 security:
   - sessionCookie: []
