@@ -31,6 +31,8 @@ import com.example.traceability.order.mapper.SalesOrderItemMapper;
 import com.example.traceability.order.mapper.SalesOrderMapper;
 import com.example.traceability.quality.domain.QualityInspection;
 import com.example.traceability.quality.mapper.QualityInspectionMapper;
+import com.example.traceability.trace.domain.TraceEvent;
+import com.example.traceability.trace.mapper.TraceEventMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -77,6 +79,7 @@ public class OrderApplicationService {
     private final QualityInspectionMapper qualityInspectionMapper;
     private final OrganizationMapper organizationMapper;
     private final com.example.traceability.batch.mapper.BatchMapper batchMapper;
+    private final TraceEventMapper traceEventMapper;
     private final Map<Long, String> orgCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     public OrderApplicationService(
@@ -90,7 +93,8 @@ public class OrderApplicationService {
             OrderBatchAllocationMapper orderBatchAllocationMapper,
             QualityInspectionMapper qualityInspectionMapper,
             OrganizationMapper organizationMapper,
-            com.example.traceability.batch.mapper.BatchMapper batchMapper) {
+            com.example.traceability.batch.mapper.BatchMapper batchMapper,
+            TraceEventMapper traceEventMapper) {
         this.purchaseOrderMapper = purchaseOrderMapper;
         this.purchaseOrderItemMapper = purchaseOrderItemMapper;
         this.salesOrderMapper = salesOrderMapper;
@@ -102,6 +106,7 @@ public class OrderApplicationService {
         this.qualityInspectionMapper = qualityInspectionMapper;
         this.organizationMapper = organizationMapper;
         this.batchMapper = batchMapper;
+        this.traceEventMapper = traceEventMapper;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -299,6 +304,15 @@ public class OrderApplicationService {
         order.setUpdatedBy(principal.getUserId());
         purchaseOrderMapper.updateById(order);
 
+        // 为每个分配批次生成出库和运输溯源事件
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+        for (OrderBatchAllocation alloc : allocs) {
+            insertSystemTraceEvent(alloc.getBatchId(), principal.getOrgId(), "WAREHOUSE_OUT", now,
+                    principal.getUserId(), "订单出库: " + order.getOrderNo());
+            insertSystemTraceEvent(alloc.getBatchId(), principal.getOrgId(), "TRANSPORT", now,
+                    principal.getUserId(), "冷链运输: " + order.getOrderNo());
+        }
+
         OrderProgressNote note = new OrderProgressNote();
         note.setOrderId(orderId);
         note.setOrderType("PURCHASE");
@@ -350,6 +364,16 @@ public class OrderApplicationService {
             }
         }
         purchaseOrderMapper.updateById(order);
+
+        // 为每个批次生成到货验收和入库溯源事件(须在转移前查询,因转移会删除分配记录)
+        LocalDateTime recvTime = LocalDateTime.now(ZoneOffset.UTC);
+        List<OrderBatchAllocation> recvAllocs = orderBatchAllocationMapper.selectByOrderId(orderId);
+        for (OrderBatchAllocation alloc : recvAllocs) {
+            insertSystemTraceEvent(alloc.getBatchId(), principal.getOrgId(), "ARRIVAL", recvTime,
+                    principal.getUserId(), "到货验收: " + order.getOrderNo());
+            insertSystemTraceEvent(alloc.getBatchId(), principal.getOrgId(), "WAREHOUSE_IN", recvTime,
+                    principal.getUserId(), "入库: " + order.getOrderNo());
+        }
 
         // 将订单分配的批次归属权从卖方转移到买方(收货后批次进入买方库存)
         transferAllocatedBatchesToBuyer(orderId, order.getSellerOrgId(), principal.getOrgId(), principal.getUserId());
@@ -720,6 +744,27 @@ public class OrderApplicationService {
             throw new BusinessException(HttpStatus.FORBIDDEN, "ORDER_SELLER_ONLY",
                     "仅供货方操作", "审批/驳回/排产仅可由采购单供货方执行");
         }
+    }
+
+    // 系统自动生成溯源事件(不走幂等键和角色校验)
+    private void insertSystemTraceEvent(Long batchId, Long orgId, String eventType,
+                                        LocalDateTime occurredAt, Long operatorId, String summary) {
+        TraceEvent event = new TraceEvent();
+        event.setBatchId(batchId);
+        event.setOrgId(orgId);
+        event.setEventType(eventType);
+        event.setOccurredAt(occurredAt);
+        event.setRecordedAt(occurredAt);
+        event.setOperatorId(operatorId);
+        event.setDataSource("SIMULATED");
+        event.setStatus("SUBMITTED");
+        event.setIdempotencyKey("sys-" + eventType + "-" + batchId + "-" + occurredAt.toEpochSecond(ZoneOffset.UTC));
+        event.setSummary(summary);
+        event.setCreatedBy(operatorId);
+        event.setCreatedAt(occurredAt);
+        event.setVersion(0L);
+        event.setIsDeleted(0);
+        traceEventMapper.insert(event);
     }
 
     private void requireOperator(TraceSecurityPrincipal principal) {

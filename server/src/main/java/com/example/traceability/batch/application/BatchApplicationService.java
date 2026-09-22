@@ -1,6 +1,7 @@
 package com.example.traceability.batch.application;
 
 import com.example.traceability.batch.domain.Batch;
+import com.example.traceability.batch.domain.BatchRelation;
 import com.example.traceability.batch.domain.BatchStatus;
 import com.example.traceability.batch.domain.BatchType;
 import com.example.traceability.batch.domain.OriginType;
@@ -12,6 +13,7 @@ import com.example.traceability.batch.dto.BatchSubmitRequest;
 import com.example.traceability.batch.dto.DirectStockInRequest;
 import com.example.traceability.batch.dto.ProcessRequest;
 import com.example.traceability.batch.mapper.BatchMapper;
+import com.example.traceability.batch.mapper.BatchRelationMapper;
 import com.example.traceability.common.envelope.PageMeta;
 import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.common.exception.BusinessException;
@@ -19,6 +21,8 @@ import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.masterdata.domain.Product;
 import com.example.traceability.masterdata.mapper.ProductMapper;
+import com.example.traceability.trace.domain.TraceEvent;
+import com.example.traceability.trace.mapper.TraceEventMapper;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -45,10 +49,15 @@ public class BatchApplicationService {
 
     private final BatchMapper batchMapper;
     private final ProductMapper productMapper;
+    private final BatchRelationMapper batchRelationMapper;
+    private final TraceEventMapper traceEventMapper;
 
-    public BatchApplicationService(BatchMapper batchMapper, ProductMapper productMapper) {
+    public BatchApplicationService(BatchMapper batchMapper, ProductMapper productMapper,
+                                   BatchRelationMapper batchRelationMapper, TraceEventMapper traceEventMapper) {
         this.batchMapper = batchMapper;
         this.productMapper = productMapper;
+        this.batchRelationMapper = batchRelationMapper;
+        this.traceEventMapper = traceEventMapper;
     }
 
     /**
@@ -586,6 +595,22 @@ public class BatchApplicationService {
         outputBatch.setVersion(0L);
         outputBatch.setIsDeleted(0);
         batchMapper.insert(outputBatch);
+
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+
+        // 建立批次谱系关系:原料批次(父) → 成品批次(子)
+        BatchRelation relation = new BatchRelation();
+        relation.setOperationId(0L);
+        relation.setParentBatchId(sourceBatch.getId());
+        relation.setChildBatchId(outputBatch.getId());
+        relation.setRelationType("TRANSFORM");
+        relation.setCreatedAt(now);
+        batchRelationMapper.insert(relation);
+
+        // 为成品批次生成加工溯源事件
+        insertSystemTraceEvent(outputBatch, "PROCESS", now, principal.getUserId(),
+                "加工: 消耗批次 " + sourceBatch.getBatchNo() + " " + req.consumedQuantity() + "kg, 产出 " + req.outputQuantity() + "kg");
+
         return BatchResponse.fromEntity(outputBatch);
     }
 
@@ -598,6 +623,27 @@ public class BatchApplicationService {
                     "当前操作需要企业操作员角色 (OPERATOR)"
             );
         }
+    }
+
+    // 系统自动生成溯源事件(不走幂等键和角色校验)
+    private void insertSystemTraceEvent(Batch batch, String eventType,
+                                        LocalDateTime occurredAt, Long operatorId, String summary) {
+        TraceEvent event = new TraceEvent();
+        event.setBatchId(batch.getId());
+        event.setOrgId(batch.getOrgId());
+        event.setEventType(eventType);
+        event.setOccurredAt(occurredAt);
+        event.setRecordedAt(occurredAt);
+        event.setOperatorId(operatorId);
+        event.setDataSource("SIMULATED");
+        event.setStatus("SUBMITTED");
+        event.setIdempotencyKey("sys-" + eventType + "-" + batch.getId() + "-" + occurredAt.toEpochSecond(ZoneOffset.UTC));
+        event.setSummary(summary);
+        event.setCreatedBy(operatorId);
+        event.setCreatedAt(occurredAt);
+        event.setVersion(0L);
+        event.setIsDeleted(0);
+        traceEventMapper.insert(event);
     }
 
     private boolean isPlatformScope(TraceSecurityPrincipal principal) {
