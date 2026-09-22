@@ -671,6 +671,7 @@ public class OrderApplicationService {
     /**
      * 收货入库时将订单分配的批次归属权从卖方转移到买方。
      * 使用乐观锁保证安全,转移后批次进入买方库存可见。
+     * 订单已完成,释放分配记录对可用量的占用(逻辑删除)。
      */
     private void transferAllocatedBatchesToBuyer(Long orderId, Long sellerOrgId, Long buyerOrgId, Long userId) {
         List<OrderBatchAllocation> allocs = orderBatchAllocationMapper.selectByOrderId(orderId);
@@ -697,6 +698,9 @@ public class OrderApplicationService {
                         "批次转移冲突", "批次 " + batch.getBatchNo() + " 在转移过程中版本冲突，请重试");
             }
         }
+        // 订单收货完成,分配记录使命结束,逻辑删除释放可用量
+        // @TableLogic 字段无法通过 update() 修改,需用原生 SQL
+        orderBatchAllocationMapper.releaseAllocationsByOrderId(orderId, LocalDateTime.now(ZoneOffset.UTC));
     }
 
     private SalesOrder requireSalesAccess(Long orderId, TraceSecurityPrincipal principal) {

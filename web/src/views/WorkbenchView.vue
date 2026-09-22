@@ -993,7 +993,9 @@ async function loadAdmin() {
 const loaders: Record<string, () => Promise<void>> = {
   purchase: loadPurchases,
   sales: loadSales,
-  batch: loadMyInventory,
+  batch: async () => {
+    await Promise.all([loadAllProducts(), loadMyInventory()])
+  },
   stockIn: async () => {
     await Promise.all([loadAllProducts(), loadMyInventory()])
   },
@@ -1233,7 +1235,7 @@ onMounted(async () => {
               @click="submitQualityReviewForOrder(po.id)"
             >提交质检审核</button>
             <button
-              v-if="po.status === 'PROCESSING'"
+              v-if="po.status === 'PROCESSING' && qcAllPassed(po.id)"
               class="pri-btn"
               type="button"
               :disabled="acting[`deliver-${po.id}`]"
@@ -1409,7 +1411,7 @@ onMounted(async () => {
               @click="submitQualityReviewForOrder(so.id)"
             >提交质检审核</button>
             <button
-              v-if="so.status === 'PROCESSING'"
+              v-if="so.status === 'PROCESSING' && qcAllPassed(so.id)"
               class="pri-btn"
               type="button"
               :disabled="salesActing[`deliver-${so.id}`]"
