@@ -6,6 +6,12 @@
 
 ### Added
 
+- Phase A Slice 3 PROCESS / SPLIT：
+  - Flyway V10：`batch` 增加 `produced_by_operation_id` / `consumed_by_operation_id`（外键，被操作全量消耗的批次必须 CLOSED）；`batch_operation_item` 增加角色与批次引用形状 CHECK、未删除 OUTPUT 唯一产出（虚拟生成列唯一索引）、同操作同批次唯一与外键；`batch_relation` 增加外键与禁止重复上游边；存在旧协议 DRAFT 批次操作时迁移 fail-fast，历史已提交操作原样保留、不回填。
+  - 批次操作 API：`GET /api/v1/batch-operations/{id}`、`GET /api/v1/batch-operations?batchId=`、`DELETE /api/v1/batch-operations/{id}?expectedVersion=`；批次响应新增派生 `remainingQuantity` 与 `producedByOperationId` / `consumedByOperationId`。
+  - 生产 Vue 页面：加工 / 拆分向导（投入固定为全部剩余量、实时平衡提示）、批次操作详情（提交 / 删除草稿）、批次详情谱系面板与剩余量；批次转出后本组织历史操作只读可见。
+  - 真实浏览器验收 `tests/e2e/real-slice3.spec.ts` 与 MySQL 事实校验（1000 = 960 + 30 + 10，960 = 600 + 360）。
+
 - Phase A Slice 2 Transfer + Shipment：
   - Flyway V9：`shipment` 补齐 PLANNED 生命周期（发送 / 接收组织、PLANNED 时 `loaded_at` 可空、发运 / 到达 / 取消留痕、状态与形状 CHECK、组织与场所外键），新增 `shipment_idempotency`；`transfer` 增加运输任务外键、同运输任务同发送 / 接收方复合外键、`(shipment_id, batch_id)` 唯一约束，并重建生命周期形状 CHECK；存量 shipment 行或未绑定的新规 PENDING 交接会使迁移 fail-fast。
   - 运输任务 API `/api/v1/shipments`：创建、绑定 / 解绑交接、承运商发运 / 到达、取消、三方组织范围查询；装载清单变更统一遵循 shipment → transfer → batch 锁顺序并递增运输任务版本。
@@ -34,6 +40,9 @@
 - Phase 1 可交互原型、测试计划和三条版本化演示数据方案。
 
 ### Changed
+
+- BatchOperation（Slice 3）：PROCESS / SPLIT 恰好一个 INPUT 且必须等于输入批次当前剩余量（禁止部分 INPUT，422 `PARTIAL_INPUT_NOT_ALLOWED`）；OUTPUT 不再由客户端引用既有批次，而由服务端生成为 DRAFT 并只能随操作提交激活（普通批次接口修改 / 提交返回 409 `BATCH_OWNED_BY_OPERATION`）；提交在同一事务内关闭 INPUT、激活 OUTPUT、固化谱系；物料平衡取消 0.001 kg 容差，改为数值精确相等；SPLIT 产出继承输入批次类型；写操作仅限当前责任组织为 PROCESSOR 的 OPERATOR；存在草稿或待接收交接的批次不能作为 INPUT（409 `BATCH_TRANSFER_OPEN`）。`MERGE` / `REPACK` 在当前 Slice 返回 422 `OPERATION_TYPE_NOT_SUPPORTED`（范围限制，非永久规则）。
+- TraceEvent：PROCESS 由 PROCESS 批次操作提交为每个 OUTPUT 自动生成一条，人工接口不得创建或更正 PROCESS；SPLIT 不生成 PACK / PROCESS，普通 PROCESS 不推导 FREEZE。
 
 - Transfer（Slice 2）：提交请求只携带 `expectedVersion`，必须已绑定 PLANNED 运输任务；接受 / 拒收要求运输任务已 DELIVERED；**ACCEPT 不再生成 ARRIVAL**；接收方不能是承运组织；已绑定草稿禁止修改接收方；响应新增 `traceBatchNo`、`shipmentId`、`shipmentNo`、`shipmentStatus`，列表支持 `batchId` 筛选。
 - TraceEvent：TRANSPORT / ARRIVAL 与 SOURCE 一样只能自动投影，人工接口拒绝创建或更正；当前责任组织读取批次完整时间线，历史参与组织只读本组织记录的事件。
