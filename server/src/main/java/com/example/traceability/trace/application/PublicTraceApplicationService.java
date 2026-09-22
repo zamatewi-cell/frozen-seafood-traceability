@@ -588,7 +588,7 @@ public class PublicTraceApplicationService {
                     : ("SO#" + code.getSourceOrderId());
         }
         PublicTraceProjectionResponse.TraceTree tree =
-                buildTraceTree(orderNo, orderedBatchIds);
+                buildTraceTree(orderNo, orderedBatchIds, code.getOrgId());
 
         String queriedAt = Instant.now().toString();
 
@@ -608,24 +608,33 @@ public class PublicTraceApplicationService {
     }
 
     /**
-     * 递归构建溯源树(从终端零售向下展开到捕捞源头)。
+     * 构建溯源树:以零售终端组织为唯一顶点,从上往下展开。
      * <p>
-     * 以码下绑定的批次为根节点（终端环节），每个节点向下通过 batch_relation 谱系边查找上游来源批次。
-     * 同一批次可在多个分支重复出现（不去重），分支无上限。
-     * 用深度限制(≤20)防止数据环路导致无限递归。
-     * 环节 stage 由批次 batchType 映射：SOURCE→捕捞, PROCESSING→加工, DISTRIBUTION→批发, SALE→终端零售。
+     * 顶点 = 追溯码所属的零售终端组织(如鲜活优选连锁超市)。
+     * 顶点的 children = 该码绑定的加工批次(终端持有的成品)。
+     * 每个加工批次的 children = 通过 batch_relation 上溯的原料批次(捕捞源头)。
      * </p>
      */
     private PublicTraceProjectionResponse.TraceTree buildTraceTree(
-            String orderNo, List<Long> rootBatchIds) {
-        List<PublicTraceProjectionResponse.TraceTreeNode> nodes = new ArrayList<>();
+            String orderNo, List<Long> rootBatchIds, Long retailerOrgId) {
+        // 顶点:零售终端组织
+        com.example.traceability.identity.domain.Organization retailerOrg = organizationMapper.selectById(retailerOrgId);
+        String retailerName = retailerOrg != null ? retailerOrg.getName() : "零售终端";
+
+        // 顶点的 children = 绑定的加工批次
+        List<PublicTraceProjectionResponse.TraceTreeNode> children = new ArrayList<>();
         for (Long batchId : rootBatchIds) {
             PublicTraceProjectionResponse.TraceTreeNode node = buildNode(batchId, 0);
             if (node != null) {
-                nodes.add(node);
+                children.add(node);
             }
         }
-        return new PublicTraceProjectionResponse.TraceTree(orderNo, nodes);
+
+        // 顶点节点:无批次,仅组织
+        PublicTraceProjectionResponse.TraceTreeNode root = new PublicTraceProjectionResponse.TraceTreeNode(
+                "RETAIL", retailerName, null, null, List.of(), children
+        );
+        return new PublicTraceProjectionResponse.TraceTree(orderNo, List.of(root));
     }
 
     private static final int MAX_TREE_DEPTH = 20;
@@ -714,7 +723,7 @@ public class PublicTraceApplicationService {
         String eventLabel = resolveEventLabel(event.getEventType());
         String occurredAt = event.getOccurredAt().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
         String sourceLabel = resolveDataSourceLabel(event.getDataSource());
-        return new PublicTraceProjectionResponse.TimelineItem(eventLabel, occurredAt, sourceLabel);
+        return new PublicTraceProjectionResponse.TimelineItem(eventLabel, occurredAt, sourceLabel, event.getSummary());
     }
 
     private String resolveEventLabel(String eventType) {
@@ -722,9 +731,9 @@ public class PublicTraceApplicationService {
             return "追溯节点";
         }
         return switch (eventType) {
-            case "SOURCE" -> "原料采收/出塘";
+            case "SOURCE" -> "产地捕捞";
             case "PURCHASE" -> "原料采购入库";
-            case "PROCESS" -> "粗加工/精加工";
+            case "PROCESS" -> "加工厂加工";
             case "FREEZE" -> "速冻冷冻";
             case "PACK" -> "分装与包装";
             case "WAREHOUSE_IN" -> "冷库入库";

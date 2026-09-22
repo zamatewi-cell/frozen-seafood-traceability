@@ -20,6 +20,7 @@ export interface TimelineItem {
   event: string
   occurredAt: string
   dataSourceLabel: string
+  summary: string | null
 }
 
 export interface TemperatureSummary {

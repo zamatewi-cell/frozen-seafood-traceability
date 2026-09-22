@@ -41,6 +41,7 @@ function isDeviceSource(label: string): boolean {
             <strong class="item-event">{{ item.event }}</strong>
             <time class="item-time mono">{{ formatIsoDateTime(item.occurredAt) }}</time>
           </div>
+          <p v-if="item.summary" class="item-summary">{{ item.summary }}</p>
           <div class="item-source-row">
             <span class="source-label-tag" :class="{ 'simulated-tag': isSimulatedSource(item.dataSourceLabel) }">
               {{ item.dataSourceLabel }}
@@ -138,6 +139,16 @@ function isDeviceSource(label: string): boolean {
 .item-time {
   font-size: 12px;
   color: var(--color-text-muted);
+}
+.item-summary {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-text-body, #475569);
+  line-height: 1.5;
+  padding: 3px 8px;
+  background: #f8fafc;
+  border-left: 2px solid #cbd5e1;
+  border-radius: 0 4px 4px 0;
 }
 .item-source-row {
   margin-top: 4px;

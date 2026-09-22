@@ -29,20 +29,20 @@ function collapseAll() {
     <div class="tree-toolbar">
       <div class="legend-flow">
         <span class="legend-title">溯源方向</span>
-        <span class="chip" style="--c:#059669">零售</span>
+        <span class="chip" style="--c:#059669">零售终端</span>
         <span class="arrow">↓</span>
-        <span class="chip" style="--c:#d97706">分装</span>
+        <span class="chip" style="--c:#d97706">分拣批发</span>
         <span class="arrow">↓</span>
-        <span class="chip" style="--c:#7c3aed">加工</span>
+        <span class="chip" style="--c:#7c3aed">加工厂</span>
         <span class="arrow">↓</span>
-        <span class="chip" style="--c:#0284c7">捕捞</span>
+        <span class="chip" style="--c:#0284c7">捕捞船队</span>
       </div>
       <div class="toolbar-acts">
         <button class="tool-btn" type="button" @click="expandAll">展开全部</button>
         <button class="tool-btn ghost" type="button" @click="collapseAll">折叠全部</button>
       </div>
     </div>
-    <p class="tree-hint">从终端零售向下展开,点击节点查看溯源详情和上游分支。同一批次可在多个分支重复出现。</p>
+    <p class="tree-hint">从零售终端向下展开,点击节点查看该环节的备注、质检和出入库时间。每个节点的时间线按实际操作时间排列。</p>
 
     <!-- 根节点列表 -->
     <div class="root-list">

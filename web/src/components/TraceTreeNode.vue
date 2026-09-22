@@ -22,10 +22,10 @@ function toggle() {
 }
 
 const stageMeta: Record<string, { label: string; color: string; soft: string; icon: string }> = {
-  SOURCE: { label: '捕捞', color: '#0284c7', soft: '#e0f2fe', icon: '捕' },
-  PROCESSING: { label: '加工', color: '#7c3aed', soft: '#f3e8ff', icon: '工' },
-  DISTRIBUTION: { label: '分装', color: '#d97706', soft: '#fef3c7', icon: '装' },
-  RETAIL: { label: '零售', color: '#059669', soft: '#d1fae5', icon: '售' },
+  SOURCE: { label: '捕捞船队', color: '#0284c7', soft: '#e0f2fe', icon: '捕' },
+  PROCESSING: { label: '加工厂', color: '#7c3aed', soft: '#f3e8ff', icon: '工' },
+  DISTRIBUTION: { label: '分拣批发', color: '#d97706', soft: '#fef3c7', icon: '装' },
+  RETAIL: { label: '零售终端', color: '#059669', soft: '#d1fae5', icon: '售' },
   UNKNOWN: { label: '未知', color: '#64748b', soft: '#f1f5f9', icon: '?' }
 }
 function stageOf(stage: string) {
@@ -50,15 +50,15 @@ const hasTimeline = props.node.timeline && props.node.timeline.length > 0
         <span class="stage-label">{{ meta.label }}</span>
         <span class="node-org">{{ node.orgName }}</span>
         <span v-if="node.allocatedQuantity" class="node-qty">{{ node.allocatedQuantity }}kg</span>
-        <span v-if="hasChildren" class="branch-count">{{ node.children!.length }}支上游</span>
+        <span v-if="hasChildren" class="branch-count">{{ node.children!.length }}支下游</span>
         <span class="chevron" :class="{ rotated: expanded }">›</span>
       </div>
-      <div class="node-batch">
-        <span class="batch-no mono">{{ node.batch?.publicBatchNo }}</span>
-        <span v-if="node.batch?.maskedOrigin" class="batch-sep">·</span>
-        <span v-if="node.batch?.maskedOrigin" class="batch-origin">{{ node.batch.maskedOrigin }}</span>
-        <span v-if="node.batch?.productionDate" class="batch-sep">·</span>
-        <span v-if="node.batch?.productionDate" class="batch-date">{{ node.batch.productionDate }}</span>
+      <div v-if="node.batch" class="node-batch">
+        <span class="batch-no mono">{{ node.batch.publicBatchNo }}</span>
+        <span v-if="node.batch.maskedOrigin" class="batch-sep">·</span>
+        <span v-if="node.batch.maskedOrigin" class="batch-origin">{{ node.batch.maskedOrigin }}</span>
+        <span v-if="node.batch.productionDate" class="batch-sep">·</span>
+        <span v-if="node.batch.productionDate" class="batch-date">{{ node.batch.productionDate }}</span>
       </div>
     </div>
 
