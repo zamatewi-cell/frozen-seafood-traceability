@@ -418,7 +418,7 @@ public class QualityApplicationService {
                 "质检通过: 环节" + insp.getInspectionStage() + ", " + items.size() + "项清单全部通过",
                 details
         );
-        String idempotencyKey = "quality-qc-" + insp.getId();
+        String idempotencyKey = "quality-qc-pass-insp-" + insp.getId();
         traceEventService.createEventForQuality(insp.getBatchId(), req, idempotencyKey, principal);
     }
 
