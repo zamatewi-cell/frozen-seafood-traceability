@@ -256,6 +256,16 @@ class TransferControllerTest {
     }
 
     @Test
+    @DisplayName("删除草稿缺少必填查询参数 expectedVersion 时返回 400 INVALID_REQUEST 而不是 500")
+    void deleteDraft_missingExpectedVersion_returnsBadRequest() throws Exception {
+        mockMvc.perform(delete("/api/v1/transfers/5001")
+                        .with(user(senderOperator))
+                        .with(csrf()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+    }
+
+    @Test
     @DisplayName("列表查询将大小写无关的合法筛选值规范化后传给 SQL 层")
     void listTransfers_normalizesSupportedFilters() throws Exception {
         when(transferService.listTransfers(eq("SENT"), eq("PENDING"), eq(1L), eq(20), any()))
