@@ -44,6 +44,17 @@ export function canOperateBatch(user: CurrentUser | null | undefined, batch: Bat
     && (batch.remainingQuantity === undefined || Number(batch.remainingQuantity) > 0))
 }
 
+/**
+ * 自有冷库入库 / 出库：批次当前责任组织的企业操作员（非平台角色）对 ACTIVE + NORMAL 批次记录；组织类型不受限。
+ * 服务端仍独立校验场所归属、冷库类型与批次状态。
+ */
+export function canRecordWarehouseEvent(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
+  return Boolean(isOperator(user) && batch
+    && batch.orgId === user.orgId
+    && batch.flowStatus === 'ACTIVE'
+    && batch.riskStatus === 'NORMAL')
+}
+
 /** 交接接收方的操作员或质量管理员可以接受 / 拒收（运输任务必须已到达，服务端校验）。 */
 export function canDecideTransfer(user: CurrentUser | null | undefined, transfer: Transfer | null | undefined): boolean {
   return Boolean(user && transfer
