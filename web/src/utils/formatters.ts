@@ -348,3 +348,19 @@ export function formatLineageNodeLabel(role: string | null | undefined, derivedB
   }
   return (derivedBy && map[derivedBy]) || '中间批次'
 }
+
+/**
+ * 企业端公开追溯码状态标签。
+ */
+export function formatPublicTraceCodeStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'ACTIVE':
+      return { label: '已激活', tone: 'success', description: '消费者可通过公开追溯码查询该批次的公开信息' }
+    case 'DISABLED':
+      return { label: '已停用', tone: 'neutral', description: '停用为终态：消费者查询与未知码一样显示未找到，不能重新激活或更换' }
+    case 'RECALLED':
+      return { label: '召回标记', tone: 'danger', description: '召回相关状态（模拟演练），消费者仍可查询' }
+    default:
+      return { label: status || '未激活', tone: 'neutral', description: '尚未激活公开追溯码' }
+  }
+}

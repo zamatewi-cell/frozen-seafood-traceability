@@ -165,6 +165,21 @@ export interface Sale {
   createdAt?: string
 }
 
+/**
+ * 批次公开追溯码（企业端视图）。一批一码、跨交接不换码；DISABLED 为终态（消费者查询与未知码一致返回未找到）。
+ * RECALLED 码状态属于 Phase B，当前切片不会写入。
+ */
+export interface PublicTraceCode {
+  id: number
+  batchId: number
+  publicId: string
+  status: 'ACTIVE' | 'DISABLED' | 'RECALLED'
+  activatedAt: string
+  disabledAt?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface SiteSummary {
   id: number
   orgId: number

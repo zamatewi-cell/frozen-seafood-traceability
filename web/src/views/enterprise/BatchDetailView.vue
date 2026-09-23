@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import WarehouseEventPanel from '@/components/enterprise/WarehouseEventPanel.vue'
 import SalePanel from '@/components/enterprise/SalePanel.vue'
+import PublicTraceCodePanel from '@/components/enterprise/PublicTraceCodePanel.vue'
 import { getBatch, listBatchEvents, submitBatch } from '@/api/batches'
 import { listBatchOperations } from '@/api/batchOperations'
 import { listSites } from '@/api/directory'
@@ -12,7 +13,7 @@ import { listTransfers } from '@/api/transfers'
 import { ApiError } from '@/api/client'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
 import { useSession } from '@/stores/session'
-import type { Batch, BatchOperation, Sale, TraceEvent, Transfer } from '@/types/enterprise'
+import type { Batch, BatchOperation, PublicTraceCode, Sale, TraceEvent, Transfer } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import {
   formatBatchType,
@@ -113,6 +114,12 @@ async function onSaleRecorded(sale: Sale) {
   flash.value = current && current.flowStatus === 'CLOSED'
     ? { tone: 'success', message: `已登记终端销售 ${sold}；批次已售罄，系统已自动关闭批次并生成 SALE 追溯事件。` }
     : { tone: 'success', message: `已登记终端销售 ${sold}；剩余 ${formatQuantity(current?.remainingQuantity ?? null, current?.unitCode ?? sale.unitCode)}，系统已生成 SALE 追溯事件。` }
+}
+
+function onPublicTraceCodeChanged(code: PublicTraceCode) {
+  flash.value = code.status === 'DISABLED'
+    ? { tone: 'success', message: '公开追溯码已停用（终态）；消费者查询将显示未找到。' }
+    : { tone: 'success', message: '公开追溯码已激活；批次状态与数量不变，消费者可通过该码查询公开信息。' }
 }
 
 /** SALE 由终端销售自动生成：展示可追溯到销售记录的结构化事实。 */
@@ -645,6 +652,13 @@ onBeforeUnmount(() => {
         :events="events"
         @recorded="onWarehouseRecorded"
         @conflict="load"
+      />
+
+      <PublicTraceCodePanel
+        v-if="user"
+        :batch="batch"
+        :user="user"
+        @changed="onPublicTraceCodeChanged"
       />
 
       <SalePanel
