@@ -104,6 +104,9 @@ abstract class AbstractTransferShipmentMysqlIT {
     @Autowired
     protected TransferMapper transferMapper;
 
+    @Autowired
+    protected javax.sql.DataSource dataSource;
+
     protected final List<Long> createdTransferIds = new ArrayList<>();
     protected final List<Long> createdShipmentIds = new ArrayList<>();
     protected final List<Long> createdBatchIds = new ArrayList<>();
@@ -175,6 +178,63 @@ abstract class AbstractTransferShipmentMysqlIT {
         receiverSession = login(receiverUser.getUsername());
     }
 
+    /**
+     * 把接收方替换为 RETAILER 组织（含启用门店 STORE 作为运输目的场所与销售场所、登录会话），用于终端销售场景：
+     * 来源企业建批 → Transfer + Shipment 送达 → 零售企业 ACCEPT 后即由零售企业负责。
+     */
+    protected void useRetailerReceiver() throws Exception {
+        receiverOrg = createOrg("ORG_RT_" + suffix, "零售企业-" + suffix, "RETAILER");
+        receiverUser = createUser(receiverOrg.getId(), "rcv_ret_" + suffix);
+        bindUserRole(receiverUser.getId(), operatorRole.getId());
+        receiverSite = createSite(receiverOrg.getId(), "RT-STORE-" + suffix, "零售门店-" + suffix, "STORE");
+        receiverSession = login(receiverUser.getUsername());
+    }
+
+    /**
+     * 来源企业建批 → Transfer + Shipment 送达 → 当前接收方 ACCEPT，返回已由接收方负责的批次（接收方类型由调用方预先设定）。
+     */
+    protected Long receiverHeldBatch(String externalBatchNo, BigDecimal quantity) throws Exception {
+        return processorHeldBatch(externalBatchNo, quantity);
+    }
+
+    /**
+     * 等待本 schema 指定表上出现 InnoDB 行锁等待（即被测请求已阻塞在行锁上），作为确定性交错的同步点。
+     * <p>
+     * performance_schema 的锁视图需要管理员权限：被测应用数据源（CI 中为非 root 的 trace_user）不能也不应读取，
+     * 因此仅这一诊断探针沿用迁移测试的约定，通过 DB_ROOT_USERNAME / DB_ROOT_PASSWORD 单独建立管理连接；
+     * 应用数据源、权限与业务行为均不变。若被测线程在出现锁等待前就已结束，说明未经过同步点，立即失败。
+     * </p>
+     */
+    protected void awaitRowLockWait(Thread worker, String table) throws Exception {
+        String baseUrl = ((com.zaxxer.hikari.HikariDataSource) dataSource).getJdbcUrl();
+        String rootUser = System.getenv().getOrDefault("DB_ROOT_USERNAME", "root");
+        if (rootUser.isBlank()) {
+            rootUser = "root";
+        }
+        String rootPassword = System.getenv().getOrDefault("DB_ROOT_PASSWORD", "");
+        String schema = jdbcTemplate.queryForObject("SELECT DATABASE()", String.class);
+        String probe = "SELECT COUNT(*) FROM performance_schema.data_lock_waits w "
+                + "JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID "
+                + "WHERE l.OBJECT_SCHEMA = ? AND l.OBJECT_NAME = ?";
+        long deadline = System.currentTimeMillis() + 15_000;
+        try (java.sql.Connection admin = java.sql.DriverManager.getConnection(baseUrl, rootUser, rootPassword);
+             java.sql.PreparedStatement ps = admin.prepareStatement(probe)) {
+            ps.setString(1, schema);
+            ps.setString(2, table);
+            while (true) {
+                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                    rs.next();
+                    if (rs.getLong(1) > 0) {
+                        return;
+                    }
+                }
+                assertThat(worker.isAlive()).as("request finished without waiting on the %s row lock", table).isTrue();
+                assertThat(System.currentTimeMillis()).as("request never waited on the %s row lock", table).isLessThan(deadline);
+                Thread.sleep(20);
+            }
+        }
+    }
+
     @AfterEach
     void tearDownTransferShipmentFixture() {
         clean("DELETE FROM transfer_idempotency WHERE org_id = ?", createdOrgIds);
@@ -184,6 +244,13 @@ abstract class AbstractTransferShipmentMysqlIT {
         clean("DELETE FROM trace_event WHERE batch_id = ?", createdBatchIds);
         // 批次操作产出的输出批次由服务端生成（不在 createdBatchIds 中），按创建组织兜底清理其事件
         clean("DELETE FROM trace_event WHERE batch_id IN (SELECT id FROM batch WHERE creation_org_id = ?)", createdOrgIds);
+
+        // V11：batch.first_sale_id → sale（同批次同组织）与 sale → batch / site 互相引用：先断开首次销售标记，再删销售台账
+        clean("UPDATE batch SET first_sale_id = NULL WHERE id = ?", createdBatchIds);
+        clean("UPDATE batch SET first_sale_id = NULL WHERE creation_org_id = ? OR org_id = ?", createdOrgIds, 2);
+        clean("DELETE FROM sale WHERE batch_id = ?", createdBatchIds);
+        clean("DELETE FROM sale WHERE org_id = ?", createdOrgIds);
+        clean("DELETE FROM sale WHERE batch_id IN (SELECT id FROM batch WHERE creation_org_id = ?)", createdOrgIds);
 
         // V10 外键：batch.produced_by / consumed_by → batch_operation；item / relation → batch。
         // 先断开批次对操作的引用，再删谱系边与明细，最后删操作
@@ -224,6 +291,7 @@ abstract class AbstractTransferShipmentMysqlIT {
             assertThat(count("SELECT count(*) FROM shipment_idempotency WHERE org_id = ?", orgId)).isZero();
             assertThat(count("SELECT count(*) FROM transfer_idempotency WHERE org_id = ?", orgId)).isZero();
             assertThat(count("SELECT count(*) FROM audit_log WHERE actor_org_id = ?", orgId)).isZero();
+            assertThat(count("SELECT count(*) FROM sale WHERE org_id = ?", orgId)).isZero();
         }
         for (Long batchId : createdBatchIds) {
             assertThat(count("SELECT count(*) FROM batch WHERE id = ?", batchId)).isZero();

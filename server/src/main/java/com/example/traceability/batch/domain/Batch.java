@@ -92,6 +92,10 @@ public class Batch {
     @TableField("consumed_by_operation_id")
     private Long consumedByOperationId;
 
+    /** 第一次有效终端销售 ID（写一次，Slice 5 起）；非空后该批次永久禁止交接与批次操作。 */
+    @TableField("first_sale_id")
+    private Long firstSaleId;
+
     @TableField("creation_idempotency_key")
     private String creationIdempotencyKey;
 
@@ -321,5 +325,13 @@ public class Batch {
 
     public void setConsumedByOperationId(Long consumedByOperationId) {
         this.consumedByOperationId = consumedByOperationId;
+    }
+
+    public Long getFirstSaleId() {
+        return firstSaleId;
+    }
+
+    public void setFirstSaleId(Long firstSaleId) {
+        this.firstSaleId = firstSaleId;
     }
 }

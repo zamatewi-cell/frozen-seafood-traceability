@@ -1351,4 +1351,76 @@ class TransferApplicationServiceTest {
             throw new IllegalStateException(e);
         }
     }
+
+    // =========================================================================
+    // Slice 5：首次终端销售锁定
+    // =========================================================================
+
+    private Transfer saleLockedTransfer(Long transferId, Long batchId, TransferStatus status) {
+        Transfer transfer = new Transfer();
+        transfer.setId(transferId);
+        transfer.setBatchId(batchId);
+        transfer.setSenderOrgId(10L);
+        transfer.setReceiverOrgId(20L);
+        transfer.setQuantity(new BigDecimal("500.000"));
+        transfer.setUnitCode("kg");
+        transfer.setStatus(status);
+        transfer.setVersion(0L);
+        return transfer;
+    }
+
+    @Test
+    @DisplayName("Slice 5：已开始终端销售（first_sale_id 非空）的批次即使仍有剩余也拒绝创建交接 409 BATCH_SALE_STARTED，且不写交接")
+    void createDraft_whenSaleStarted_rejected() {
+        Long batchId = 7101L;
+        Batch batch = createTestBatch(batchId, 10L, "BATCH-SOLD-1");
+        batch.setFirstSaleId(88L);
+        when(batchMapper.selectByIdForUpdate(batchId)).thenReturn(batch);
+
+        assertThatThrownBy(() -> transferService.createDraft(new TransferCreateRequest(batchId, 20L), "idem-sale-lock-create-01", senderOperator))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> {
+                    BusinessException be = (BusinessException) ex;
+                    assertThat(be.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(be.getCode()).isEqualTo("BATCH_SALE_STARTED");
+                });
+        verify(transferMapper, never()).insert(any(Transfer.class));
+    }
+
+    @Test
+    @DisplayName("Slice 5（防御性）：提交交接时锁定批次已有 first_sale_id → 409 BATCH_SALE_STARTED，交接保持 DRAFT")
+    void submitTransfer_whenSaleStarted_rejected() {
+        String key = "idem-sale-lock-submit-01";
+        Transfer transfer = saleLockedTransfer(7201L, 7102L, TransferStatus.DRAFT);
+        Batch batch = createTestBatch(7102L, 10L, "BATCH-SOLD-2");
+        batch.setFirstSaleId(89L);
+        when(idempotencyMapper.selectByOrgIdAndKey(10L, key)).thenReturn(null);
+        stubLockedTransfer(transfer);
+        when(batchMapper.selectByIdForUpdate(7102L)).thenReturn(batch);
+
+        assertThatThrownBy(() -> transferService.submitTransfer(7201L, new TransferSubmitRequest(0L), key, senderOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("BATCH_SALE_STARTED");
+        verify(transferMapper, never()).updateByIdAndVersion(any(Transfer.class), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("Slice 5（防御性）：接受交接时锁定批次已有 first_sale_id → 409 BATCH_SALE_STARTED，责任组织不转移")
+    void acceptTransfer_whenSaleStarted_rejected() {
+        String key = "idem-sale-lock-accept-01";
+        Transfer transfer = saleLockedTransfer(7202L, 7103L, TransferStatus.PENDING);
+        Batch batch = createTestBatch(7103L, 10L, "BATCH-SOLD-3");
+        batch.setFirstSaleId(90L);
+        stubLockedTransfer(transfer);
+        when(batchMapper.selectByIdForUpdate(7103L)).thenReturn(batch);
+        when(idempotencyMapper.selectByOrgIdAndKey(20L, key)).thenReturn(null);
+
+        TransferAcceptRequest req = new TransferAcceptRequest(new BigDecimal("500.000"), "kg", OffsetDateTime.now(ZoneOffset.UTC), null, 0L);
+        assertThatThrownBy(() -> transferService.acceptTransfer(7202L, req, key, receiverOperator))
+                .isInstanceOf(BusinessException.class)
+                .extracting("code")
+                .isEqualTo("BATCH_SALE_STARTED");
+        verify(batchMapper, never()).updateOrgIdByIdAndVersion(any(), any(), any(), any(), any());
+    }
 }

@@ -3,14 +3,16 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import WarehouseEventPanel from '@/components/enterprise/WarehouseEventPanel.vue'
+import SalePanel from '@/components/enterprise/SalePanel.vue'
 import { getBatch, listBatchEvents, submitBatch } from '@/api/batches'
 import { listBatchOperations } from '@/api/batchOperations'
 import { listSites } from '@/api/directory'
+import { listSales } from '@/api/sales'
 import { listTransfers } from '@/api/transfers'
 import { ApiError } from '@/api/client'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
 import { useSession } from '@/stores/session'
-import type { Batch, BatchOperation, TraceEvent, Transfer } from '@/types/enterprise'
+import type { Batch, BatchOperation, Sale, TraceEvent, Transfer } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import {
   formatBatchType,
@@ -29,7 +31,7 @@ import {
   formatTraceEventType,
   formatTransferStatus
 } from '@/utils/formatters'
-import { canInitiateTransfer, canManageSourceBatches, canOperateBatch, canRecordWarehouseEvent } from '@/utils/permissions'
+import { canInitiateTransfer, canManageSourceBatches, canOperateBatch, canRecordSale, canRecordWarehouseEvent } from '@/utils/permissions'
 import { takeBatchFlash, type BatchFlash } from './batchFlash'
 import { recalledBatchListQuery } from './batchQuery'
 
@@ -78,6 +80,51 @@ const showInitiateTransfer = computed(() => canInitiateTransfer(user.value, batc
 const showOperate = computed(() => canOperateBatch(user.value, batch.value) && transferState.value === 'loaded' && !openTransfer.value)
 /** 自有冷库入库 / 出库：只按当前已确定规则显示（当前责任组织 OPERATOR、非平台、ACTIVE + NORMAL）；服务端仍独立校验。 */
 const showWarehouse = computed(() => canRecordWarehouseEvent(user.value, batch.value))
+
+type SaleLoadState = 'loading' | 'loaded' | 'error'
+const saleState = ref<SaleLoadState>('loading')
+const sales = ref<Sale[]>([])
+/** 终端销售入口：RETAILER 操作员、本组织负责的 ACTIVE + NORMAL 且有剩余量的批次、无未结束交接（服务端仍独立校验）。 */
+const showSale = computed(() => canRecordSale(user.value, batch.value) && transferState.value === 'loaded' && !openTransfer.value)
+const showSaleHistory = computed(() => showSale.value || sales.value.length > 0 || Boolean(batch.value?.firstSaleId))
+let saleRequest: AbortController | null = null
+
+async function loadSales(batchId: number) {
+  saleRequest?.abort()
+  const controller = new AbortController()
+  saleRequest = controller
+  saleState.value = 'loading'
+  try {
+    const result = await listSales(batchId, controller.signal)
+    if (controller.signal.aborted) return
+    sales.value = result
+    saleState.value = 'loaded'
+  } catch {
+    if (controller.signal.aborted) return
+    sales.value = []
+    saleState.value = 'error'
+  }
+}
+
+async function onSaleRecorded(sale: Sale) {
+  await load()
+  const current = batch.value
+  const sold = formatQuantity(sale.quantity, sale.unitCode)
+  flash.value = current && current.flowStatus === 'CLOSED'
+    ? { tone: 'success', message: `已登记终端销售 ${sold}；批次已售罄，系统已自动关闭批次并生成 SALE 追溯事件。` }
+    : { tone: 'success', message: `已登记终端销售 ${sold}；剩余 ${formatQuantity(current?.remainingQuantity ?? null, current?.unitCode ?? sale.unitCode)}，系统已生成 SALE 追溯事件。` }
+}
+
+/** SALE 由终端销售自动生成：展示可追溯到销售记录的结构化事实。 */
+function saleFacts(event: TraceEvent): Array<{ label: string; value: string }> {
+  const details = event.detailsJson ?? {}
+  const unit = typeof details.unitCode === 'string' ? details.unitCode : null
+  const facts: Array<{ label: string; value: string }> = []
+  if (details.siteName) facts.push({ label: '销售门店', value: String(details.siteName) })
+  if (details.quantity !== undefined && details.quantity !== null) facts.push({ label: '销售数量', value: formatQuantity(String(details.quantity), unit) })
+  if (details.remainingAfter !== undefined && details.remainingAfter !== null) facts.push({ label: '销售后剩余', value: formatQuantity(String(details.remainingAfter), unit) })
+  return facts
+}
 const submitting = ref(false)
 const submitError = ref('')
 
@@ -316,6 +363,7 @@ async function load() {
     loadEvents(result.id)
     loadTransfers(result.id)
     loadOperations(result.id)
+    loadSales(result.id)
   } catch (err: unknown) {
     if (controller.signal.aborted) return
     if (err instanceof ApiError && err.status === 404) {
@@ -365,6 +413,7 @@ onBeforeUnmount(() => {
   eventRequest?.abort()
   transferRequest?.abort()
   operationRequest?.abort()
+  saleRequest?.abort()
 })
 </script>
 
@@ -432,6 +481,13 @@ onBeforeUnmount(() => {
         <strong>已全量消耗：</strong>该批次已被
         <RouterLink :to="`/app/batch-operations/${batch.consumedByOperationId}`">批次操作</RouterLink>
         全量消耗并关闭，不能再加工、拆分或交接；仍可查询追溯记录。
+      </p>
+
+      <p v-if="batch.firstSaleId && batch.flowStatus === 'CLOSED'" class="ent-next-step" data-testid="sale-sold-out">
+        <strong>已售罄：</strong>该批次已通过终端销售全部售出并自动关闭；当前责任组织不变，仍可查询追溯记录。
+      </p>
+      <p v-else-if="batch.firstSaleId" class="ent-next-step" data-testid="sale-started">
+        <strong>已开始终端销售：</strong>该批次不能再交接、加工或拆分，剩余量只能继续终端销售。
       </p>
 
       <section v-if="canSubmit" class="ent-card activation-card" aria-labelledby="activation-title" data-testid="activation-card">
@@ -591,6 +647,38 @@ onBeforeUnmount(() => {
         @conflict="load"
       />
 
+      <SalePanel
+        v-if="showSale && user"
+        :batch="batch"
+        :org-id="user.orgId"
+        @recorded="onSaleRecorded"
+        @conflict="load"
+      />
+
+      <section v-if="showSaleHistory" class="ent-card" aria-labelledby="sales-title" data-testid="sale-history">
+        <h2 id="sales-title" class="ent-card-title">终端销售记录</h2>
+        <div v-if="saleState === 'loading'" class="ent-state">正在加载销售记录…</div>
+        <div v-else-if="saleState === 'error'" class="ent-state error" role="alert">
+          销售记录加载失败
+          <button type="button" class="ent-button" @click="loadSales(batch.id)">重试</button>
+        </div>
+        <div v-else-if="sales.length === 0" class="ent-muted section-note" data-testid="sale-history-empty">该批次暂无终端销售记录。</div>
+        <div v-else class="ent-table-scroll">
+          <table class="ent-table">
+            <thead>
+              <tr><th>销售时间</th><th>门店</th><th>数量</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in sales" :key="s.id" data-testid="sale-row" :data-sale-id="s.id">
+                <td>{{ formatIsoDateTime(s.occurredAt) }}</td>
+                <td>{{ s.siteName ?? `场所 #${s.siteId}` }}</td>
+                <td data-testid="sale-row-quantity">{{ formatQuantity(s.quantity, s.unitCode) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="ent-card" aria-labelledby="handover-title" data-testid="batch-transfers">
         <h2 id="handover-title" class="ent-card-title">交接与运输</h2>
         <div v-if="transferState === 'loading'" class="ent-state">正在加载交接记录…</div>
@@ -692,6 +780,12 @@ onBeforeUnmount(() => {
               <template v-if="isWarehouseEvent(event)">
                 <dt>冷库场所</dt>
                 <dd data-testid="event-warehouse-site">{{ warehouseSiteLabel(event) }}</dd>
+              </template>
+              <template v-if="event.eventType === 'SALE'">
+                <template v-for="fact in saleFacts(event)" :key="fact.label">
+                  <dt>{{ fact.label }}</dt>
+                  <dd :data-testid="`event-fact-${fact.label}`">{{ fact.value }}</dd>
+                </template>
               </template>
               <template v-if="event.eventType === 'TRANSPORT' || event.eventType === 'ARRIVAL'">
                 <template v-for="fact in shipmentFacts(event)" :key="fact.label">

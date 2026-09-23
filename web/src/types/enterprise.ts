@@ -39,7 +39,7 @@ export interface Batch {
   batchType: string
   /** 声明数量（创建或产出时声明，提交后不原地改写） */
   quantity: number
-  /** 派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量；CLOSED 为 0 */
+  /** 派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量 - 已提交终端销售数量；CLOSED 为 0（服务端派生，前端只展示） */
   remainingQuantity?: number
   unitCode: string
   originType: string
@@ -54,6 +54,8 @@ export interface Batch {
   producedByOperationId?: number
   /** 全量消耗该批次的已提交批次操作（非空时批次必为 CLOSED） */
   consumedByOperationId?: number
+  /** 第一次有效终端销售（写一次）；非空后禁止交接与批次操作，只能继续终端销售 */
+  firstSaleId?: number
   version: number
   createdAt?: string
   createdBy?: number
@@ -139,6 +141,28 @@ export interface CreateWarehouseEventPayload {
   occurredAt: string
   dataSource: 'MANUAL'
   summary: string
+}
+
+/** 终端销售创建载荷（POST /api/v1/batches/{batchId}/sales）：只发送门店、数量与业务时间，剩余量与单位由服务端决定。 */
+export interface CreateSalePayload {
+  siteId: number
+  quantity: number
+  occurredAt: string
+}
+
+/** 终端销售记录（零售企业在本组织门店面向消费者的数量出库；不含任何消费者或支付信息）。 */
+export interface Sale {
+  id: number
+  batchId: number
+  orgId: number
+  siteId: number
+  siteName?: string
+  quantity: number
+  unitCode: string
+  occurredAt: string
+  status: 'SUBMITTED' | string
+  createdBy?: number
+  createdAt?: string
 }
 
 export interface SiteSummary {

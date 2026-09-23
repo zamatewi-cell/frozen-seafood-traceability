@@ -37,6 +37,19 @@ info:
       `1000.0` 与 `1000.000` 视为相等）。
     - 写操作仅限当前责任组织为 `PROCESSOR` 的 `OPERATOR`；读取对操作所属组织开放，批次转出后仍可只读查询本组织历史操作。
 
+    ## Sale：终端销售（Phase A Slice 5）
+
+    - Sale 只表示当前责任 `RETAILER` 的 `OPERATOR` 在本组织启用的 `Site(STORE)` 面向供应链外部消费者的终端数量出库；
+      企业之间的买卖仍使用 Transfer。一条 Sale 只对应一个 Batch；Sale 不改变批次当前责任组织、风险状态与身份。
+    - 数量台账是不可修改的 `sale` 记录；`remainingQuantity` 始终由服务端派生：
+      `声明数量 - 已提交批次操作 INPUT 消耗量 - 已提交终端销售数量`（处置属于 Phase B），服务端从不接受客户端剩余量。
+    - 允许多次部分销售；超卖 422 `SALE_QUANTITY_EXCEEDS_REMAINING`；剩余量恰好归零时批次在同一事务内变为 `CLOSED`。
+    - **首次销售锁定**：第一次有效 Sale 写入批次 `firstSaleId`（写一次），此后即使仍有剩余量，交接创建 / 提交 / 接受、
+      运输装载与批次操作创建 / 提交（PROCESS / SPLIT / MERGE / REPACK）一律 409 `BATCH_SALE_STARTED`，只能继续终端销售。
+    - 每笔成功 Sale 在同一事务内自动生成且仅生成一条 SALE 追溯事件（系统幂等身份 `SYS:SALE:SALE:{saleId}`，
+      `detailsJson.sourceObjectType = SALE`、`sourceObjectId = saleId`）；人工事件接口不能创建或更正 SALE。
+    - 并发：销售以批次行锁串行化并在锁内按最新已提交数据重新计算剩余量，并发请求不会超卖。
+
     ## 会话与 CSRF
 
     - 企业端使用服务端 Session：`POST /auth/login` 成功后下发 HttpOnly、SameSite=Lax 的
@@ -66,6 +79,8 @@ tags:
     description: 追溯事件与谱系查询
   - name: Transfers
     description: 企业交接确认
+  - name: Sales
+    description: 零售企业终端销售数量台账
   - name: Organizations
     description: 企业端最小只读组织目录
   - name: Products
@@ -586,7 +601,7 @@ paths:
         - OUTPUT 携带 `batchId`：400 `OUTPUT_BATCH_SERVER_GENERATED`；
         - INPUT 数量不等于当前剩余量：422 `PARTIAL_INPUT_NOT_ALLOWED`；物料不平衡：422 `BATCH_MASS_BALANCE_VIOLATION`；
         - 输入批次已关闭或已被消耗：409 `BATCH_ALREADY_CONSUMED`；非 ACTIVE+NORMAL：422 `BATCH_FLOW_BLOCKED`；
-          存在草稿或待接收交接：409 `BATCH_TRANSFER_OPEN`。
+          已开始终端销售（`firstSaleId` 非空）：409 `BATCH_SALE_STARTED`；存在草稿或待接收交接：409 `BATCH_TRANSFER_OPEN`。
         创建阶段不改变输入批次状态。同组织相同 `Idempotency-Key` 且语义相同时重放原操作；语义不同或该键属于已删除草稿时
         409 `IDEMPOTENCY_CONFLICT`。
       operationId: createBatchOperation
@@ -691,7 +706,7 @@ paths:
       tags: [Batches]
       summary: 提交批次操作：原子关闭 INPUT、激活 OUTPUT、固化谱系边；PROCESS 自动生成 PROCESS 追溯事件
       description: |
-        写权限同创建；锁内重新校验全部前提（输入批次仍由本组织负责、ACTIVE+NORMAL、未被消耗、无未结束交接、
+        写权限同创建；锁内重新校验全部前提（输入批次仍由本组织负责、ACTIVE+NORMAL、未被消耗、未开始终端销售、无未结束交接、
         INPUT = 当前剩余量；OUTPUT 仍是本操作产出的 DRAFT 草稿，否则 409 `OPERATION_OUTPUT_STATE_INVALID`；精确物料平衡）。
         同一事务内：INPUT → `CLOSED`（记录 `consumedByOperationId`），OUTPUT → `ACTIVE`，写入 BatchRelation
         （PROCESS 为 `TRANSFORM`，SPLIT 为 `SPLIT`）；PROCESS 为每个 OUTPUT 生成一条 PROCESS 事件（记录组织为执行组织，
@@ -760,7 +775,7 @@ paths:
       summary: 提交批次追溯事件（仅限企业操作员）
       description: |
         受控人工事件接口。`SOURCE`（来源批次激活）、`PROCESS`（加工批次操作提交）、`TRANSPORT`（运输任务发运）、`ARRIVAL`（运输任务到达）、
-        `SALE`（终端销售，Sale 台账尚未实现）只能由结构化业务对象自动生成，本接口拒绝创建，返回 422 `EVENT_TYPE_NOT_MANUAL`。
+        `SALE`（终端销售成功提交）只能由结构化业务对象自动生成，本接口拒绝创建，返回 422 `EVENT_TYPE_NOT_MANUAL`。
         `Idempotency-Key` 不得以服务端保留前缀 `SYS:` 开头（400 `INVALID_REQUEST`）。
         只有批次当前责任组织可写，跨组织 403 `ORG_SCOPE_DENIED`（先于场所校验）；批次必须为 `ACTIVE` + `NORMAL`，否则 422 `BATCH_FLOW_BLOCKED`；
         同 key 不同载荷 409 `IDEMPOTENCY_CONFLICT`，同 key 同载荷重放原事件。
@@ -851,6 +866,61 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/sales:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    get:
+      tags: [Sales]
+      summary: 查询批次终端销售记录
+      description: 批次当前责任组织与 PLATFORM 只读角色可读（按业务发生时间、ID 升序）；其他组织 403 `ORG_SCOPE_DENIED`。
+      operationId: listSales
+      responses:
+        '200':
+          description: 销售记录列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SaleListEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [Sales]
+      summary: 提交终端销售（仅限当前责任 RETAILER 的 OPERATOR）
+      description: |
+        校验顺序（先授权批次，再探测场所）：
+        1. 平台 / 系统管理员 403 `ADMIN_RESTRICTED`；非 OPERATOR 403 `ACCESS_DENIED`；非 `RETAILER` 组织 403 `ORG_TYPE_NOT_ALLOWED`；
+           请求形状错误、夹带未声明字段（例如 `remainingQuantity`）、数量 ≤ 0 或超过 3 位小数、业务时间晚于当前 5 分钟以上：400 `INVALID_REQUEST`；
+        2. 同组织同 `Idempotency-Key`：同载荷重放原 Sale（**先于一切状态校验**，售罄关闭后重试仍返回原 Sale），载荷不同 409 `IDEMPOTENCY_CONFLICT`。
+           载荷语义 = 批次、门店、数值等价的数量、规范化到 UTC 微秒的业务时间（与持久化精度一致）；
+        3. 批次不存在 404；不是批次当前责任组织 403 `ORG_SCOPE_DENIED`（在任何场所探测之前）；
+        4. 批次非 `ACTIVE + NORMAL`（含 `CLOSED` / `FROZEN` / `RECALLED`）：422 `BATCH_FLOW_BLOCKED`；
+        5. 批次已被批次操作作为 INPUT 使用（全量消耗标记或任何历史已提交 INPUT 用量）：409 `BATCH_ALREADY_CONSUMED`；
+        6. 场所不存在 404；他组织场所 403 `ORG_SCOPE_DENIED`；未启用 422 `SITE_NOT_ACTIVE`；非 `STORE` 422 `SALE_SITE_TYPE_INVALID`；
+        7. 存在草稿或待接收交接：409 `BATCH_TRANSFER_OPEN`；
+        8. 超过派生剩余量：422 `SALE_QUANTITY_EXCEEDS_REMAINING`。
+        成功时同一事务内：写入 Sale；首次销售写入批次 `firstSaleId`；剩余量恰好为 0 时批次 `CLOSED`；批次版本 +1；
+        自动生成一条 SALE 追溯事件。计量单位取自批次。
+      operationId: createSale
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateSaleRequest'}
+      responses:
+        '201':
+          description: 已提交（或幂等重放）的终端销售
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SaleEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
   /transfers:
     get:
       tags: [Transfers]
@@ -888,6 +958,7 @@ paths:
       description: |
         仅当前责任组织的 OPERATOR 可对 `ACTIVE + NORMAL` 批次发起；同一批次同时最多一张未结束交接。
         接收方必须为启用的非承运组织（422 `RECEIVER_ORG_TYPE_NOT_ALLOWED`）：承运商不会成为批次当前责任组织。
+        批次已开始终端销售（`firstSaleId` 非空，即使仍有剩余量）：409 `BATCH_SALE_STARTED`。
       operationId: createTransferDraft
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -983,7 +1054,7 @@ paths:
       summary: 发货企业提交交接凭证（DRAFT -> PENDING）
       description: |
         前提：交接已绑定 PLANNED 运输任务（未绑定 409 `SHIPMENT_NOT_BOUND`，运输任务非 PLANNED 409 `SHIPMENT_NOT_PLANNED`）。
-        提交不发运运输任务、不生成 TRANSPORT，也不改变批次责任组织。
+        提交不发运运输任务、不生成 TRANSPORT，也不改变批次责任组织。批次已开始终端销售：409 `BATCH_SALE_STARTED`（防御性）。
       operationId: submitTransfer
       parameters:
         - {$ref: '#/components/parameters/CsrfHeader'}
@@ -1017,7 +1088,7 @@ paths:
       description: |
         前提：关联运输任务已 DELIVERED（否则 409 `SHIPMENT_NOT_DELIVERED`），批次仍为 `ACTIVE + NORMAL`。
         原子转移批次当前责任组织与公开追溯码归属；批次数量不变；**不生成 ARRIVAL**（ARRIVAL 唯一来源为运输任务到达）。
-        承运组织与发货组织不能接受交接（403 `ORG_SCOPE_DENIED`）。
+        承运组织与发货组织不能接受交接（403 `ORG_SCOPE_DENIED`）。批次已开始终端销售：409 `BATCH_SALE_STARTED`（防御性）。
       operationId: acceptTransfer
       parameters:
         - {$ref: '#/components/parameters/CsrfHeader'}
@@ -1663,8 +1734,8 @@ components:
           type: number
           minimum: 0
           description: |
-            派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量（Sale 与处置将在后续 Slice 加入）；`CLOSED` 批次为 0。
-            批次操作 INPUT 必须等于该值。
+            派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量 - 已提交终端销售数量（处置属于 Phase B）；`CLOSED` 批次为 0。
+            批次操作 INPUT 必须等于该值；终端销售不得超过该值。服务端从不接受客户端提交的剩余量。
         unitCode: {type: string, example: kg}
         originType: {$ref: '#/components/schemas/OriginType'}
         originText: {type: string, maxLength: 255}
@@ -1676,6 +1747,7 @@ components:
         riskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
         producedByOperationId: {type: integer, format: int64, description: 产出该批次的批次操作ID（仅操作输出批次；未产出时省略）}
         consumedByOperationId: {type: integer, format: int64, description: 全量消耗该批次的已提交批次操作ID（非空时批次必为 CLOSED）}
+        firstSaleId: {type: integer, format: int64, description: 第一次有效终端销售ID（写一次；非空后禁止交接与批次操作，只能继续销售；未销售时省略）}
         version: {type: integer, format: int64, minimum: 0}
         createdAt: {type: string, format: date-time}
         createdBy: {type: integer, format: int64}
@@ -1846,7 +1918,7 @@ components:
         这是当前实现选择而非 v1.1 已明确保证的规范规则，可在后续契约修订中澄清。PROCESS 由 PROCESS 批次操作提交为每个 OUTPUT 批次生成一条
         （SPLIT 不生成 PACK / PROCESS，普通 PROCESS 不推导 FREEZE）；TRANSPORT 由运输任务 PLANNED → IN_TRANSIT 为每个 Batch 生成一条；
         ARRIVAL 由运输任务 IN_TRANSIT → DELIVERED 为每个 Batch 生成一条。Transfer ACCEPTED 不生成 ARRIVAL。
-        SALE 只能由终端 Sale 提交生成（Sale 尚未实现，人工接口拒绝）。
+        SALE 仅由终端 Sale 成功提交生成，每笔 Sale 恰好一条（人工接口拒绝创建与更正）。
         WAREHOUSE_IN / WAREHOUSE_OUT 为受控人工事件：当前责任组织在本组织启用的 COLD_STORE 场所记录，不改变批次，不强制配对或顺序（Slice 4 最小实现解释）。
     TraceEventDetailsJson:
       type: [object, 'null']
@@ -1992,6 +2064,46 @@ components:
           description: 仅当 riskStatus=RECALLED 时出现的模拟召回提示；其他情况字段省略
         queriedAt: {type: string, format: date-time}
         disclosure: {type: string}
+    CreateSaleRequest:
+      type: object
+      additionalProperties: false
+      description: 终端销售请求。计量单位取自批次，剩余量由服务端派生；夹带任何未声明字段返回 400。
+      required: [siteId, quantity, occurredAt]
+      properties:
+        siteId: {type: integer, format: int64, minimum: 1, description: 本组织启用的 STORE 场所}
+        quantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001, description: 销售数量（最多 3 位小数）}
+        occurredAt: {type: string, format: date-time, description: 销售业务发生时间；服务端规范化为 UTC 微秒精度}
+    Sale:
+      type: object
+      additionalProperties: false
+      description: 终端销售白名单投影（不含幂等键与请求哈希；无消费者、支付、订单或发票字段）。
+      required: [id, batchId, orgId, siteId, quantity, unitCode, occurredAt, status, createdBy, createdAt]
+      properties:
+        id: {type: integer, format: int64}
+        batchId: {type: integer, format: int64}
+        orgId: {type: integer, format: int64, description: 销售组织（批次当前责任 RETAILER）}
+        siteId: {type: integer, format: int64}
+        siteName: {type: string}
+        quantity: {type: number}
+        unitCode: {type: string, example: kg}
+        occurredAt: {type: string, format: date-time, description: 'UTC，微秒精度，与持久化值一致，例如 2026-09-23T01:30:15.123456Z'}
+        status: {type: string, enum: [SUBMITTED]}
+        createdBy: {type: integer, format: int64}
+        createdAt: {type: string, format: date-time}
+    SaleEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Sale'}
+    SaleListEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/Sale'}
     TransferStatus:
       type: string
       enum: [DRAFT, PENDING, ACCEPTED, REJECTED]

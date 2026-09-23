@@ -26,7 +26,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
+import com.example.traceability.sale.mapper.SaleMapper;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -78,7 +78,9 @@ class BatchApplicationServiceTest {
     @Mock
     private BatchOperationItemMapper batchOperationItemMapper;
 
-    @InjectMocks
+    @Mock
+    private SaleMapper saleMapper;
+
     private BatchApplicationService batchService;
 
     private TraceSecurityPrincipal operatorPrincipal;
@@ -94,6 +96,8 @@ class BatchApplicationServiceTest {
 
     @BeforeEach
     void setUp() {
+        batchService = new BatchApplicationService(batchMapper, productMapper, traceBatchNoGenerator,
+                traceEventApplicationService, new BatchQuantityService(batchOperationItemMapper, saleMapper));
         operatorPrincipal = new TraceSecurityPrincipal(
                 101L, "operator1", "企业操作员", "{noop}pwd",
                 10L, "ORG_FISHERY_01", "第一远洋捕捞公司", "SOURCE",
@@ -1321,26 +1325,44 @@ class BatchApplicationServiceTest {
     }
 
     @Test
-    @DisplayName("详情返回派生剩余量：声明 1000 - 已提交 INPUT 400 = 600；CLOSED 批次剩余量为 0")
+    @DisplayName("详情返回派生剩余量：声明 1000 - 已提交 INPUT 400 - 已售 150 = 450；CLOSED 批次剩余量为 0")
     void getBatchById_remainingQuantityDerived() {
         Batch active = sourceDraft(302L, 10L, 500L, 2L);
         active.setFlowStatus("ACTIVE");
         when(batchMapper.selectByIdIgnoreTenant(302L)).thenReturn(active);
-        when(batchOperationItemMapper.sumSubmittedInputQuantityByBatchIds(List.of(302L)))
-                .thenReturn(List.of(java.util.Map.of("batchId", java.math.BigInteger.valueOf(302L), "total", new BigDecimal("400.000"))));
+        when(batchOperationItemMapper.sumSubmittedInputQuantityByBatchId(302L)).thenReturn(new BigDecimal("400.000"));
+        when(saleMapper.sumSubmittedQuantityByBatchId(302L)).thenReturn(new BigDecimal("150.000"));
 
         BatchResponse resp = batchService.getBatchById(302L, operatorPrincipal);
         assertThat(resp.quantity()).isEqualByComparingTo("1000");
-        assertThat(resp.remainingQuantity()).isEqualByComparingTo("600");
+        assertThat(resp.remainingQuantity()).isEqualByComparingTo("450");
 
         Batch closed = sourceDraft(303L, 10L, 500L, 3L);
         closed.setFlowStatus("CLOSED");
         closed.setConsumedByOperationId(79L);
         when(batchMapper.selectByIdIgnoreTenant(303L)).thenReturn(closed);
-        when(batchOperationItemMapper.sumSubmittedInputQuantityByBatchIds(List.of(303L)))
-                .thenReturn(List.of(java.util.Map.of("batchId", 303L, "total", new BigDecimal("1000.000"))));
+        when(batchOperationItemMapper.sumSubmittedInputQuantityByBatchId(303L)).thenReturn(new BigDecimal("1000.000"));
         BatchResponse closedResp = batchService.getBatchById(303L, operatorPrincipal);
         assertThat(closedResp.remainingQuantity()).isEqualByComparingTo("0");
         assertThat(closedResp.consumedByOperationId()).isEqualTo(79L);
+    }
+
+    @Test
+    @DisplayName("列表派生剩余量同时扣减已提交 INPUT 与已提交终端销售；首次销售标记原样投影")
+    void listBatches_remainingQuantityIncludesSales() {
+        Batch sold = sourceDraft(304L, 10L, 500L, 4L);
+        sold.setFlowStatus("ACTIVE");
+        sold.setQuantity(new BigDecimal("600.000"));
+        sold.setFirstSaleId(9001L);
+        when(batchMapper.countBatches(10L, null, null, null, null)).thenReturn(1L);
+        when(batchMapper.selectBatchesPage(10L, null, null, null, null, 0L, 20)).thenReturn(List.of(sold));
+        when(batchOperationItemMapper.sumSubmittedInputQuantityByBatchIds(List.of(304L))).thenReturn(List.of());
+        when(saleMapper.sumSubmittedQuantityByBatchIds(List.of(304L)))
+                .thenReturn(List.of(java.util.Map.of("batchId", java.math.BigInteger.valueOf(304L), "total", new BigDecimal("200.000"))));
+
+        var page = batchService.listBatches(new com.example.traceability.batch.dto.BatchQueryCriteria(null, null, null, null, 1, 20), operatorPrincipal);
+        assertThat(page.data()).hasSize(1);
+        assertThat(page.data().get(0).remainingQuantity()).isEqualByComparingTo("400");
+        assertThat(page.data().get(0).firstSaleId()).isEqualTo(9001L);
     }
 }

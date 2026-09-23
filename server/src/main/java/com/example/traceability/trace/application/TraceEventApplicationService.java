@@ -71,7 +71,7 @@ public class TraceEventApplicationService {
     /**
      * 只能由结构化业务对象自动投影、人工普通事件接口不得伪造的事件类型（统一业务契约 v1.1 §11）：
      * SOURCE 由来源批次激活产生；PROCESS 由 PROCESS 批次操作提交产生；TRANSPORT / ARRIVAL 由 Shipment 发运 / 到达产生；
-     * SALE 只能由终端 Sale 台账提交产生（Sale 本身尚未实现，人工接口先行拒绝伪造）。
+     * SALE 只能由终端 Sale 台账成功提交产生（{@link #appendSaleEvent}）。
      */
     private static final Set<String> AUTO_ONLY_EVENT_TYPES = Set.of(
             TraceEventType.SOURCE.name(),
@@ -1367,5 +1367,106 @@ public class TraceEventApplicationService {
                             + " 追溯事件身份已被占用，运输状态变更已回滚"
             );
         }
+    }
+
+    /**
+     * 终端销售成功提交时，在调用方事务内为该笔 Sale 自动投影唯一一条 SALE 追溯事件。
+     * <p>
+     * 唯一可靠触发源：Sale 成功提交（统一业务契约 v1.1 §11）。SALE 事件不承担数量扣减（§15 第 4 条），
+     * 数量台账是 {@code sale} 表。事件记录组织为销售 RETAILER，场所为销售门店，业务发生时间与 Sale 完全一致；
+     * 幂等身份由 {@link #saleEventIdempotencyKey(Long)} 决定，并由唯一约束
+     * {@code uk_trace_event_org_idempotency} 保证每笔 Sale 至多一条 SALE；人工接口拒绝 {@code SYS:} 前缀与 SALE 类型。
+     * </p>
+     *
+     * @param projection    销售投影上下文
+     * @param operatorId    提交销售的操作人 ID
+     * @param recordedAtUtc 系统登记时间 (UTC)
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void appendSaleEvent(SaleProjection projection, Long operatorId, LocalDateTime recordedAtUtc) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("sourceObjectType", "SALE");
+        details.put("sourceObjectId", projection.saleId());
+        details.put("traceBatchNo", projection.traceBatchNo());
+        details.put("quantity", projection.quantity().toPlainString());
+        details.put("unitCode", projection.unitCode());
+        details.put("siteId", projection.siteId());
+        details.put("siteName", projection.siteName());
+        details.put("remainingAfter", projection.remainingAfter().toPlainString());
+        details.put("soldOut", projection.soldOut());
+        details.put("occurredAtBasis", "SALE_OCCURRED");
+
+        String summary = "终端销售 " + plain(projection.quantity()) + " " + projection.unitCode() + "：" + projection.siteName();
+
+        TraceEvent event = new TraceEvent();
+        event.setBatchId(projection.batchId());
+        event.setOrgId(projection.orgId());
+        event.setSiteId(projection.siteId());
+        event.setEventType(TraceEventType.SALE.name());
+        event.setOccurredAt(projection.occurredAtUtc());
+        event.setRecordedAt(recordedAtUtc);
+        event.setOperatorId(operatorId);
+        // 门店操作员在页面人工登记销售，沿用既有 MANUAL 语义
+        event.setDataSource(DataSource.MANUAL.name());
+        event.setStatus(TraceEventStatus.SUBMITTED.name());
+        event.setIdempotencyKey(saleEventIdempotencyKey(projection.saleId()));
+        event.setCorrectsEventId(null);
+        event.setCorrectionReason(null);
+        event.setSummary(summary.length() > 500 ? summary.substring(0, 500) : summary);
+        event.setDetailsJson(objectMapper.writeValueAsString(details));
+        event.setVersion(0L);
+        event.setIsDeleted(0);
+        event.setCreatedAt(recordedAtUtc);
+        event.setCreatedBy(operatorId);
+        event.setUpdatedAt(recordedAtUtc);
+        event.setUpdatedBy(operatorId);
+
+        try {
+            traceEventMapper.insert(event);
+        } catch (DuplicateKeyException e) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "SALE_EVENT_CONFLICT",
+                    "销售追溯事件冲突",
+                    "终端销售 " + projection.saleId() + " 的 SALE 追溯事件身份已被占用，销售提交已回滚"
+            );
+        }
+    }
+
+    /**
+     * SALE 事件的服务端幂等身份（保留前缀 {@code SYS:}，人工接口不可使用）：一笔 Sale 恰好一条。
+     */
+    public static String saleEventIdempotencyKey(Long saleId) {
+        return RESERVED_IDEMPOTENCY_PREFIX + "SALE:SALE:" + saleId;
+    }
+
+    /**
+     * SALE 事件投影所需的终端销售结构化事实快照。
+     *
+     * @param saleId         销售 ID
+     * @param batchId        销售批次 ID
+     * @param traceBatchNo   销售批次追溯批次号
+     * @param orgId          销售组织（当前责任 RETAILER）
+     * @param siteId         销售门店场所 ID
+     * @param siteName       销售门店名称
+     * @param quantity       销售数量
+     * @param unitCode       计量单位
+     * @param occurredAtUtc  销售业务发生时间 (UTC，与 sale.occurred_at 一致)
+     * @param remainingAfter 本次销售后派生剩余量
+     * @param soldOut        本次销售是否售罄并关闭批次
+     */
+    public record SaleProjection(
+            Long saleId,
+            Long batchId,
+            String traceBatchNo,
+            Long orgId,
+            Long siteId,
+            String siteName,
+            BigDecimal quantity,
+            String unitCode,
+            LocalDateTime occurredAtUtc,
+            BigDecimal remainingAfter,
+            boolean soldOut
+    ) {
     }
 }

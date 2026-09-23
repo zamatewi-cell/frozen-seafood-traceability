@@ -39,6 +39,7 @@ public record BatchResponse(
         String riskStatus,
         Long producedByOperationId,
         Long consumedByOperationId,
+        Long firstSaleId,
         Long version,
         @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ssXXX", timezone = "UTC")
         OffsetDateTime createdAt,
@@ -49,8 +50,8 @@ public record BatchResponse(
 ) {
 
     /**
-     * 不查询操作台账的简化投影：CLOSED 批次剩余量为 0，其余批次剩余量等于声明数量。
-     * 仅适用于尚未参与任何已提交批次操作的批次（例如刚创建或刚激活的草稿）；
+     * 不查询操作与销售台账的简化投影：CLOSED 批次剩余量为 0，其余批次剩余量等于声明数量。
+     * 仅适用于尚未参与任何已提交批次操作或终端销售的批次（例如刚创建或刚激活的草稿）；
      * 其余场景必须使用 {@link #fromEntity(Batch, BigDecimal)} 传入由已提交记录派生的剩余量。
      */
     public static BatchResponse fromEntity(Batch b) {
@@ -65,7 +66,7 @@ public record BatchResponse(
      * 批次白名单投影。
      *
      * @param b                 批次实体
-     * @param remainingQuantity 派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量（Sale 与处置于后续 Slice 加入）
+     * @param remainingQuantity 派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量 - 已提交终端销售数量（处置属于 Phase B）
      */
     public static BatchResponse fromEntity(Batch b, BigDecimal remainingQuantity) {
         if (b == null) {
@@ -91,6 +92,7 @@ public record BatchResponse(
                 b.getRiskStatus(),
                 b.getProducedByOperationId(),
                 b.getConsumedByOperationId(),
+                b.getFirstSaleId(),
                 b.getVersion(),
                 b.getCreatedAt() != null ? b.getCreatedAt().atOffset(ZoneOffset.UTC) : null,
                 b.getCreatedBy(),

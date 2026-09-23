@@ -10,6 +10,7 @@ import com.example.traceability.batch.domain.BatchOperationType;
 import com.example.traceability.batch.domain.BatchRelation;
 import com.example.traceability.batch.domain.BatchRelationType;
 import com.example.traceability.batch.domain.BatchRiskStatus;
+import com.example.traceability.batch.domain.BatchSaleGuard;
 import com.example.traceability.batch.domain.BatchType;
 import com.example.traceability.batch.domain.TraceBatchNoGenerator;
 import com.example.traceability.batch.dto.BatchOperationCreateRequest;
@@ -89,6 +90,7 @@ public class BatchOperationApplicationService {
     private final ProductMapper productMapper;
     private final TraceBatchNoGenerator traceBatchNoGenerator;
     private final TraceEventApplicationService traceEventService;
+    private final BatchQuantityService batchQuantityService;
 
     public BatchOperationApplicationService(
             BatchOperationMapper operationMapper,
@@ -98,7 +100,8 @@ public class BatchOperationApplicationService {
             TransferMapper transferMapper,
             ProductMapper productMapper,
             TraceBatchNoGenerator traceBatchNoGenerator,
-            TraceEventApplicationService traceEventService
+            TraceEventApplicationService traceEventService,
+            BatchQuantityService batchQuantityService
     ) {
         this.operationMapper = Objects.requireNonNull(operationMapper, "operationMapper 不能为空");
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper 不能为空");
@@ -108,6 +111,7 @@ public class BatchOperationApplicationService {
         this.productMapper = Objects.requireNonNull(productMapper, "productMapper 不能为空");
         this.traceBatchNoGenerator = Objects.requireNonNull(traceBatchNoGenerator, "traceBatchNoGenerator 不能为空");
         this.traceEventService = Objects.requireNonNull(traceEventService, "traceEventService 不能为空");
+        this.batchQuantityService = Objects.requireNonNull(batchQuantityService, "batchQuantityService 不能为空");
     }
 
     // =====================================================================================
@@ -661,7 +665,8 @@ public class BatchOperationApplicationService {
     }
 
     /**
-     * INPUT 可全量消耗前提：当前责任组织、ACTIVE+NORMAL、未被操作消耗、无未结束交接、数量等于当前全部剩余量。
+     * INPUT 可全量消耗前提：当前责任组织、ACTIVE+NORMAL、未被操作消耗、未开始终端销售、无未结束交接、数量等于当前全部剩余量。
+     * 首次销售锁定适用于全部操作类型（PROCESS / SPLIT / MERGE / REPACK 都必须经过本 INPUT 校验）。
      */
     private void verifyInputConsumable(Batch input, BigDecimal requestedQuantity, Long orgId) {
         if (!Objects.equals(input.getOrgId(), orgId)) {
@@ -677,24 +682,17 @@ public class BatchOperationApplicationService {
                     "输入批次 " + input.getTraceBatchNo() + " 必须为 ACTIVE+NORMAL (flowStatus="
                             + input.getFlowStatus() + ", riskStatus=" + input.getRiskStatus() + ")");
         }
+        BatchSaleGuard.rejectIfSaleStarted(input, "加工、拆分、合并或分装");
         if (transferMapper.countActiveTransfersByBatchId(input.getId()) > 0) {
             throw new BusinessException(HttpStatus.CONFLICT, "BATCH_TRANSFER_OPEN", "批次存在未结束交接",
                     "输入批次 " + input.getTraceBatchNo() + " 存在草稿(DRAFT)或待接收(PENDING)交接，请先删除草稿或等待交接结束");
         }
-        BigDecimal remaining = remainingQuantityOf(input);
+        BigDecimal remaining = batchQuantityService.remainingOf(input);
         if (requestedQuantity.compareTo(remaining) != 0) {
             throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "PARTIAL_INPUT_NOT_ALLOWED", "禁止部分投入",
                     "INPUT 必须全量消耗输入批次当前剩余 " + remaining.toPlainString() + " kg（本次 "
                             + requestedQuantity.toPlainString() + " kg）；如需部分加工，请先执行 SPLIT 拆分");
         }
-    }
-
-    /**
-     * 派生剩余量 = 声明数量 - 已提交操作 INPUT 累计量（Sale 与处置于后续 Slice 加入）。
-     */
-    private BigDecimal remainingQuantityOf(Batch batch) {
-        BigDecimal consumed = itemMapper.sumSubmittedInputQuantityByBatchId(batch.getId());
-        return batch.getQuantity().subtract(consumed != null ? consumed : BigDecimal.ZERO);
     }
 
     private Long resolveOutputProductId(BatchOperationType opType, BatchOperationItemRequest out, Batch input) {

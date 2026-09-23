@@ -12,7 +12,6 @@ import com.example.traceability.batch.dto.BatchQueryCriteria;
 import com.example.traceability.batch.dto.BatchResponse;
 import com.example.traceability.batch.dto.BatchSubmitRequest;
 import com.example.traceability.batch.mapper.BatchMapper;
-import com.example.traceability.batch.mapper.BatchOperationItemMapper;
 import com.example.traceability.common.envelope.PageMeta;
 import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.common.exception.BusinessException;
@@ -30,7 +29,6 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -53,17 +51,17 @@ public class BatchApplicationService {
     private final ProductMapper productMapper;
     private final TraceBatchNoGenerator traceBatchNoGenerator;
     private final TraceEventApplicationService traceEventApplicationService;
-    private final BatchOperationItemMapper batchOperationItemMapper;
+    private final BatchQuantityService batchQuantityService;
 
     public BatchApplicationService(
             BatchMapper batchMapper,
             ProductMapper productMapper,
             TraceBatchNoGenerator traceBatchNoGenerator,
             TraceEventApplicationService traceEventApplicationService,
-            BatchOperationItemMapper batchOperationItemMapper
+            BatchQuantityService batchQuantityService
     ) {
         this.batchMapper = batchMapper;
-        this.batchOperationItemMapper = batchOperationItemMapper;
+        this.batchQuantityService = batchQuantityService;
         this.productMapper = productMapper;
         this.traceBatchNoGenerator = traceBatchNoGenerator;
         this.traceEventApplicationService = traceEventApplicationService;
@@ -116,9 +114,9 @@ public class BatchApplicationService {
         long offset = (long) (criteria.page() - 1) * criteria.size();
         List<Batch> records = batchMapper.selectBatchesPage(targetOrgId, cleanTraceBatchNo, cleanExternalBatchNo, normalizedFlowStatus, normalizedRiskStatus, offset, criteria.size());
 
-        Map<Long, BigDecimal> consumed = consumedQuantities(records.stream().map(Batch::getId).toList());
+        Map<Long, BigDecimal> remaining = batchQuantityService.remainingOf(records);
         List<BatchResponse> dtos = records.stream()
-                .map(b -> BatchResponse.fromEntity(b, remainingQuantity(b, consumed.get(b.getId()))))
+                .map(b -> BatchResponse.fromEntity(b, remaining.get(b.getId())))
                 .toList();
 
         PageMeta pageMeta = new PageMeta(criteria.page(), criteria.size(), totalCount);
@@ -150,8 +148,7 @@ public class BatchApplicationService {
             );
         }
 
-        Map<Long, BigDecimal> consumed = consumedQuantities(List.of(batch.getId()));
-        return BatchResponse.fromEntity(batch, remainingQuantity(batch, consumed.get(batch.getId())));
+        return BatchResponse.fromEntity(batch, batchQuantityService.remainingOf(batch));
     }
 
     /**
@@ -598,38 +595,6 @@ public class BatchApplicationService {
                     "该批次由批次操作产出，只能随批次操作提交激活，不能通过普通批次接口修改或提交"
             );
         }
-    }
-
-    /**
-     * 批量读取各批次在已提交批次操作中的累计 INPUT 消耗量。
-     */
-    private Map<Long, BigDecimal> consumedQuantities(List<Long> batchIds) {
-        Map<Long, BigDecimal> result = new HashMap<>();
-        if (batchIds.isEmpty()) {
-            return result;
-        }
-        for (Map<String, Object> row : batchOperationItemMapper.sumSubmittedInputQuantityByBatchIds(batchIds)) {
-            Object id = row.get("batchId");
-            Object total = row.get("total");
-            if (id instanceof Number n && total != null) {
-                result.put(n.longValue(), total instanceof BigDecimal bd ? bd : new BigDecimal(total.toString()));
-            }
-        }
-        return result;
-    }
-
-    /**
-     * 派生剩余量 = 声明数量 - 已提交批次操作 INPUT 消耗量（Sale 与处置于后续 Slice 加入）；CLOSED 批次剩余量为 0。
-     */
-    private static BigDecimal remainingQuantity(Batch batch, BigDecimal consumed) {
-        if (BatchFlowStatus.CLOSED.name().equals(batch.getFlowStatus())) {
-            return BigDecimal.ZERO;
-        }
-        if (batch.getQuantity() == null) {
-            return null;
-        }
-        BigDecimal remaining = batch.getQuantity().subtract(consumed != null ? consumed : BigDecimal.ZERO);
-        return remaining.signum() < 0 ? BigDecimal.ZERO : remaining;
     }
 
     private void checkSourceOrganization(TraceSecurityPrincipal principal, String detail) {

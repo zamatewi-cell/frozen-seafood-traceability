@@ -23,16 +23,17 @@ export function canShip(user: CurrentUser | null | undefined): boolean {
   return isOperator(user) && user.orgType !== 'CARRIER'
 }
 
-/** 当前责任组织的操作员可以对 ACTIVE + NORMAL 批次发起交接。 */
+/** 当前责任组织的操作员可以对 ACTIVE + NORMAL、尚未开始终端销售的批次发起交接。 */
 export function canInitiateTransfer(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
   return Boolean(canShip(user) && batch
     && batch.orgId === user?.orgId
     && batch.flowStatus === 'ACTIVE'
-    && batch.riskStatus === 'NORMAL')
+    && batch.riskStatus === 'NORMAL'
+    && !batch.firstSaleId)
 }
 
 /**
- * 加工企业（PROCESSOR）的操作员可以对本组织负责、ACTIVE + NORMAL 且仍有剩余量的批次执行加工 / 拆分；
+ * 加工企业（PROCESSOR）的操作员可以对本组织负责、ACTIVE + NORMAL、未开始终端销售且仍有剩余量的批次执行加工 / 拆分；
  * 是否存在未结束交接由页面结合交接列表判断，服务端仍独立校验全部前提。
  */
 export function canOperateBatch(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
@@ -41,7 +42,21 @@ export function canOperateBatch(user: CurrentUser | null | undefined, batch: Bat
     && batch.flowStatus === 'ACTIVE'
     && batch.riskStatus === 'NORMAL'
     && !batch.consumedByOperationId
+    && !batch.firstSaleId
     && (batch.remainingQuantity === undefined || Number(batch.remainingQuantity) > 0))
+}
+
+/**
+ * 终端销售：零售企业（RETAILER）的企业操作员（非平台角色）对本组织负责、ACTIVE + NORMAL 且仍有剩余量的批次提交。
+ * 首次销售后仍可继续部分销售；服务端仍独立校验门店、剩余量、未结束交接与全部权限。
+ */
+export function canRecordSale(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
+  return Boolean(isOperator(user) && user.orgType === 'RETAILER' && batch
+    && batch.orgId === user.orgId
+    && batch.flowStatus === 'ACTIVE'
+    && batch.riskStatus === 'NORMAL'
+    && batch.remainingQuantity !== undefined
+    && Number(batch.remainingQuantity) > 0)
 }
 
 /**

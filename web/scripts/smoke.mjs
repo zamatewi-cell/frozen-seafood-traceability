@@ -1,8 +1,8 @@
 ﻿/**
- * Phase 0 + Phase A / Slice 1 ~ Slice 4 真实浏览器冒烟：真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue。
+ * Phase 0 + Phase A / Slice 1 ~ Slice 5 真实浏览器冒烟：真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue。
  *
  * 1. 在 MySQL 8.4 容器中新建隔离 schema（seafood_trace_phase0_demo_<随机后缀>），绝不触碰 seafood_trace；
- * 2. 以进程级随机 pepper 启动 Spring Boot（Flyway 在空 schema 上执行 V1~V9）；
+ * 2. 以进程级随机 pepper 启动 Spring Boot（Flyway 在空 schema 上执行 V1~V11）；
  * 3. 通过 SQL 准备基础资料（两个来源组织、角色、账号、产品），通过真实 HTTP API（CSRF + Session）创建与提交来源批次、激活公开码；
  *    Phase 0 没有冻结 / 召回 / 关闭接口，FROZEN、RECALLED、CLOSED 状态在隔离 schema 中直接写入以验证展示与筛选；
  * 4. Playwright 在不使用任何拦截或替身的情况下走完整企业端与消费者路径，并在浏览器中真实新建、激活来源批次 SRC-2026-001；
@@ -13,10 +13,14 @@
  * 8. Slice 4：加工企业在本组织自有冷库对 B2、B3 各记录一次冷库入库与出库（先经真实 API 探测他组织冷库被 403 拒绝），
  *    结束后查询 MySQL 验证批次数量 / 责任组织 / 双状态 / 版本不变、每批恰好一条 IN + OUT、场所为加工企业启用冷库，
  *    且无批次 / 谱系 / 交接 / 运输副作用；
- * 9. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
+ * 9. Slice 5：零售企业（门店 STORE）加入；加工企业在浏览器中为 B2 / B3 创建 T2 / T3 并装入同一运输任务 S1，承运商发运 / 到达，
+ *    零售企业接受后在批次详情把 B2 售 200 + 400、B3 售 360 至售罄；B2 首次销售后在同一会话内经真实 API 探测
+ *    交接 / 批次操作 / 非门店 / 停用门店 / 他组织门店 / 超卖 / 人工 SALE 均被拒绝；结束后查询 MySQL 验证
+ *    责任组织、售罄关闭、Sale 行与 SALE 事件一一对应、无超卖、无重复事件、探测零写入；
+ * 10. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
  *
  * 密码、pepper、Cookie 与 CSRF 凭据只在进程环境与内存中传递，从不打印。
- * 例外：SMOKE_KEEP=true 手工验收模式只准备 Slice 2 基础资料，打印一次三个临时账号供人工在真实浏览器中操作，
+ * 例外：SMOKE_KEEP=true 手工验收模式只准备 Slice 2 / Slice 5 基础资料，打印一次四个临时账号供人工在真实浏览器中操作，
  * 并保持 Spring Boot 与 Vite 运行，直到按 Ctrl+C 后清理；这些账号只存在于随后被删除的隔离 schema 中。
  */
 import { randomBytes, randomUUID, pbkdf2Sync } from 'node:crypto'
@@ -528,6 +532,117 @@ function verifySlice4Database(master, ids, snapshot) {
     .split('\n').map((line) => `  ${line}`).join('\n'))
 }
 
+/**
+ * Slice 5 基础资料：零售企业（RETAILER）与 OPERATOR 账号、启用门店 STORE（运输目的地与销售场所）、
+ * 用于拒绝探测的停用门店与配送中心，以及加工企业自有门店（他组织门店探测）。只准备基础资料，不预造任何单据。
+ */
+function seedSlice5MasterData(suffix, password, slice2) {
+  mysql(`
+    START TRANSACTION;
+    SET @role = (SELECT id FROM role WHERE role_code = 'OPERATOR');
+    INSERT INTO organization (org_no, name, org_type, status) VALUES ('S5_RET_${suffix}', 'Slice5海港生鲜零售_${suffix}', 'RETAILER', 'ACTIVE');
+    SET @ret = LAST_INSERT_ID();
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@ret, 's5_ret_${suffix}', 'Slice5零售操作员', ${sqlText(springPbkdf2(password))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@ret, 'S5-STORE', 'Slice5海港一号门店', 'STORE', 'ACTIVE');
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@ret, 'S5-STORE-OFF', 'Slice5已停用旧店', 'STORE', 'INACTIVE');
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@ret, 'S5-DC', 'Slice5配送中心', 'LOGISTICS_HUB', 'ACTIVE');
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (${slice2.processorOrgId}, 'S2-PRC-STORE', 'Slice2加工企业直营店', 'STORE', 'ACTIVE');
+    COMMIT;
+  `, { database: schema })
+  const ids = mysql(`SELECT
+      (SELECT id FROM organization WHERE org_no = 'S5_RET_${suffix}'),
+      (SELECT s.id FROM site s JOIN organization o ON o.id = s.org_id WHERE o.org_no = 'S5_RET_${suffix}' AND s.site_no = 'S5-STORE'),
+      (SELECT s.id FROM site s JOIN organization o ON o.id = s.org_id WHERE o.org_no = 'S5_RET_${suffix}' AND s.site_no = 'S5-STORE-OFF'),
+      (SELECT s.id FROM site s JOIN organization o ON o.id = s.org_id WHERE o.org_no = 'S5_RET_${suffix}' AND s.site_no = 'S5-DC'),
+      (SELECT id FROM site WHERE org_id = ${slice2.processorOrgId} AND site_no = 'S2-PRC-STORE');`, { database: schema }).split('\t').map(Number)
+  return {
+    retailerOrgId: ids[0],
+    retailerOrgName: `Slice5海港生鲜零售_${suffix}`,
+    storeSiteId: ids[1],
+    storeName: 'Slice5海港一号门店',
+    inactiveStoreId: ids[2],
+    hubSiteId: ids[3],
+    processorStoreSiteId: ids[4],
+    username: `s5_ret_${suffix}`
+  }
+}
+
+/**
+ * Slice 5 最终数据库事实：T2 / T3 同一运输任务 S1 且 ACCEPTED；B2 / B3 责任组织为零售企业、售罄 CLOSED、声明数量不变；
+ * Sale 行（B2 = 200 + 400，B3 = 360）全部在零售门店、由零售企业提交；SALE 事件与 Sale 一一对应（系统键 + 来源对象）；
+ * 派生剩余量为 0、无超卖、无重复事件；首次销售后的探测（交接 / 批次操作 / 非法门店 / 超卖 / 人工 SALE）零写入。
+ */
+function verifySlice5Database(slice2, retail, ids) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const perBatch = (id) => q(`SELECT
+      b.org_id = ${retail.retailerOrgId}, b.flow_status, b.risk_status, b.quantity,
+      b.first_sale_id = (SELECT MIN(s.id) FROM sale s WHERE s.batch_id = b.id),
+      b.quantity
+        - (SELECT COALESCE(SUM(i.quantity), 0) FROM batch_operation_item i JOIN batch_operation o ON o.id = i.operation_id
+            WHERE i.batch_id = b.id AND i.role = 'INPUT' AND i.is_deleted = 0 AND o.status = 'SUBMITTED' AND o.is_deleted = 0)
+        - (SELECT COALESCE(SUM(s.quantity), 0) FROM sale s WHERE s.batch_id = b.id AND s.status = 'SUBMITTED'),
+      (SELECT COALESCE(GROUP_CONCAT(s.quantity ORDER BY s.id SEPARATOR ','), '') FROM sale s WHERE s.batch_id = b.id),
+      (SELECT COUNT(*) FROM sale s WHERE s.batch_id = b.id AND s.status = 'SUBMITTED' AND s.org_id = ${retail.retailerOrgId} AND s.site_id = ${retail.storeSiteId}),
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.event_type = 'SALE'),
+      (SELECT COUNT(*) FROM trace_event e JOIN sale s ON e.idempotency_key = CONCAT('SYS:SALE:SALE:', s.id)
+         WHERE e.batch_id = b.id AND s.batch_id = b.id AND e.event_type = 'SALE' AND e.status = 'SUBMITTED'
+           AND e.org_id = s.org_id AND e.site_id = s.site_id AND e.occurred_at = s.occurred_at
+           AND JSON_UNQUOTE(JSON_EXTRACT(e.details_json, '$.sourceObjectType')) = 'SALE'
+           AND CAST(JSON_EXTRACT(e.details_json, '$.sourceObjectId') AS UNSIGNED) = s.id),
+      (SELECT COUNT(*) FROM transfer t WHERE t.batch_id = b.id AND t.is_deleted = 0 AND t.receiver_org_id = ${retail.retailerOrgId}),
+      (SELECT COUNT(*) FROM transfer t WHERE t.batch_id = b.id AND t.status = 'ACCEPTED' AND t.receiver_org_id = ${retail.retailerOrgId}
+         AND t.sender_org_id = ${slice2.processorOrgId})
+    FROM batch b WHERE b.id = ${id};`).split('\t')
+  const [b2Owned, b2Flow, b2Risk, b2Qty, b2First, b2Remaining, b2Sales, b2SalesAtStore, b2Events, b2BackedEvents, b2Transfers, b2Accepted] = perBatch(ids.b2Id)
+  const [b3Owned, b3Flow, b3Risk, b3Qty, b3First, b3Remaining, b3Sales, b3SalesAtStore, b3Events, b3BackedEvents, b3Transfers, b3Accepted] = perBatch(ids.b3Id)
+  const [shipments, sameShipment, shipmentOk, totalSales, totalSaleEvents, retailerOtherEvents, retailerOps, batchCount, relationCount, oversold, retailerTransfers] = q(`SELECT
+      (SELECT COUNT(DISTINCT t.shipment_id) FROM transfer t WHERE t.batch_id IN (${ids.b2Id}, ${ids.b3Id}) AND t.receiver_org_id = ${retail.retailerOrgId}),
+      (SELECT COUNT(*) FROM transfer t2 JOIN transfer t3 ON t2.shipment_id = t3.shipment_id
+         WHERE t2.batch_id = ${ids.b2Id} AND t3.batch_id = ${ids.b3Id} AND t2.receiver_org_id = ${retail.retailerOrgId} AND t3.receiver_org_id = ${retail.retailerOrgId}),
+      (SELECT COUNT(*) FROM shipment s JOIN transfer t ON t.shipment_id = s.id
+         WHERE t.batch_id = ${ids.b2Id} AND t.receiver_org_id = ${retail.retailerOrgId} AND s.status = 'DELIVERED'
+           AND s.sender_org_id = ${slice2.processorOrgId} AND s.receiver_org_id = ${retail.retailerOrgId} AND s.carrier_org_id = ${slice2.carrierOrgId}
+           AND s.destination_site_id = ${retail.storeSiteId}),
+      (SELECT COUNT(*) FROM sale),
+      (SELECT COUNT(*) FROM trace_event WHERE event_type = 'SALE'),
+      (SELECT COUNT(*) FROM trace_event WHERE org_id = ${retail.retailerOrgId} AND event_type <> 'SALE'),
+      (SELECT COUNT(*) FROM batch_operation WHERE org_id = ${retail.retailerOrgId}),
+      (SELECT COUNT(*) FROM batch WHERE creation_org_id IN (${slice2.sourceOrgId}, ${slice2.processorOrgId}, ${retail.retailerOrgId})),
+      (SELECT COUNT(*) FROM batch_relation r JOIN batch b ON b.id = r.child_batch_id WHERE b.creation_org_id IN (${slice2.sourceOrgId}, ${slice2.processorOrgId})),
+      (SELECT COUNT(*) FROM batch b WHERE (SELECT COALESCE(SUM(s.quantity), 0) FROM sale s WHERE s.batch_id = b.id) > b.quantity),
+      (SELECT COUNT(*) FROM transfer WHERE sender_org_id = ${retail.retailerOrgId});`).split('\t')
+  const facts = {
+    'T2 / T3 装入同一运输任务 S1（DELIVERED，加工 → 零售，独立承运商，目的地为零售门店）': shipments === '1' && sameShipment === '1' && shipmentOk === '1',
+    'T2 / T3 = ACCEPTED，每批恰好一张到零售企业的交接': b2Transfers === '1' && b3Transfers === '1' && b2Accepted === '1' && b3Accepted === '1',
+    '首次销售后的交接探测零写入（零售企业未发出任何交接）': retailerTransfers === '0',
+    'B2 / B3 责任组织 = 零售企业（Sale 不改变责任组织）': b2Owned === '1' && b3Owned === '1',
+    'B2 / B3 = CLOSED + NORMAL，声明数量 600 / 360 不变': b2Flow === 'CLOSED' && b2Risk === 'NORMAL' && Number(b2Qty) === 600
+      && b3Flow === 'CLOSED' && b3Risk === 'NORMAL' && Number(b3Qty) === 360,
+    'B2 / B3 派生剩余量 = 0': Number(b2Remaining) === 0 && Number(b3Remaining) === 0,
+    'B2 / B3 first_sale_id = 各自第一笔 Sale': b2First === '1' && b3First === '1',
+    'B2 Sale = 200 + 400，B3 Sale = 360（SUBMITTED，零售组织，零售门店）': b2Sales === '200.000,400.000' && b3Sales === '360.000'
+      && b2SalesAtStore === '2' && b3SalesAtStore === '1',
+    'SALE 事件 B2 = 2、B3 = 1，且每条都由对应 Sale 支撑（系统键 / 组织 / 门店 / 时间 / 来源对象）': b2Events === '2' && b3Events === '1'
+      && b2BackedEvents === '2' && b3BackedEvents === '1',
+    '全库 Sale = 3、SALE 事件 = 3（无重复事件，超卖 / 非法门店 / 重放探测未写入）': totalSales === '3' && totalSaleEvents === '3',
+    '无超卖（任何批次已售 ≤ 声明数量）': oversold === '0',
+    '零售企业无批次操作、除 SALE 外无其他事件（人工 SALE 探测未写入）': retailerOps === '0' && retailerOtherEvents === '0',
+    'Batch = 4（B0 / B1 / B2 / B3，无新批次），BatchRelation = 3': batchCount === '4' && relationCount === '3'
+  }
+  for (const [fact, ok] of Object.entries(facts)) console.log(`[smoke] MySQL ${ok ? '✔' : '✘'} ${fact}`)
+  if (Object.values(facts).some((ok) => !ok)) {
+    throw new Error(`Slice 5 数据库事实不符合预期: b2=${perBatch(ids.b2Id)} b3=${perBatch(ids.b3Id)} shipments=${shipments}/${sameShipment}/${shipmentOk} sales=${totalSales} events=${totalSaleEvents} retailerTransfers=${retailerTransfers}`)
+  }
+  console.log('[smoke] MySQL sale（B2 / B3）:')
+  console.log(q(`SELECT id, batch_id, org_id, site_id, quantity, status, occurred_at FROM sale ORDER BY id;`)
+    .split('\n').map((line) => `  ${line}`).join('\n'))
+  console.log('[smoke] MySQL batch（B2 / B3）:')
+  console.log(q(`SELECT id, trace_batch_no, org_id, quantity, flow_status, risk_status, first_sale_id, version FROM batch WHERE id IN (${ids.b2Id}, ${ids.b3Id}) ORDER BY id;`)
+    .split('\n').map((line) => `  ${line}`).join('\n'))
+}
+
 function startViteDevServer() {
   const npmCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm'
   const npmArgs = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm.cmd run dev'] : ['run', 'dev']
@@ -599,6 +714,8 @@ try {
     processor: `S2!${randomBytes(18).toString('base64url')}`
   }
   const slice2 = seedSlice2MasterData(suffix, slice2Passwords)
+  const slice5Password = `S5!${randomBytes(18).toString('base64url')}`
+  const retail = seedSlice5MasterData(suffix, slice5Password, slice2)
   const b0 = await seedSlice2SourceBatch(slice2, master.productFish, slice2Passwords.source)
   console.log(`[smoke] Slice 2 B0 已由来源账号经真实 API 创建并激活: ${b0.traceBatchNo} ${b0.flowStatus}/${b0.riskStatus} ${b0.quantity} ${b0.unitCode}`)
 
@@ -609,10 +726,13 @@ try {
     console.log(`[smoke] 来源企业 ${slice2.sourceOrgName}: ${slice2.usernames.source} / ${slice2Passwords.source}`)
     console.log(`[smoke] 承运企业 ${slice2.carrierOrgName}: ${slice2.usernames.carrier} / ${slice2Passwords.carrier}`)
     console.log(`[smoke] 加工企业 ${slice2.processorOrgName}: ${slice2.usernames.processor} / ${slice2Passwords.processor}`)
+    console.log(`[smoke] 零售企业 ${retail.retailerOrgName}: ${retail.username} / ${slice5Password}`)
     console.log(`[smoke] B0: /app/batches/${b0.id}  (${b0.traceBatchNo}, 1000 kg ACTIVE/NORMAL)`)
     console.log('[smoke] Slice 3：加工企业接受 B0 后，在 B0 详情执行“加工”（产出 960，损耗 30，留样 10），再对 B1 执行“拆分”（600 + 360）。')
     console.log(`[smoke] Slice 4：加工企业在 B2、B3 详情“自有冷库仓储”中选择 ${slice2.coldStoreName}，各执行一次冷库入库与冷库出库。`)
-    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 / Slice 3 / Slice 4 数据库事实，再停止服务并删除 schema。')
+    console.log(`[smoke] Slice 5：加工企业为 B2、B3 分别发起交接给 ${retail.retailerOrgName}，在同一运输任务装载两张交接（目的地 ${retail.storeName}）并提交；承运商发运、到达；`)
+    console.log(`[smoke]          零售企业接受后在 B2 详情"终端销售"中于 ${retail.storeName} 先售 200、再售 400，在 B3 售出全部 360。`)
+    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 ~ Slice 5 数据库事实，再停止服务并删除 schema。')
     await waitForInterrupt()
     try {
       verifySlice2Database(slice2, b0.id)
@@ -628,6 +748,11 @@ try {
     if (slice3Ids) {
       try {
         verifySlice4Database(slice2, slice3Ids, null)
+      } catch (verifyError) {
+        console.error(verifyError.message)
+      }
+      try {
+        verifySlice5Database(slice2, retail, slice3Ids)
       } catch (verifyError) {
         console.error(verifyError.message)
       }
@@ -699,6 +824,33 @@ try {
   }, 'tests/e2e/real-slice4.spec.ts')
   verifySlice4Database(slice2, slice3Ids, slice4Before)
   console.log('[smoke] Slice 4 真实加工企业自有冷库入库 / 出库浏览器验收与 MySQL 事实校验通过')
+
+  const traceNo = (id) => mysql(`SELECT trace_batch_no FROM batch WHERE id = ${id};`, { database: schema })
+  await runBrowserSmoke({
+    SLICE5_PROCESSOR_USERNAME: slice2.usernames.processor,
+    SLICE5_PROCESSOR_PASSWORD: slice2Passwords.processor,
+    SLICE5_CARRIER_USERNAME: slice2.usernames.carrier,
+    SLICE5_CARRIER_PASSWORD: slice2Passwords.carrier,
+    SLICE5_RETAILER_USERNAME: retail.username,
+    SLICE5_RETAILER_PASSWORD: slice5Password,
+    SLICE5_EXPECTED: JSON.stringify({
+      b2Id: slice3Ids.b2Id,
+      b3Id: slice3Ids.b3Id,
+      b2TraceBatchNo: traceNo(slice3Ids.b2Id),
+      b3TraceBatchNo: traceNo(slice3Ids.b3Id),
+      processorOrgId: slice2.processorOrgId,
+      processorOrgName: slice2.processorOrgName,
+      carrierOrgName: slice2.carrierOrgName,
+      retailerOrgName: retail.retailerOrgName,
+      processorSiteName: slice2.processorSiteName,
+      retailerStoreName: retail.storeName,
+      retailerHubSiteId: retail.hubSiteId,
+      retailerInactiveStoreId: retail.inactiveStoreId,
+      processorStoreSiteId: retail.processorStoreSiteId
+    })
+  }, 'tests/e2e/real-slice5.spec.ts')
+  verifySlice5Database(slice2, retail, slice3Ids)
+  console.log('[smoke] Slice 5 真实加工 → 零售交接与终端 Sale 浏览器验收与 MySQL 事实校验通过')
   }
 } catch (error) {
   primaryError = error
