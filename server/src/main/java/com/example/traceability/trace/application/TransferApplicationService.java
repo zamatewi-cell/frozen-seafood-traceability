@@ -4,6 +4,7 @@ import com.example.traceability.audit.application.AuditApplicationService;
 import com.example.traceability.batch.domain.Batch;
 import com.example.traceability.batch.domain.BatchFlowStatus;
 import com.example.traceability.batch.domain.BatchRiskStatus;
+import com.example.traceability.batch.domain.BatchSaleGuard;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.batch.mapper.BatchOperationItemMapper;
 import com.example.traceability.common.exception.BusinessException;
@@ -195,6 +196,9 @@ public class TransferApplicationService {
                     "当前批次流转或风险状态不可交接 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")，仅 ACTIVE 且 NORMAL 状态批次允许发起交接"
             );
         }
+
+        // 首次终端销售后永久禁止交接（锁定行当前读 first_sale_id，REPEATABLE READ 下同样可见并发已提交的销售）
+        BatchSaleGuard.rejectIfSaleStarted(batch, "发起交接");
 
         // 3. 检查批次是否已被已提交批次操作作为 INPUT 消耗
         if (batchOperationItemMapper.countSubmittedInputUsageByBatchId(batch.getId()) > 0) {
@@ -605,6 +609,7 @@ public class TransferApplicationService {
                     "批次当前状态不可交接 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")，仅 ACTIVE 且 NORMAL 状态批次允许提交交接"
             );
         }
+        BatchSaleGuard.rejectIfSaleStarted(batch, "提交交接");
         if (batchOperationItemMapper.countSubmittedInputUsageByBatchId(batch.getId()) > 0) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
@@ -797,6 +802,8 @@ public class TransferApplicationService {
                     "关联批次流转或风险状态不可流转 (flowStatus=" + batch.getFlowStatus() + ", riskStatus=" + batch.getRiskStatus() + ")，已被质量冻结或召回，禁止接受交接"
             );
         }
+        // 防御性：已开始终端销售的批次不可能存在未结束交接，若出现则拒绝接受
+        BatchSaleGuard.rejectIfSaleStarted(batch, "接受交接");
 
         // 9. 实收数量差异强制说明
         boolean hasQuantityDiff = req.receivedQuantity().compareTo(transfer.getQuantity()) != 0;

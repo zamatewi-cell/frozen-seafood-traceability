@@ -329,6 +329,39 @@ public interface BatchMapper extends BaseMapper<Batch> {
     );
 
     /**
+     * 终端销售提交时在同一事务内回写批次：首次销售写入 {@code first_sale_id}（写一次，已有值保持不变），
+     * 售罄时 ACTIVE → CLOSED，每次销售版本号 +1。
+     * <p>
+     * 同时约束责任组织、ACTIVE+NORMAL 与未被批次操作全量消耗；影响行数不为 1 时调用方必须回滚整个销售。
+     * {@code first_sale_id} 由复合外键保证只能指向同一批次、同一组织的 Sale。
+     * </p>
+     *
+     * @return 影响行数（1 为成功）
+     */
+    @Update("""
+            UPDATE batch
+            SET first_sale_id = COALESCE(first_sale_id, #{saleId}),
+                flow_status = CASE WHEN #{closeNow} THEN 'CLOSED' ELSE flow_status END,
+                version = version + 1,
+                updated_at = #{nowUtc},
+                updated_by = #{updatedBy}
+            WHERE id = #{id}
+              AND org_id = #{orgId}
+              AND flow_status = 'ACTIVE'
+              AND risk_status = 'NORMAL'
+              AND consumed_by_operation_id IS NULL
+              AND is_deleted = 0
+            """)
+    int applySale(
+            @Param("id") Long id,
+            @Param("orgId") Long orgId,
+            @Param("saleId") Long saleId,
+            @Param("closeNow") boolean closeNow,
+            @Param("nowUtc") LocalDateTime nowUtc,
+            @Param("updatedBy") Long updatedBy
+    );
+
+    /**
      * 批次操作提交时原子激活该操作产出的 OUTPUT 草稿批次（DRAFT+NORMAL -> ACTIVE+NORMAL）。
      *
      * @return 影响行数（1 为成功）

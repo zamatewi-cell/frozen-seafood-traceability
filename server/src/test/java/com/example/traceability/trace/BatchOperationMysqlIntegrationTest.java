@@ -54,8 +54,6 @@ class BatchOperationMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT
     @Autowired
     private BatchRelationMapper relationMapper;
 
-    @Autowired
-    private javax.sql.DataSource dataSource;
 
     // =========================================================================
     // 黄金链
@@ -447,7 +445,7 @@ class BatchOperationMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT
             }
             submitter.start();
             // 确定性同步点：操作提交事务已完成锁前读取，正阻塞在本 schema 的 batch 行锁上
-            awaitRowLockWaitOnBatchTable(submitter);
+            awaitRowLockWait(submitter, "batch");
             try (var ps = holder.prepareStatement(
                     "INSERT INTO transfer (transfer_no, batch_id, sender_org_id, receiver_org_id, quantity, unit_code, status, idempotency_key) "
                             + "VALUES (?, ?, ?, ?, 500.000, 'kg', 'DRAFT', ?)")) {
@@ -484,41 +482,75 @@ class BatchOperationMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT
         assertThat(count("SELECT count(*) FROM batch_relation WHERE operation_id = ?", draft.get("id").asLong())).isZero();
     }
 
-    /**
-     * 等待本 schema 的 batch 表上出现 InnoDB 行锁等待（即操作提交已阻塞在批次行锁上）。
-     * <p>
-     * performance_schema 的锁视图需要管理员权限：被测应用数据源（CI 中为非 root 的 trace_user）不能也不应读取，
-     * 因此仅这一诊断探针沿用 V9 / V10 迁移测试的约定，通过 DB_ROOT_USERNAME / DB_ROOT_PASSWORD 单独建立管理连接；
-     * 应用数据源、权限与业务行为均不变。若提交线程在出现锁等待前就已结束，说明未经过同步点，立即失败。
-     * </p>
-     */
-    private void awaitRowLockWaitOnBatchTable(Thread submitter) throws Exception {
-        String baseUrl = ((com.zaxxer.hikari.HikariDataSource) dataSource).getJdbcUrl();
-        String rootUser = System.getenv().getOrDefault("DB_ROOT_USERNAME", "root");
-        if (rootUser.isBlank()) {
-            rootUser = "root";
-        }
-        String rootPassword = System.getenv().getOrDefault("DB_ROOT_PASSWORD", "");
-        String schema = jdbcTemplate.queryForObject("SELECT DATABASE()", String.class);
-        String probe = "SELECT COUNT(*) FROM performance_schema.data_lock_waits w "
-                + "JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID "
-                + "WHERE l.OBJECT_SCHEMA = ? AND l.OBJECT_NAME = 'batch'";
-        long deadline = System.currentTimeMillis() + 15_000;
-        try (java.sql.Connection admin = java.sql.DriverManager.getConnection(baseUrl, rootUser, rootPassword);
-             java.sql.PreparedStatement ps = admin.prepareStatement(probe)) {
-            ps.setString(1, schema);
-            while (true) {
-                try (java.sql.ResultSet rs = ps.executeQuery()) {
-                    rs.next();
-                    if (rs.getLong(1) > 0) {
-                        return;
-                    }
+    @Test
+    @DisplayName("防御性（种子态，Phase A API 不可触达）：操作提交阻塞在批次行锁期间该输入批次写入首次销售，取得行锁后 409 BATCH_SALE_STARTED，不关闭、不生成谱系")
+    void defensive_operationSubmitWaitingSeesFirstSale() throws Exception {
+        Long b0 = processorHeldBatch("B0SL-" + suffix, new BigDecimal("500.000"));
+        Site processorStore = createSite(receiverOrg.getId(), "PRC-STORE-" + suffix, "加工企业门店-" + suffix, "STORE");
+        JsonNode draft = createOperation("PROCESS", List.of(opInput(b0, "500.000"), opOutput("500.000")));
+
+        AtomicReference<MvcResult> submitResult = new AtomicReference<>();
+        AtomicReference<Throwable> submitError = new AtomicReference<>();
+        Thread submitter = new Thread(() -> {
+            try {
+                submitResult.set(perform(submitOperationRequest(receiverSession, draft.get("id").asLong(), 0L, key("idem-sl-o"))));
+            } catch (Throwable t) {
+                submitError.set(t);
+            }
+        }, "slice5-operation-submitter");
+        java.sql.Connection holder = dataSource.getConnection();
+        try {
+            holder.setAutoCommit(false);
+            try (var ps = holder.prepareStatement("SELECT id FROM batch WHERE id = ? FOR UPDATE")) {
+                ps.setLong(1, b0);
+                ps.executeQuery().close();
+            }
+            submitter.start();
+            awaitRowLockWait(submitter, "batch");
+            long saleId;
+            try (var ps = holder.prepareStatement(
+                    "INSERT INTO sale (org_id, batch_id, site_id, quantity, unit_code, occurred_at, status, idempotency_key, request_hash, created_by) "
+                            + "VALUES (?, ?, ?, 10.000, 'kg', UTC_TIMESTAMP(6), 'SUBMITTED', ?, REPEAT('h', 64), ?)",
+                    java.sql.Statement.RETURN_GENERATED_KEYS)) {
+                ps.setLong(1, receiverOrg.getId());
+                ps.setLong(2, b0);
+                ps.setLong(3, processorStore.getId());
+                ps.setString(4, "sl-" + suffix);
+                ps.setLong(5, receiverUser.getId());
+                ps.executeUpdate();
+                try (var keys = ps.getGeneratedKeys()) {
+                    keys.next();
+                    saleId = keys.getLong(1);
                 }
-                assertThat(submitter.isAlive()).as("operation submit finished without waiting on the batch row lock").isTrue();
-                assertThat(System.currentTimeMillis()).as("operation submit never waited on the batch row lock").isLessThan(deadline);
-                Thread.sleep(20);
+            }
+            try (var ps = holder.prepareStatement("UPDATE batch SET first_sale_id = ? WHERE id = ?")) {
+                ps.setLong(1, saleId);
+                ps.setLong(2, b0);
+                ps.executeUpdate();
+            }
+            holder.commit();
+        } finally {
+            try {
+                if (!holder.getAutoCommit()) {
+                    holder.rollback();
+                }
+            } finally {
+                holder.close();
+            }
+            if (submitter.getState() != Thread.State.NEW) {
+                submitter.join(30_000);
+                assertThat(submitter.isAlive()).as("operation submit thread did not finish").isFalse();
             }
         }
+        if (submitError.get() != null) {
+            throw new AssertionError("operation submit failed", submitError.get());
+        }
+        MvcResult result = submitResult.get();
+        assertThat(result.getResponse().getStatus()).as("body=%s", result.getResponse().getContentAsString()).isEqualTo(409);
+        assertThat(objectMapper.readTree(result.getResponse().getContentAsString()).path("code").asString()).isEqualTo("BATCH_SALE_STARTED");
+        assertBatch(b0, "ACTIVE", "NORMAL", "500.000", "SOURCE");
+        assertThat(count("SELECT count(*) FROM batch_relation WHERE operation_id = ?", draft.get("id").asLong())).isZero();
+        assertThat(count("SELECT count(*) FROM batch WHERE id = ? AND consumed_by_operation_id IS NULL", b0)).isEqualTo(1);
     }
 
     @Test

@@ -433,7 +433,7 @@ public class PublicTraceApplicationService {
             case "WAREHOUSE_OUT" -> "冷库出库";
             case "TRANSPORT" -> "冷链干线运输";
             case "ARRIVAL" -> "冷链运输到达";
-            case "SALE" -> "经销零售出库";
+            case "SALE" -> "终端零售销售";
             default -> eventType;
         };
     }

@@ -1253,6 +1253,72 @@ class TraceEventApplicationServiceTest {
     }
 
     @Nested
+    @DisplayName("SALE 自动投影（Slice 5：仅由终端 Sale 成功提交生成）")
+    class SaleEventTests {
+
+        private TraceEventApplicationService.SaleProjection saleProjection(boolean soldOut) {
+            return new TraceEventApplicationService.SaleProjection(
+                    9001L, 3000L, "TB-B2", 40L, 800L, "零售门店A",
+                    new java.math.BigDecimal("200.000"), "kg",
+                    LocalDateTime.of(2026, 9, 23, 9, 30, 15, 123456000),
+                    soldOut ? java.math.BigDecimal.ZERO : new java.math.BigDecimal("400.000"), soldOut);
+        }
+
+        @Test
+        @DisplayName("appendSaleEvent：落在销售批次、零售组织与门店、系统幂等键 SYS:SALE:SALE:{saleId}、业务时间与 Sale 一致（微秒）、结构化来源为 SALE")
+        void appendSaleEvent_WritesStructuredFacts() throws Exception {
+            LocalDateTime recordedAt = LocalDateTime.of(2026, 9, 23, 9, 31);
+            eventService.appendSaleEvent(saleProjection(false), 401L, recordedAt);
+
+            ArgumentCaptor<TraceEvent> captor = ArgumentCaptor.forClass(TraceEvent.class);
+            verify(traceEventMapper).insert(captor.capture());
+            TraceEvent event = captor.getValue();
+            assertThat(event.getEventType()).isEqualTo("SALE");
+            assertThat(event.getBatchId()).isEqualTo(3000L);
+            assertThat(event.getOrgId()).isEqualTo(40L);
+            assertThat(event.getSiteId()).isEqualTo(800L);
+            assertThat(event.getOperatorId()).isEqualTo(401L);
+            assertThat(event.getIdempotencyKey()).isEqualTo("SYS:SALE:SALE:9001");
+            assertThat(event.getIdempotencyKey()).isEqualTo(TraceEventApplicationService.saleEventIdempotencyKey(9001L));
+            assertThat(event.getOccurredAt()).isEqualTo(LocalDateTime.of(2026, 9, 23, 9, 30, 15, 123456000));
+            assertThat(event.getRecordedAt()).isEqualTo(recordedAt);
+            assertThat(event.getStatus()).isEqualTo("SUBMITTED");
+            assertThat(event.getCorrectsEventId()).isNull();
+            assertThat(event.getSummary()).isEqualTo("终端销售 200 kg：零售门店A");
+            Map<String, Object> details = objectMapper.readValue(event.getDetailsJson(), new tools.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            assertThat(details)
+                    .containsEntry("sourceObjectType", "SALE")
+                    .containsEntry("sourceObjectId", 9001)
+                    .containsEntry("traceBatchNo", "TB-B2")
+                    .containsEntry("quantity", "200.000")
+                    .containsEntry("unitCode", "kg")
+                    .containsEntry("siteId", 800)
+                    .containsEntry("remainingAfter", "400.000")
+                    .containsEntry("soldOut", false)
+                    .containsEntry("occurredAtBasis", "SALE_OCCURRED");
+        }
+
+        @Test
+        @DisplayName("appendSaleEvent：身份冲突转为 409 SALE_EVENT_CONFLICT（由调用方整体回滚销售）")
+        void appendSaleEvent_Conflict() {
+            when(traceEventMapper.insert(any(TraceEvent.class))).thenThrow(new DuplicateKeyException("uk_trace_event_org_idempotency"));
+            assertThatThrownBy(() -> eventService.appendSaleEvent(saleProjection(true), 401L, LocalDateTime.now()))
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> assertThat(((BusinessException) e).getCode()).isEqualTo("SALE_EVENT_CONFLICT"));
+        }
+
+        @Test
+        @DisplayName("appendSaleEvent 必须在既有事务中调用 (Propagation.MANDATORY)")
+        void appendSaleEvent_RequiresExistingTransaction() throws Exception {
+            var method = TraceEventApplicationService.class.getMethod("appendSaleEvent",
+                    TraceEventApplicationService.SaleProjection.class, Long.class, LocalDateTime.class);
+            var tx = method.getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+            assertThat(tx).isNotNull();
+            assertThat(tx.propagation()).isEqualTo(org.springframework.transaction.annotation.Propagation.MANDATORY);
+        }
+    }
+
+    @Nested
     @DisplayName("自有冷库出入库事件（WAREHOUSE_IN / WAREHOUSE_OUT）受控人工录入与审计更正")
     class WarehouseEventTests {
 

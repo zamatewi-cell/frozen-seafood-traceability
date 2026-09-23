@@ -235,7 +235,7 @@ class BatchControllerTest {
         BatchResponse item = new BatchResponse(
                 100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", LocalDate.of(2026, 9, 1), null, null, 180,
-                "DRAFT", "NORMAL", null, null, 0L, nowUtc, 101L, nowUtc, 101L
+                "DRAFT", "NORMAL", null, null, null, 0L, nowUtc, 101L, nowUtc, 101L
         );
 
         PageMeta pageMeta = new PageMeta(1, 20, 1L);
@@ -270,7 +270,7 @@ class BatchControllerTest {
         BatchResponse response = new BatchResponse(
                 100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "东海舟山渔场", LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 1),
-                LocalDate.of(2026, 9, 2), 180, "DRAFT", "NORMAL", null, null, 0L, createdUtc, 101L, createdUtc, 101L
+                LocalDate.of(2026, 9, 2), 180, "DRAFT", "NORMAL", null, null, null, 0L, createdUtc, 101L, createdUtc, 101L
         );
 
         when(batchService.getBatchById(eq(100L), any(TraceSecurityPrincipal.class))).thenReturn(response);
@@ -319,7 +319,7 @@ class BatchControllerTest {
         BatchResponse response = new BatchResponse(
                 100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", LocalDate.of(2026, 9, 1), null, null, 180,
-                "DRAFT", "NORMAL", null, null, 0L, nowUtc, 101L, nowUtc, 101L
+                "DRAFT", "NORMAL", null, null, null, 0L, nowUtc, 101L, nowUtc, 101L
         );
 
         when(batchService.createDraftBatch(any(BatchCreateRequest.class), eq(VALID_IDEMPOTENCY_KEY), any(TraceSecurityPrincipal.class)))
@@ -348,7 +348,7 @@ class BatchControllerTest {
         BatchResponse response = new BatchResponse(
                 100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "来源说明", null, null, null, null,
-                "DRAFT", "NORMAL", null, null, 0L, nowUtc, 101L, nowUtc, 101L
+                "DRAFT", "NORMAL", null, null, null, 0L, nowUtc, 101L, nowUtc, 101L
         );
         org.mockito.ArgumentCaptor<BatchCreateRequest> captor = org.mockito.ArgumentCaptor.forClass(BatchCreateRequest.class);
         when(batchService.createDraftBatch(captor.capture(), eq(VALID_IDEMPOTENCY_KEY), any(TraceSecurityPrincipal.class)))
@@ -469,7 +469,7 @@ class BatchControllerTest {
         BatchResponse response = new BatchResponse(
                 100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-UPDATED", "SOURCE", new BigDecimal("120.000"), new BigDecimal("120.000"), "kg",
                 "DOMESTIC_CAPTURE", "变更后原产地描述", LocalDate.of(2026, 9, 1), null, null, 180,
-                "DRAFT", "NORMAL", null, null, 1L, nowUtc, 101L, nowUtc, 101L
+                "DRAFT", "NORMAL", null, null, null, 1L, nowUtc, 101L, nowUtc, 101L
         );
 
         when(batchService.patchDraftBatch(eq(100L), any(BatchPatchRequest.class), any(TraceSecurityPrincipal.class)))
@@ -519,7 +519,7 @@ class BatchControllerTest {
         BatchResponse response = new BatchResponse(
                 100L, 10L, 500L, "TB-ABCDEFGHIJKLMNOPQRSTUVWXYZ", "EXT-001", "SOURCE", new BigDecimal("100.000"), new BigDecimal("100.000"), "kg",
                 "DOMESTIC_CAPTURE", "东海舟山", LocalDate.of(2026, 9, 1), null, null, 180,
-                "ACTIVE", "NORMAL", null, null, 1L, nowUtc, 101L, nowUtc, 101L
+                "ACTIVE", "NORMAL", null, null, null, 1L, nowUtc, 101L, nowUtc, 101L
         );
 
         when(batchService.submitDraftBatch(eq(100L), any(BatchSubmitRequest.class), any(TraceSecurityPrincipal.class)))

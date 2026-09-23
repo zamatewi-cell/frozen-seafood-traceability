@@ -2,6 +2,7 @@ package com.example.traceability.trace.application;
 
 import com.example.traceability.audit.application.AuditApplicationService;
 import com.example.traceability.batch.domain.Batch;
+import com.example.traceability.batch.domain.BatchSaleGuard;
 import com.example.traceability.batch.domain.BatchFlowStatus;
 import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
@@ -320,6 +321,8 @@ public class ShipmentApplicationService {
             throw new ResourceNotFoundException("未找到交接关联批次");
         }
         requireBatchTransferable(batch, orgId);
+        // 防御性：已开始终端销售的批次不得装载交接（正常情况下交接创建时已被拒绝）
+        BatchSaleGuard.rejectIfSaleStarted(batch, "装载交接");
 
         try {
             if (transferMapper.bindShipment(transfer.getId(), shipmentId, req.expectedTransferVersion(), principal.getUserId()) != 1) {

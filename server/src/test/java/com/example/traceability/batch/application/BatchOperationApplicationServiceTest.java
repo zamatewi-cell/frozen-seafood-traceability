@@ -30,7 +30,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
+import com.example.traceability.sale.mapper.SaleMapper;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -87,8 +87,8 @@ class BatchOperationApplicationServiceTest {
     @Mock private ProductMapper productMapper;
     @Mock private TraceBatchNoGenerator traceBatchNoGenerator;
     @Mock private TraceEventApplicationService traceEventService;
+    @Mock private SaleMapper saleMapper;
 
-    @InjectMocks
     private BatchOperationApplicationService service;
 
     private TraceSecurityPrincipal processorOperator;
@@ -98,6 +98,8 @@ class BatchOperationApplicationServiceTest {
 
     @BeforeEach
     void setUp() {
+        service = new BatchOperationApplicationService(operationMapper, itemMapper, relationMapper, batchMapper, transferMapper,
+                productMapper, traceBatchNoGenerator, traceEventService, new BatchQuantityService(itemMapper, saleMapper));
         processorOperator = principal(PROCESSOR_ORG, "PROCESSOR", List.of("OPERATOR"), List.of("ORG_ONLY"));
         batches.put(INPUT_ID, activeBatch(INPUT_ID, "1000.000", "SOURCE"));
 
@@ -405,6 +407,13 @@ class BatchOperationApplicationServiceTest {
         void frozenInput_rejected() {
             batches.get(INPUT_ID).setRiskStatus("FROZEN");
             expectCreateFailure(processRequest(), processorOperator, HttpStatus.UNPROCESSABLE_ENTITY, "BATCH_FLOW_BLOCKED");
+        }
+
+        @Test
+        @DisplayName("Slice 5：已开始终端销售（first_sale_id 非空）的输入批次即使仍 ACTIVE 也拒绝 (409 BATCH_SALE_STARTED)")
+        void saleStartedInput_rejected() {
+            batches.get(INPUT_ID).setFirstSaleId(4242L);
+            expectCreateFailure(processRequest(), processorOperator, HttpStatus.CONFLICT, "BATCH_SALE_STARTED");
         }
 
         @Test
@@ -746,6 +755,21 @@ class BatchOperationApplicationServiceTest {
             verify(traceEventService, never()).appendProcessEvent(any(), anyLong(), anyLong(), any());
             verify(traceEventService, never()).appendShipmentTransportEvent(any(), any(), any(), any(), any(), any());
             verify(traceEventService, never()).appendShipmentArrivalEvent(any(), any(), any(), any(), any(), any());
+        }
+
+        @Test
+        @DisplayName("Slice 5（防御性）：提交时锁定的输入批次已有 first_sale_id → 409 BATCH_SALE_STARTED，不关闭、不激活、不写谱系与事件")
+        void submit_whenInputSaleStarted_rejected() {
+            draftOutput(901L, 77L, "960", "PROCESSING");
+            stubSubmittable(draftOp(77L, "PROCESS"), processItems(77L, 901L));
+            batches.get(INPUT_ID).setFirstSaleId(4243L);
+
+            assertThatThrownBy(() -> service.submitOperation(77L, new BatchOperationSubmitRequest(0L), SUBMIT_KEY, processorOperator))
+                    .satisfies(ex -> assertBusiness(ex, HttpStatus.CONFLICT, "BATCH_SALE_STARTED"));
+            verify(batchMapper, never()).closeConsumedInput(anyLong(), anyLong(), anyLong(), any(), anyLong());
+            verify(batchMapper, never()).activateOperationOutput(anyLong(), anyLong(), anyLong(), any(), anyLong());
+            verify(relationMapper, never()).insertBatch(any());
+            verify(traceEventService, never()).appendProcessEvent(any(), anyLong(), anyLong(), any());
         }
 
         @Test

@@ -16,7 +16,7 @@ import java.util.Arrays;
  *   <li>WAREHOUSE_OUT: 冷库出库</li>
  *   <li>TRANSPORT: 冷链干线或支线装车起运</li>
  *   <li>ARRIVAL: 运输到货/到达目的地场所</li>
- *   <li>SALE: 终端零售/批发分销</li>
+ *   <li>SALE: 终端零售销售（仅由 Sale 成功提交自动生成）</li>
  * </ul>
  * 严禁使用旧版废弃名称（如 HARVEST, SHIP, RECEIVE, INSPECT, RETAIL）。
  * </p>
