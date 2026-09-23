@@ -32,6 +32,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -243,5 +244,45 @@ class PublicTraceCodeControllerTest {
                         .header("Idempotency-Key", VALID_KEY))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
+    }
+    @Test
+    @DisplayName("GET 当前公开追溯码：匿名访问 401，且不调用服务")
+    void testGetCurrentAnonymousUnauthorized() throws Exception {
+        mockMvc.perform(get("/api/v1/batches/100/public-trace-code"))
+                .andExpect(status().isUnauthorized());
+        org.mockito.Mockito.verifyNoInteractions(publicTraceService);
+    }
+
+    @Test
+    @DisplayName("GET 当前公开追溯码：已登录读取无需 CSRF 与 Idempotency-Key，返回企业端白名单 (200)")
+    void testGetCurrentSuccess() throws Exception {
+        PublicTraceCodeResponse resp = new PublicTraceCodeResponse(
+                1L, 100L, "ABCDEF234567ABCDEF234567AB", "ACTIVE",
+                "2026-09-10T10:00:00Z", null, "2026-09-10T10:00:00Z", "2026-09-10T10:00:00Z"
+        );
+        when(publicTraceService.getCurrentPublicTraceCode(eq(100L), any())).thenReturn(resp);
+
+        mockMvc.perform(get("/api/v1/batches/100/public-trace-code").with(user(operatorPrincipal)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.publicId").value("ABCDEF234567ABCDEF234567AB"))
+                .andExpect(jsonPath("$.data.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.tokenHash").doesNotExist())
+                .andExpect(jsonPath("$.data.orgId").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("GET 当前公开追溯码：尚未激活 404 PUBLIC_TRACE_CODE_NOT_FOUND；他组织 403 ORG_SCOPE_DENIED")
+    void testGetCurrentNotFoundAndForbidden() throws Exception {
+        when(publicTraceService.getCurrentPublicTraceCode(eq(100L), any()))
+                .thenThrow(new ResourceNotFoundException("PUBLIC_TRACE_CODE_NOT_FOUND", "公开追溯码未激活", "该批次尚未激活公开追溯码"));
+        mockMvc.perform(get("/api/v1/batches/100/public-trace-code").with(user(operatorPrincipal)))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("PUBLIC_TRACE_CODE_NOT_FOUND"));
+
+        when(publicTraceService.getCurrentPublicTraceCode(eq(200L), any()))
+                .thenThrow(new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权", "只有批次当前责任组织可以查看该批次的公开追溯码"));
+        mockMvc.perform(get("/api/v1/batches/200/public-trace-code").with(user(operatorPrincipal)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ORG_SCOPE_DENIED"));
     }
 }

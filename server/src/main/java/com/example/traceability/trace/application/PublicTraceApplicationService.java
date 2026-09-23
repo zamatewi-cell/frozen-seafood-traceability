@@ -334,6 +334,45 @@ public class PublicTraceApplicationService {
     }
 
     /**
+     * 查询批次当前绑定的公开追溯码（企业端，GET /api/v1/batches/{batchId}/public-trace-code）。
+     * <p>
+     * 读取范围与终端销售台账一致：批次当前责任组织（任意角色）与平台只读角色；其他组织（含已转出批次的历史参与组织）403。
+     * 返回任意生命周期状态（含 DISABLED 终态）的码；尚未激活时返回 404 PUBLIC_TRACE_CODE_NOT_FOUND（与批次不存在的
+     * RESOURCE_NOT_FOUND 区分）。只读，不绑定幂等键、不产生任何写入。
+     * </p>
+     *
+     * @param batchId   批次内部主键 ID
+     * @param principal 当前认证主体
+     * @return 公开追溯码企业端白名单响应
+     */
+    public PublicTraceCodeResponse getCurrentPublicTraceCode(Long batchId, TraceSecurityPrincipal principal) {
+        if (principal == null || principal.getRoles() == null) {
+            throw new BusinessException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "未认证", "请先登录");
+        }
+        Batch batch = batchMapper.selectByIdIgnoreTenant(batchId);
+        if (batch == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + batchId + " 的批次");
+        }
+        if (!isPlatformScope(principal) && !Objects.equals(batch.getOrgId(), principal.getOrgId())) {
+            throw new BusinessException(
+                    HttpStatus.FORBIDDEN,
+                    "ORG_SCOPE_DENIED",
+                    "组织数据访问越权",
+                    "只有批次当前责任组织可以查看该批次的公开追溯码"
+            );
+        }
+        PublicTraceCode code = publicTraceCodeMapper.selectByBatchIdAndOrgId(batchId, batch.getOrgId());
+        if (code == null) {
+            throw new ResourceNotFoundException(
+                    "PUBLIC_TRACE_CODE_NOT_FOUND",
+                    "公开追溯码未激活",
+                    "该批次尚未激活公开追溯码"
+            );
+        }
+        return PublicTraceCodeResponse.fromEntity(code);
+    }
+
+    /**
      * 消费者匿名根据 26 位 Base32 公开标识查询追溯投影。
      * <p>
      * 业务规则：
@@ -463,6 +502,10 @@ public class PublicTraceApplicationService {
                 queriedAt,
                 PUBLIC_DISCLOSURE_STATEMENT
         );
+    }
+
+    private boolean isPlatformScope(TraceSecurityPrincipal principal) {
+        return principal != null && principal.getScopes() != null && principal.getScopes().contains("PLATFORM");
     }
 
     private void bindIdempotencyKey(

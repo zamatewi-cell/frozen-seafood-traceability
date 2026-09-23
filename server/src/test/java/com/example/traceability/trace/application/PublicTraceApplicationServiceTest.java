@@ -828,6 +828,68 @@ class PublicTraceApplicationServiceTest {
         }
     }
 
+    @Nested
+    @DisplayName("5. 企业端查询当前公开追溯码 (GET /batches/{batchId}/public-trace-code)")
+    class CurrentCodeTests {
+
+        @Test
+        @DisplayName("当前责任组织任意角色（含只读查看员）可读取当前码；只读，不绑定幂等键")
+        void testCurrentOrgAnyRoleCanRead() {
+            Batch batch = createBatch(1000L, 201L, BatchFlowStatus.CLOSED.name());
+            PublicTraceCode code = createCode(5L, 1000L, 201L, VALID_TEST_PUBLIC_ID, "ACTIVE");
+            when(batchMapper.selectByIdIgnoreTenant(1000L)).thenReturn(batch);
+            when(publicTraceCodeMapper.selectByBatchIdAndOrgId(1000L, 201L)).thenReturn(code);
+
+            PublicTraceCodeResponse resp = service.getCurrentPublicTraceCode(1000L, viewerPrincipal);
+            assertThat(resp.publicId()).isEqualTo(VALID_TEST_PUBLIC_ID);
+            assertThat(resp.status()).isEqualTo("ACTIVE");
+            verifyNoInteractions(idempotencyMapper);
+        }
+
+        @Test
+        @DisplayName("平台只读角色可读取；DISABLED 终态码原样返回")
+        void testPlatformCanReadDisabledCode() {
+            Batch batch = createBatch(1000L, 201L, BatchFlowStatus.ACTIVE.name());
+            PublicTraceCode code = createCode(5L, 1000L, 201L, VALID_TEST_PUBLIC_ID, "DISABLED");
+            when(batchMapper.selectByIdIgnoreTenant(1000L)).thenReturn(batch);
+            when(publicTraceCodeMapper.selectByBatchIdAndOrgId(1000L, 201L)).thenReturn(code);
+
+            PublicTraceCodeResponse resp = service.getCurrentPublicTraceCode(1000L, platformPrincipal);
+            assertThat(resp.status()).isEqualTo("DISABLED");
+            assertThat(resp.disabledAt()).isNotNull();
+        }
+
+        @Test
+        @DisplayName("其他组织（含已转出批次的历史参与组织）403 ORG_SCOPE_DENIED，不读取追溯码")
+        void testOtherOrgDenied() {
+            Batch batch = createBatch(1000L, 777L, BatchFlowStatus.ACTIVE.name());
+            when(batchMapper.selectByIdIgnoreTenant(1000L)).thenReturn(batch);
+
+            BusinessException ex = assertThrows(BusinessException.class, () ->
+                    service.getCurrentPublicTraceCode(1000L, operatorPrincipal));
+            assertThat(ex.getStatus()).isEqualTo(HttpStatus.FORBIDDEN);
+            assertThat(ex.getCode()).isEqualTo("ORG_SCOPE_DENIED");
+            verifyNoInteractions(publicTraceCodeMapper);
+        }
+
+        @Test
+        @DisplayName("批次不存在 404 RESOURCE_NOT_FOUND；尚未激活 404 PUBLIC_TRACE_CODE_NOT_FOUND（两者可区分）")
+        void testNotFoundVariants() {
+            when(batchMapper.selectByIdIgnoreTenant(404L)).thenReturn(null);
+            BusinessException missingBatch = assertThrows(BusinessException.class, () ->
+                    service.getCurrentPublicTraceCode(404L, operatorPrincipal));
+            assertThat(missingBatch.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+            assertThat(missingBatch.getCode()).isEqualTo("RESOURCE_NOT_FOUND");
+
+            when(batchMapper.selectByIdIgnoreTenant(1000L)).thenReturn(createBatch(1000L, 201L, BatchFlowStatus.ACTIVE.name()));
+            when(publicTraceCodeMapper.selectByBatchIdAndOrgId(1000L, 201L)).thenReturn(null);
+            BusinessException noCode = assertThrows(BusinessException.class, () ->
+                    service.getCurrentPublicTraceCode(1000L, operatorPrincipal));
+            assertThat(noCode.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+            assertThat(noCode.getCode()).isEqualTo("PUBLIC_TRACE_CODE_NOT_FOUND");
+        }
+    }
+
     private void stubProjection(
             PublicTraceCode code,
             List<BatchLineageEdge> edges,
