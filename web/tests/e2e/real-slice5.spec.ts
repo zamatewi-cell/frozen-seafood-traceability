@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
  * 三个相互隔离的浏览器上下文分别代表加工企业、承运企业与零售企业（真实 Session + CSRF），禁止 page.route 或任何接口替身。
  * 路径：加工企业为 B2 / B3 分别发起交接 T2 / T3 → 同一运输任务 S1 装载两张交接 → 提交 T2 / T3
  *       → 承运商发运、到达 S1 → 零售企业接受 T2 / T3
+ *       → 零售企业在批次详情激活 B2 / B3 公开追溯码（契约 v1.1 §12 第 18 步：接受之后、终端销售之前）
  *       → 零售企业在批次详情终端销售：B2 售 200（剩余 400，仍可流转，交接入口消失）→ B2 售 400（售罄关闭）→ B3 售 360（售罄关闭）。
  * B2 首次销售后、剩余 400 时，在零售企业同一会话内经真实 API 探测：交接 409 BATCH_SALE_STARTED、批次操作 403、
  * 非门店 / 停用门店 / 他组织门店、超卖与人工 SALE 事件均被拒绝；售罄后重放原销售得到同一 Sale，改载荷 409。
@@ -108,11 +109,23 @@ async function sellInBrowser(page: Page, quantity: string | 'ALL') {
   await selectByText(page, 'field-sale-site', expected.retailerStoreName)
   if (quantity === 'ALL') await page.getByTestId('sale-all').click()
   else await page.getByTestId('field-sale-quantity').fill(quantity)
+  // 业务时间精确到秒（step=1），界面值 → 请求载荷 → 数据库回读一致，不编造毫秒
+  const occurredInput = page.getByTestId('field-sale-occurred-at')
+  await expect(occurredInput).toHaveAttribute('step', '1')
+  const uiValue = await occurredInput.inputValue()
   const post = waitForApi(page, 'POST', /^\/api\/v1\/batches\/\d+\/sales$/)
   await page.getByTestId('sale-submit').click()
   const response = await post
   expect(response.status()).toBe(201)
-  return { sale: (await response.json()).data, request: response.request() }
+  const sale = (await response.json()).data
+  const payloadOccurredAt = JSON.parse(response.request().postData() || '{}').occurredAt as string
+  expect(payloadOccurredAt).toBe(new Date(uiValue).toISOString())
+  expect(payloadOccurredAt).toMatch(/:\d{2}\.000Z$/)
+  const stored = ((await (await page.request.get(`/api/v1/batches/${sale.batchId}/sales`)).json()).data as Array<{ id: number; occurredAt: string }>)
+    .find((s) => s.id === sale.id)
+  expect(stored, 'sale read back from the database').toBeDefined()
+  expect(Date.parse(stored!.occurredAt)).toBe(Date.parse(payloadOccurredAt))
+  return { sale, request: response.request() }
 }
 
 test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to zero at the retailer store', async ({ browser }) => {
@@ -178,6 +191,26 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
     await expect(retailer.page).toHaveURL(new RegExp(`/app/batches/${batchId}$`))
     await expect(retailer.page.getByTestId('detail-org-name')).toHaveText(expected.retailerOrgName)
   }
+
+  // ---------------------------------------------------------------- 零售企业：接受后、销售前激活公开追溯码（批次状态与数量不变）
+  const publicCodes: Record<number, string> = {}
+  for (const batchId of [expected.b2Id, expected.b3Id]) {
+    await retailer.page.goto(`/app/batches/${batchId}`)
+    await expect(retailer.page.getByTestId('public-code-none')).toBeVisible()
+    const activate = waitForApi(retailer.page, 'POST', new RegExp(`^/api/v1/batches/${batchId}/public-trace-code/activate$`))
+    await retailer.page.getByTestId('public-code-activate').click()
+    const activated = await activate
+    expect(activated.status()).toBe(200)
+    const code = (await activated.json()).data
+    expect(code.status).toBe('ACTIVE')
+    expect(code.publicId).toMatch(/^[A-Z2-7]{26}$/)
+    await expect(retailer.page.getByTestId('public-code-value')).toHaveText(code.publicId)
+    await expect(retailer.page.getByTestId('public-code-link')).toHaveAttribute('href', `/trace/${code.publicId}`)
+    await expect(retailer.page.getByTestId('detail-flow-status')).toHaveText('可流转')
+    await expect(retailer.page.getByTestId('detail-risk-status')).toHaveText('正常')
+    publicCodes[batchId] = code.publicId
+  }
+  expect(publicCodes[expected.b2Id]).not.toBe(publicCodes[expected.b3Id])
 
   // ---------------------------------------------------------------- B2：部分销售 200
   await retailer.page.goto(`/app/batches/${expected.b2Id}`)
@@ -266,6 +299,8 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
     'CARRIER POST /api/v1/shipments/:id/arrive',
     'RETAILER POST /api/v1/transfers/:id/accept',
     'RETAILER POST /api/v1/transfers/:id/accept',
+    'RETAILER POST /api/v1/batches/:id/public-trace-code/activate',
+    'RETAILER POST /api/v1/batches/:id/public-trace-code/activate',
     'RETAILER POST /api/v1/batches/:id/sales',
     'RETAILER POST /api/v1/batches/:id/sales',
     'RETAILER POST /api/v1/batches/:id/sales'
@@ -280,7 +315,7 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
   for (const e of businessWrites) console.log(`  ${e.actor} ${e.method} ${e.path} ${e.status} ${e.requestId}`)
   console.log('[slice5-smoke] 首次销售后 API 探测（name status code）:')
   for (const p of probes) console.log(`  ${p.name} ${p.status} ${p.code ?? ''}`)
-  console.log(`[slice5-smoke] SLICE5_RESULT ${JSON.stringify({ t2, t3, shipmentId, sales: [first.sale.id, second.sale.id, third.sale.id] })}`)
+  console.log(`[slice5-smoke] SLICE5_RESULT ${JSON.stringify({ t2, t3, shipmentId, publicCodeActivated: Object.keys(publicCodes).length, sales: [first.sale.id, second.sale.id, third.sale.id] })}`)
 
   await Promise.all([processor.context.close(), carrier.context.close(), retailer.context.close()])
 })

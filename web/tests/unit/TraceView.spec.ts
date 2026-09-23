@@ -19,16 +19,38 @@ const sampleTrace: PublicTrace = {
     maskedOrigin: '东海近海舟山渔场',
     productionDate: '2026-09-01'
   },
+  lineage: {
+    nodes: [
+      { nodeKey: 'N1', generation: 0, role: 'ORIGIN', productName: '东海大黄鱼原料' },
+      { nodeKey: 'N2', generation: 1, role: 'INTERMEDIATE', productName: '野生东海大黄鱼' },
+      { nodeKey: 'N3', generation: 2, role: 'TARGET', productName: '野生东海大黄鱼' }
+    ],
+    edges: [
+      { fromNodeKey: 'N1', toNodeKey: 'N2', operationType: 'PROCESS', occurredAt: '2026-09-01T09:00:00Z' },
+      { fromNodeKey: 'N2', toNodeKey: 'N3', operationType: 'SPLIT', occurredAt: '2026-09-01T10:00:00Z' }
+    ]
+  },
   timeline: [
     {
+      eventType: 'SOURCE',
       event: '原料采收/出塘',
       occurredAt: '2026-09-01T08:00:00Z',
-      dataSourceLabel: '教学演练与仿真模拟数据（SIMULATED）'
+      dataSourceLabel: '教学演练与仿真模拟数据（SIMULATED）',
+      nodeKey: 'N1'
     },
     {
+      eventType: 'PROCESS',
+      event: '粗加工/精加工',
+      occurredAt: '2026-09-01T09:00:00Z',
+      dataSourceLabel: '企业人工填报',
+      nodeKey: 'N2'
+    },
+    {
+      eventType: 'WAREHOUSE_IN',
       event: '冷库入库',
       occurredAt: '2026-09-01T12:00:00Z',
-      dataSourceLabel: '企业系统导入'
+      dataSourceLabel: '企业系统导入',
+      nodeKey: 'N3'
     }
   ],
   temperatureSummary: {
@@ -158,7 +180,10 @@ describe('ConsumerTraceView Component States', () => {
     expect(alert.text()).toContain('系统模拟召回演练声明')
     expect(alert.text()).toContain(customNotice)
     expect(alert.text()).toContain('教学演练推演')
-    expect(wrapper.find('.consumer-hero-card .status-badge').text()).toContain('模拟召回提示')
+    expect(wrapper.find('.consumer-hero-card .status-badge').text()).toContain('模拟召回演练')
+    expect(wrapper.find('[data-testid="public-status-note"]').text()).toContain('此批次当前处于系统模拟召回状态')
+    expect(wrapper.find('[data-testid="public-status-note"]').text()).toContain('本提示仅用于教学实训，不代表真实产品召回、安全鉴定或监管结论')
+    expect(wrapper.text()).not.toContain('请勿继续食用或销售')
     expect(wrapper.find('[data-testid="public-flow-status"]').text()).toBe('已关闭')
     expect(wrapper.find('[data-testid="public-risk-status"]').text()).toBe('模拟召回')
   })
@@ -251,5 +276,79 @@ describe('ConsumerTraceView Component States', () => {
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('FORBIDDEN-')
+  })
+  it('renders upstream lineage B0 → B1 → B2 with transformation edges and node tags on timeline items', async () => {
+    vi.spyOn(traceApi, 'fetchPublicTrace').mockResolvedValue(sampleTrace)
+
+    await router.push('/trace/WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A')
+    const wrapper = mount(ConsumerTraceView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const nodes = wrapper.findAll('[data-testid="lineage-node"]')
+    expect(nodes.map((n) => n.attributes('data-role'))).toEqual(['ORIGIN', 'INTERMEDIATE', 'TARGET'])
+    expect(nodes.map((n) => n.find('.lineage-node-label').text())).toEqual(['来源批次', '加工批次', '本批次'])
+    expect(nodes[0].text()).toContain('东海大黄鱼原料')
+    const edges = wrapper.findAll('[data-testid="lineage-edge"]')
+    expect(edges.map((e) => e.attributes('data-operation-type'))).toEqual(['PROCESS', 'SPLIT'])
+    expect(edges[1].text()).toContain('拆分')
+
+    const items = wrapper.findAll('[data-testid="public-timeline-item"]')
+    expect(items.map((i) => i.attributes('data-event-type'))).toEqual(['SOURCE', 'PROCESS', 'WAREHOUSE_IN'])
+    expect(items.map((i) => i.find('[data-testid="public-timeline-node"]').text())).toEqual(['来源批次', '加工批次', '本批次'])
+    // 谱系键只作为局部关联键，不作为可见的内部标识
+    expect(wrapper.text()).not.toContain('N1')
+  })
+
+  it('shows CLOSED and RECALLED together with the simulated recall notice, keeping temperature INSUFFICIENT_DATA and the disclaimer', async () => {
+    const notice = '此批次海产品已结束正常流转（已售罄或处置完毕），并已进入系统模拟召回演练（本提示为系统教学演练模拟信息）。'
+    vi.spyOn(traceApi, 'fetchPublicTrace').mockResolvedValue({
+      ...sampleTrace,
+      flowStatus: 'CLOSED',
+      riskStatus: 'RECALLED',
+      recallNotice: notice
+    })
+
+    await router.push('/trace/WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A')
+    const wrapper = mount(ConsumerTraceView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.find('.recall-alert-card').text()).toContain(notice)
+    expect(wrapper.find('.recall-alert-card').text()).toContain('不替代企业真实法定公告')
+    expect(wrapper.find('[data-testid="public-status-badge"]').text()).toContain('模拟召回演练')
+    expect(wrapper.find('[data-testid="public-status-note"]').text()).toContain('本提示仅用于教学实训，不代表真实产品召回、安全鉴定或监管结论')
+    expect(wrapper.text()).not.toContain('请勿')
+    expect(wrapper.find('[data-testid="public-flow-status"]').text()).toBe('已关闭')
+    expect(wrapper.find('[data-testid="public-risk-status"]').text()).toBe('模拟召回')
+    expect(wrapper.find('.temp-summary-card').text()).toContain('暂无实时时序采集')
+    expect(wrapper.text()).toContain(sampleTrace.disclosure)
+    expect(wrapper.findAll('[data-testid="lineage-node"]')).toHaveLength(3)
+  })
+
+  it('labels the code as a public trace code and never as a certificate, and never claims full cold-chain compliance', async () => {
+    vi.spyOn(traceApi, 'fetchPublicTrace').mockResolvedValue({ ...sampleTrace, flowStatus: 'CLOSED' })
+
+    await router.push('/trace/WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A')
+    const wrapper = mount(ConsumerTraceView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="public-trace-id"]').text()).toBe(sampleTrace.publicTraceId)
+    expect(wrapper.text()).toContain('公开追溯码')
+    for (const forbidden of ['证书', '全程温控正常', '正品', '官方认证', '防伪认证']) {
+      expect(wrapper.text()).not.toContain(forbidden)
+    }
+  })
+
+  it('still renders the page when an older response carries no lineage', async () => {
+    const legacy = { ...sampleTrace } as Partial<PublicTrace>
+    delete legacy.lineage
+    vi.spyOn(traceApi, 'fetchPublicTrace').mockResolvedValue(legacy as PublicTrace)
+
+    await router.push('/trace/WVKJ5Y2C4P4Q6T7X8Z2M9K3B1A')
+    const wrapper = mount(ConsumerTraceView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="trace-lineage"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="public-timeline-item"]')).toHaveLength(3)
+    expect(wrapper.find('[data-testid="public-timeline-node"]').exists()).toBe(false)
   })
 })

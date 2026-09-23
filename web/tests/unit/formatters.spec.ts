@@ -51,9 +51,21 @@ describe('Display Formatters', () => {
   it('derives the consumer status conclusion with risk taking precedence over flow', () => {
     expect(formatPublicTraceStatus('ACTIVE', 'NORMAL')).toMatchObject({ tone: 'success', label: '当前记录正常' })
     expect(formatPublicTraceStatus('ACTIVE', 'FROZEN')).toMatchObject({ tone: 'warning', label: '业务冻结状态' })
-    expect(formatPublicTraceStatus('ACTIVE', 'RECALLED')).toMatchObject({ tone: 'danger', label: '模拟召回提示' })
+    expect(formatPublicTraceStatus('ACTIVE', 'RECALLED')).toMatchObject({ tone: 'danger', label: '模拟召回演练' })
     expect(formatPublicTraceStatus('CLOSED', 'NORMAL')).toMatchObject({ tone: 'neutral', label: '流转已关闭' })
-    expect(formatPublicTraceStatus('CLOSED', 'RECALLED')).toMatchObject({ tone: 'danger', label: '模拟召回提示' })
+    expect(formatPublicTraceStatus('CLOSED', 'RECALLED')).toMatchObject({ tone: 'danger', label: '模拟召回演练' })
+  })
+
+  it('keeps the RECALLED conclusion simulation-only: no standalone real-world directive or legal / safety claim', () => {
+    for (const flow of ['ACTIVE', 'CLOSED']) {
+      const info = formatPublicTraceStatus(flow, 'RECALLED')
+      const visible = `${info.label} ${info.description}`
+      expect(visible).toContain('模拟召回')
+      expect(info.description).toContain('本提示仅用于教学实训，不代表真实产品召回、安全鉴定或监管结论')
+      for (const directive of ['请勿', '禁止食用', '立即停止', '召回公告']) {
+        expect(visible).not.toContain(directive)
+      }
+    }
   })
 
   it('maps flowStatus and riskStatus independently', () => {

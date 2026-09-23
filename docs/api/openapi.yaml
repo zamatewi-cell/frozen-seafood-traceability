@@ -548,12 +548,37 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/public-trace-code:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    get:
+      tags: [Batches]
+      summary: 查询批次当前公开追溯码
+      description: |
+        读取范围与终端销售台账一致：批次当前责任组织（任意角色）与平台只读角色；其他组织（含已转出批次的历史参与组织）
+        403 `ORG_SCOPE_DENIED`。返回任意生命周期状态（含 DISABLED 终态）的码。批次不存在 404 `RESOURCE_NOT_FOUND`；
+        尚未激活 404 `PUBLIC_TRACE_CODE_NOT_FOUND`。只读，不需要 CSRF 或 Idempotency-Key，不产生任何写入。
+        一批一码：Transfer ACCEPTED 只把码的持有组织同步给接收方，公开码本身不变、不复制；批次关闭后已激活码继续可查询。
+      operationId: getCurrentPublicTraceCode
+      responses:
+        '200':
+          description: 当前公开追溯码
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublicTraceCodeEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
   /batches/{batchId}/public-trace-code/activate:
     parameters:
       - {$ref: '#/components/parameters/BatchId'}
     post:
       tags: [Batches]
       summary: 激活批次对外公开追溯码（仅限企业操作员）
+      description: |
+        当前责任组织 OPERATOR。首次激活要求批次 `ACTIVE + NORMAL`（否则 422 `BATCH_FLOW_BLOCKED`，包括关闭后首次激活）；
+        已有 ACTIVE 码时幂等返回同一码（不生成第二个码）；已停用（DISABLED 终态）409 `INVALID_STATE_TRANSITION`。
+        契约 v1.1 正常流程在零售企业接受交接之后、终端销售之前激活。
       operationId: activatePublicTraceCode
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -1369,8 +1394,21 @@ paths:
       tags: [Public]
       summary: 查询消费者公开追溯投影
       description: |
-        匿名可访问，不需要 Session 或 CSRF。格式非法、不存在与已停用的公开码统一返回 404 `PUBLIC_TRACE_NOT_FOUND`。
-        当前投影只包含目标 Batch 自身的有效事件，尚未聚合祖先谱系。
+        匿名只读，不需要 Session 或 CSRF，不产生任何业务写入（只读事务）。格式非法、不存在、已停用（DISABLED）或已删除的公开码
+        统一返回 404 `PUBLIC_TRACE_NOT_FOUND`（响应不可区分）；其他码状态照常可查询。只接受公开追溯码，批次 ID、traceBatchNo
+        及其后缀都不是等价入口。
+
+        投影内容：
+        - `lineage`：只沿 BatchRelation 向上聚合目标批次的祖先（同源拆分的兄弟批次永不出现），节点使用响应内局部键 `N1…Nk`，
+          谱系边来自已提交的 BatchOperation（PROCESS / SPLIT / MERGE / REPACK），不是追溯事件；SPLIT 不产生任何事件。
+        - `timeline`：目标批次与祖先批次的有效（SUBMITTED，排除更正前版本）公开事件，只含公开事件白名单
+          SOURCE、PROCESS、FREEZE、PACK、WAREHOUSE_IN、WAREHOUSE_OUT、TRANSPORT、ARRIVAL、SALE；
+          排序：业务发生时间 → 谱系世代（祖先在前）→ 固定公开事件权重 → 服务端内部稳定次序。
+        - `flowStatus` 与 `riskStatus` 始终分别输出；`recallNotice` 只在批次 `riskStatus = RECALLED` 时出现（与公开码自身状态无关）。
+        - `temperatureSummary.result` 在未接入温度记录前恒为 `INSUFFICIENT_DATA`，不推导任何温控合规结论。
+
+        谱系数据不完整（祖先批次缺失或已删除、谱系边引用的批次操作无法解析、成环）时返回 500 `PUBLIC_TRACE_LINEAGE_INTEGRITY`，
+        说明为通用文字、不含内部 ID，绝不返回截断谱系。
       operationId: getPublicTrace
       security: []
       parameters:
@@ -1394,6 +1432,7 @@ paths:
                     properties:
                       data: {$ref: '#/components/schemas/PublicTrace'}
         '404': {$ref: '#/components/responses/Problem'}
+        '500': {$ref: '#/components/responses/Problem'}
 components:
   securitySchemes:
     sessionCookie:
@@ -2013,7 +2052,7 @@ components:
     PublicTrace:
       type: object
       additionalProperties: false
-      required: [publicTraceId, product, batch, timeline, temperatureSummary, flowStatus, riskStatus, queriedAt, disclosure]
+      required: [publicTraceId, product, batch, lineage, timeline, temperatureSummary, flowStatus, riskStatus, queriedAt, disclosure]
       properties:
         publicTraceId:
           type: string
@@ -2037,16 +2076,49 @@ components:
             originType: {type: string}
             maskedOrigin: {type: string}
             productionDate: {type: string, format: date, description: 未填写时字段省略}
+        lineage:
+          type: object
+          additionalProperties: false
+          required: [nodes, edges]
+          description: 目标批次及其祖先谱系（只含祖先；节点按世代与服务端稳定次序排列，边按子节点、父节点次序排列）
+          properties:
+            nodes:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [nodeKey, generation, role, productName]
+                properties:
+                  nodeKey: {type: string, pattern: '^N[1-9][0-9]*$', description: 响应内局部键，不是内部批次 ID}
+                  generation: {type: integer, minimum: 0, description: 世代（最上游为 0，按最长上游路径计算）}
+                  role: {type: string, enum: [ORIGIN, INTERMEDIATE, TARGET]}
+                  productName: {type: string, description: 该批次产品的消费者公开名称}
+            edges:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [fromNodeKey, toNodeKey, operationType, occurredAt]
+                properties:
+                  fromNodeKey: {type: string}
+                  toNodeKey: {type: string}
+                  operationType: {type: string, enum: [PROCESS, SPLIT, MERGE, REPACK]}
+                  occurredAt: {type: string, format: date-time, description: 批次操作业务发生时间}
         timeline:
           type: array
           items:
             type: object
             additionalProperties: false
-            required: [event, occurredAt, dataSourceLabel]
+            required: [eventType, event, occurredAt, dataSourceLabel, nodeKey]
             properties:
-              event: {type: string}
+              eventType:
+                type: string
+                enum: [SOURCE, PROCESS, FREEZE, PACK, WAREHOUSE_IN, WAREHOUSE_OUT, TRANSPORT, ARRIVAL, SALE]
+                description: 公开事件白名单（不含 PURCHASE 等契约 v1.1 未定义的遗留类型）
+              event: {type: string, description: 固定公开标签，不含任何自由文本摘要}
               occurredAt: {type: string, format: date-time}
               dataSourceLabel: {type: string}
+              nodeKey: {type: string, description: 事件所属谱系节点键}
         temperatureSummary:
           type: object
           additionalProperties: false
@@ -2061,7 +2133,7 @@ components:
         riskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
         recallNotice:
           type: string
-          description: 仅当 riskStatus=RECALLED 时出现的模拟召回提示；其他情况字段省略
+          description: 仅当批次 riskStatus=RECALLED 时出现的模拟召回提示（按流转状态选择措辞，声明为教学演练）；其他情况字段省略
         queriedAt: {type: string, format: date-time}
         disclosure: {type: string}
     CreateSaleRequest:

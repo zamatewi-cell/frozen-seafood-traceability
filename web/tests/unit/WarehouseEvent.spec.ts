@@ -6,6 +6,7 @@ import { createAppRouter } from '@/router'
 import { clearCsrfToken, setUnauthorizedHandler } from '@/api/client'
 import { resetSessionForTests } from '@/stores/session'
 import { canRecordWarehouseEvent } from '@/utils/permissions'
+import { toLocalDateTimeInput } from '@/utils/datetime'
 import type { Batch, CurrentUser } from '@/types/enterprise'
 import { CSRF_ROUTE, envelope, installFakeFetch, problem, sampleUser, type FakeResponse, type RecordedCall } from './helpers/fakeFetch'
 
@@ -221,6 +222,77 @@ describe('Warehouse inbound / outbound form', () => {
     expect(posts).toHaveLength(2)
     expect(posts[1].headers['Idempotency-Key']).toBe(posts[0].headers['Idempotency-Key'])
     expect(posts[1].body).toEqual(posts[0].body)
+  })
+
+  it('defaults the business time to the current local time with seconds (datetime-local step="1")', async () => {
+    backend()
+    const view = await mountDetail()
+    const before = Date.now()
+    await view.find('[data-testid="warehouse-in"]').trigger('click')
+    await flushPromises()
+    const input = view.find('[data-testid="field-warehouse-occurred-at"]')
+    expect(input.attributes('step')).toBe('1')
+    // 界面取值为本地 YYYY-MM-DDTHH:mm:ss（jsdom 回读 value 时会补 .000，按时间值比较）
+    const max = input.attributes('max') ?? ''
+    expect(max).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/)
+    const value = (input.element as HTMLInputElement).value
+    expect(new Date(value).getTime()).toBe(new Date(max).getTime())
+    expect(new Date(value).getMilliseconds()).toBe(0)
+    expect(Math.abs(new Date(value).getTime() - before)).toBeLessThan(2000)
+  })
+
+  it('preserves the entered seconds in the API payload without inventing milliseconds', async () => {
+    const { calls } = backend()
+    const view = await mountDetail()
+    await view.find('[data-testid="warehouse-in"]').trigger('click')
+    await flushPromises()
+    await view.find('[data-testid="field-warehouse-site"]').setValue('302')
+    await view.find('[data-testid="field-warehouse-occurred-at"]').setValue('2026-01-15T10:40:18')
+    await view.find('[data-testid="warehouse-form"]').trigger('submit')
+    await flushPromises()
+    const body = calls.find((c) => c.method === 'POST' && c.path === '/api/v1/batches/21/events')!.body as Json
+    expect(body.occurredAt).toBe(new Date('2026-01-15T10:40:18').toISOString())
+    expect(String(body.occurredAt)).toMatch(/:18\.000Z$/)
+  })
+
+  it('still rejects a business time later than now (seconds precision) without calling the API', async () => {
+    const { calls } = backend()
+    const view = await mountDetail()
+    await view.find('[data-testid="warehouse-in"]').trigger('click')
+    await flushPromises()
+    await view.find('[data-testid="field-warehouse-site"]').setValue('302')
+    await view.find('[data-testid="field-warehouse-occurred-at"]').setValue(toLocalDateTimeInput(new Date(Date.now() + 5 * 60_000)))
+    await view.find('[data-testid="warehouse-form"]').trigger('submit')
+    await flushPromises()
+    expect(view.find('[data-testid="error-warehouse-occurred-at"]').text()).toBe('发生时间不能晚于当前时间')
+    expect(calls.some((c) => c.method === 'POST' && c.path === '/api/v1/batches/21/events')).toBe(false)
+  })
+
+  it('retries with the identical second-precision timestamp and the same Idempotency-Key', async () => {
+    let attempts = 0
+    const { calls } = backend({
+      overrides: {
+        'POST /api/v1/batches/21/events': (call) => {
+          attempts += 1
+          if (attempts === 1) throw new TypeError('Failed to fetch')
+          return { status: 201, body: envelope({ id: 951, batchId: 21, orgId: 30, siteId: 302, eventType: 'WAREHOUSE_IN', occurredAt: (call.body as Json).occurredAt, recordedAt: '2026-09-23T02:00:00.000Z', dataSource: 'MANUAL', status: 'SUBMITTED', summary: '冷库入库：舟山自有冷库' }) }
+        }
+      }
+    })
+    const view = await mountDetail()
+    await view.find('[data-testid="warehouse-in"]').trigger('click')
+    await flushPromises()
+    await view.find('[data-testid="field-warehouse-site"]').setValue('302')
+    await view.find('[data-testid="field-warehouse-occurred-at"]').setValue('2026-01-15T10:40:59')
+    await view.find('[data-testid="warehouse-form"]').trigger('submit')
+    await flushPromises()
+    await view.find('[data-testid="warehouse-form"]').trigger('submit')
+    await flushPromises()
+    const posts = calls.filter((c) => c.method === 'POST' && c.path === '/api/v1/batches/21/events')
+    expect(posts).toHaveLength(2)
+    expect(posts[1].headers['Idempotency-Key']).toBe(posts[0].headers['Idempotency-Key'])
+    expect((posts[0].body as Json).occurredAt).toBe(new Date('2026-01-15T10:40:59').toISOString())
+    expect((posts[1].body as Json).occurredAt).toBe((posts[0].body as Json).occurredAt)
   })
 })
 

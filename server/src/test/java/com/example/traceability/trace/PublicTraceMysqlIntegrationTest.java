@@ -867,8 +867,8 @@ class PublicTraceMysqlIntegrationTest {
     }
 
     @Test
-    @DisplayName("P0-5 多事件完全相同时间戳排序稳定性测试：公开 timeline 严格按 ID ASC 稳定单调递增排序")
-    void testTimelineDeterministicOrder_SameTimestampOrderedByIdAsc() throws Exception {
+    @DisplayName("P0-5 多事件完全相同时间戳排序稳定性测试：同一批次同一业务时间按显式公开事件权重排序（与插入顺序、ID 无关）")
+    void testTimelineDeterministicOrder_SameTimestampOrderedByPublicEventOrder() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         Organization org = createOrg("ORG_ORD_" + suffix, "排序测试企业");
         Role opRole = getOrCreateRole("OPERATOR", "企业操作员", "ORG_ONLY");
@@ -919,10 +919,11 @@ class PublicTraceMysqlIntegrationTest {
         JsonNode timeline = objectMapper.readTree(res.getResponse().getContentAsString()).get("data").get("timeline");
         assertThat(timeline.size()).isEqualTo(3);
 
-        // 验证受控标签与根据 ID ASC 的严格确定性顺序：SOURCE -> TRANSPORT -> FREEZE
+        // Slice 6：同一业务时间、同一批次时按显式 PUBLIC_EVENT_ORDER 排序（SOURCE -> FREEZE -> TRANSPORT），
+        // 不再依赖插入 ID；ID 只作为同类型同时间的最终内部次序
         assertThat(timeline.get(0).get("event").asText()).isEqualTo("原料采收/出塘");
-        assertThat(timeline.get(1).get("event").asText()).isEqualTo("冷链干线运输");
-        assertThat(timeline.get(2).get("event").asText()).isEqualTo("速冻冷冻");
+        assertThat(timeline.get(1).get("event").asText()).isEqualTo("速冻冷冻");
+        assertThat(timeline.get(2).get("event").asText()).isEqualTo("冷链干线运输");
     }
 
     @Test

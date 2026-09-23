@@ -1,6 +1,7 @@
 package com.example.traceability.batch.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.example.traceability.batch.domain.BatchLineageEdge;
 import com.example.traceability.batch.domain.BatchRelation;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
@@ -12,7 +13,7 @@ import java.util.List;
 /**
  * 批次谱系父子关系图谱边持久层访问接口。
  * <p>
- * 提供谱系边持久化、输出批次已有上游检测，以及基于 MySQL 8.4 recursive CTE 的有向图环检测能力。
+ * 提供谱系边持久化、基于 MySQL 8.4 recursive CTE 的有向图环检测与反向溯源（祖先谱系边）查询能力。
  * </p>
  *
  * @author Seafood Traceability Team
@@ -59,4 +60,32 @@ public interface BatchRelationMapper extends BaseMapper<BatchRelation> {
             @Param("startChildBatchId") Long startChildBatchId,
             @Param("targetParentBatchId") Long targetParentBatchId
     );
+
+    /**
+     * 基于 MySQL 8.4 recursive CTE 反向溯源：返回目标批次全部祖先谱系边（只沿 child → parent 向上遍历）。
+     * <p>
+     * 只向上遍历，因此同一父批次的兄弟产出（如与目标同源拆分的其他批次）永远不会进入结果。
+     * 递归部分使用 UNION（DISTINCT），同一祖先只出现一次，DAG（MERGE 菱形）自然去重，
+     * 即使存在异常环也会在没有新批次时终止。遍历不按批次操作状态过滤、左连接批次操作：
+     * 引用的批次操作缺失、未提交或已删除时由调用方按谱系完整性错误拒绝，而不是在 SQL 中静默丢弃该边。
+     * </p>
+     *
+     * @param targetBatchId 目标批次 ID（扫码批次）
+     * @return 祖先谱系边（按子批次、父批次 ID 升序，仅供服务端确定性处理）
+     */
+    @Select("WITH RECURSIVE ancestry (batch_id) AS ( " +
+            "    SELECT b.id FROM batch b WHERE b.id = #{targetBatchId} " +
+            "    UNION " +
+            "    SELECT r.parent_batch_id " +
+            "    FROM batch_relation r " +
+            "    JOIN ancestry a ON r.child_batch_id = a.batch_id " +
+            ") " +
+            "SELECT r.parent_batch_id, r.child_batch_id, r.relation_type, " +
+            "       op.id AS operation_id, op.operation_type, op.status AS operation_status, " +
+            "       op.is_deleted AS operation_deleted, op.occurred_at AS operation_occurred_at " +
+            "FROM batch_relation r " +
+            "JOIN ancestry a ON r.child_batch_id = a.batch_id " +
+            "LEFT JOIN batch_operation op ON op.id = r.operation_id " +
+            "ORDER BY r.child_batch_id ASC, r.parent_batch_id ASC")
+    List<BatchLineageEdge> selectAncestorEdges(@Param("targetBatchId") Long targetBatchId);
 }

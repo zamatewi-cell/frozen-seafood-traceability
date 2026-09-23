@@ -62,9 +62,11 @@ describe('Security & Truthfulness Audits', () => {
       props: {
         timeline: [
           {
+            eventType: 'SOURCE',
             event: '原料采收/出塘',
             occurredAt: '2026-09-01T08:00:00Z',
-            dataSourceLabel: '教学演练与仿真模拟数据（SIMULATED）'
+            dataSourceLabel: '教学演练与仿真模拟数据（SIMULATED）',
+            nodeKey: 'N1'
           }
         ]
       }
@@ -79,9 +81,11 @@ describe('Security & Truthfulness Audits', () => {
       props: {
         timeline: [
           {
+            eventType: 'TRANSPORT',
             event: '冷链干线运输',
             occurredAt: '2026-09-02T10:00:00Z',
-            dataSourceLabel: '标准预留设备标识（DEVICE，未接入真实硬件）'
+            dataSourceLabel: '标准预留设备标识（DEVICE，未接入真实硬件）',
+            nodeKey: 'N1'
           }
         ]
       }
@@ -104,5 +108,27 @@ describe('Security & Truthfulness Audits', () => {
     expect(wrapper.text()).toContain('暂无实时时序采集（教学模拟）')
     expect(wrapper.text()).toContain('不构成本项目温控合规依据')
     expect(wrapper.text()).toContain('不伪造温控合规结论')
+  })
+  it('TRUTHFULNESS: consumer-facing sources never label the public code as a certificate or claim authenticity / full cold-chain compliance', () => {
+    const consumerFiles = [
+      'views/ConsumerTraceView.vue',
+      'layouts/PublicLayout.vue',
+      'components/TraceHero.vue',
+      'components/TraceLineage.vue',
+      'components/TraceTimeline.vue',
+      'components/TraceProductCard.vue',
+      'components/TraceTemperatureCard.vue',
+      'components/TraceRecallAlert.vue',
+      'components/TraceDisclosure.vue',
+      'components/TraceNotFound.vue',
+      'components/TraceSearchForm.vue',
+      'components/enterprise/PublicTraceCodePanel.vue'
+    ]
+    for (const file of consumerFiles) {
+      const content = fs.readFileSync(path.join(srcDir, file), 'utf8')
+      for (const forbidden of ['证书', '全程温控正常', '正品保证', '官方认证', '防伪认证', '已通过认证']) {
+        expect(content, `${file} contains ${forbidden}`).not.toContain(forbidden)
+      }
+    }
   })
 })

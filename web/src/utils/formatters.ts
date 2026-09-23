@@ -67,17 +67,18 @@ export interface StatusBadgeInfo {
 
 /**
  * 消费者页面的综合状态结论：风险状态优先于流转状态。
- * RECALLED / FROZEN 属于风险维度，与 ACTIVE / CLOSED 流转维度相互独立。
+ * RECALLED / FROZEN 属于风险维度，与 ACTIVE / CLOSED 流转维度相互独立（两者另在双维状态行中分别展示）。
  */
 export function formatPublicTraceStatus(
   flowStatus: string | null | undefined,
   riskStatus: string | null | undefined
 ): StatusBadgeInfo {
   if (riskStatus === 'RECALLED') {
+    // 教学演练系统：同一条可见信息内明确“模拟”，不给出脱离演练语境的现实处置指令
     return {
-      label: '模拟召回提示',
+      label: '模拟召回演练',
       tone: 'danger',
-      description: '该批次已进入模拟召回演练，请勿继续食用或销售'
+      description: '此批次当前处于系统模拟召回状态。本提示仅用于教学实训，不代表真实产品召回、安全鉴定或监管结论。'
     }
   }
   if (riskStatus === 'FROZEN') {
@@ -330,5 +331,36 @@ export function formatTemperatureResult(result: string | null | undefined): {
     case 'INSUFFICIENT_DATA':
     default:
       return { label: '暂无实时时序采集（教学模拟）', tone: 'warning' }
+  }
+}
+
+/**
+ * 消费者谱系节点标签：最上游为来源批次，扫码批次为本批次，中间批次按产生它的物料转换命名。
+ */
+export function formatLineageNodeLabel(role: string | null | undefined, derivedBy?: string | null): string {
+  if (role === 'TARGET') return '本批次'
+  if (role === 'ORIGIN') return '来源批次'
+  const map: Record<string, string> = {
+    PROCESS: '加工批次',
+    SPLIT: '拆分批次',
+    MERGE: '合并批次',
+    REPACK: '分装批次'
+  }
+  return (derivedBy && map[derivedBy]) || '中间批次'
+}
+
+/**
+ * 企业端公开追溯码状态标签。
+ */
+export function formatPublicTraceCodeStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'ACTIVE':
+      return { label: '已激活', tone: 'success', description: '消费者可通过公开追溯码查询该批次的公开信息' }
+    case 'DISABLED':
+      return { label: '已停用', tone: 'neutral', description: '停用为终态：消费者查询与未知码一样显示未找到，不能重新激活或更换' }
+    case 'RECALLED':
+      return { label: '召回标记', tone: 'danger', description: '召回相关状态（模拟演练），消费者仍可查询' }
+    default:
+      return { label: status || '未激活', tone: 'neutral', description: '尚未激活公开追溯码' }
   }
 }

@@ -88,3 +88,21 @@ export function shipmentRoleOf(user: CurrentUser | null | undefined, shipment: S
   if (shipment.receiverOrg.id === user.orgId) return 'RECEIVER'
   return 'NONE'
 }
+
+/**
+ * 公开追溯码管理（激活 / 停用）：批次当前责任组织的企业操作员（非平台角色）；组织类型不受限。
+ * 历史参与组织在批次转出后不能再修改该批次的公开追溯码（服务端同样校验）。
+ */
+export function canManagePublicTraceCode(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
+  return Boolean(isOperator(user) && batch && batch.orgId === user.orgId)
+}
+
+/**
+ * 首次激活公开追溯码：只对 ACTIVE + NORMAL 批次开放（契约正常流程在零售接受之后、终端销售之前激活）。
+ * 已激活的码在批次关闭后继续可查询，不需要也不能在关闭后首次激活。
+ */
+export function canActivatePublicTraceCode(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
+  return Boolean(canManagePublicTraceCode(user, batch)
+    && batch?.flowStatus === 'ACTIVE'
+    && batch.riskStatus === 'NORMAL')
+}

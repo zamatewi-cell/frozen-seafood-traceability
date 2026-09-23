@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TraceSearchForm from '@/components/TraceSearchForm.vue'
 import TraceHero from '@/components/TraceHero.vue'
 import TraceRecallAlert from '@/components/TraceRecallAlert.vue'
 import TraceProductCard from '@/components/TraceProductCard.vue'
 import TraceTimeline from '@/components/TraceTimeline.vue'
+import TraceLineage from '@/components/TraceLineage.vue'
 import TraceTemperatureCard from '@/components/TraceTemperatureCard.vue'
 import TraceSkeleton from '@/components/TraceSkeleton.vue'
 import TraceNotFound from '@/components/TraceNotFound.vue'
@@ -15,6 +16,7 @@ import { fetchPublicTrace } from '@/api/trace'
 import { ApiError, NotFoundError } from '@/api/client'
 import type { PublicTrace, TraceViewState } from '@/types/trace'
 import { normalizePublicTraceId } from '@/utils/validation'
+import { lineageNodeLabels } from '@/utils/lineage'
 
 const route = useRoute()
 const router = useRouter()
@@ -24,6 +26,8 @@ const traceData = ref<PublicTrace | null>(null)
 const queriedCode = ref('')
 const errorMessage = ref('')
 const errorRequestId = ref<string | undefined>()
+
+const nodeLabels = computed(() => lineageNodeLabels(traceData.value?.lineage))
 
 let activeRequest: AbortController | null = null
 let requestSequence = 0
@@ -134,6 +138,7 @@ watch(
       <div class="desktop-layout-row">
         <div class="main-column">
           <TraceHero :trace="traceData" />
+          <TraceLineage v-if="traceData.lineage && traceData.lineage.nodes.length > 0" :lineage="traceData.lineage" />
           <TraceProductCard :product="traceData.product" :batch="traceData.batch" />
           <TraceTemperatureCard :temperature-summary="traceData.temperatureSummary" />
           <TraceDisclosure
@@ -143,7 +148,7 @@ watch(
         </div>
 
         <div class="timeline-column">
-          <TraceTimeline :timeline="traceData.timeline" />
+          <TraceTimeline :timeline="traceData.timeline" :node-labels="nodeLabels" />
         </div>
       </div>
     </div>
@@ -156,11 +161,11 @@ watch(
       <div class="feature-bullets">
         <div class="bullet-item">
           <strong>白名单安全脱敏</strong>
-          <span>严格保护各节点商业机密，仅展示合规脱敏信息</span>
+          <span>严格保护各节点商业机密，仅展示白名单脱敏信息</span>
         </div>
         <div class="bullet-item">
-          <strong>全链条事件留痕</strong>
-          <span>捕捞、加工、冷库、冷链物流全流程时间记录</span>
+          <strong>上游谱系与事件留痕</strong>
+          <span>展示本批次及其上游来源批次已登记的来源、加工、冷库、运输与销售记录</span>
         </div>
         <div class="bullet-item">
           <strong>诚实透明披露</strong>
