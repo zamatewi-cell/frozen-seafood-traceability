@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
+import WarehouseEventPanel from '@/components/enterprise/WarehouseEventPanel.vue'
 import { getBatch, listBatchEvents, submitBatch } from '@/api/batches'
 import { listBatchOperations } from '@/api/batchOperations'
+import { listSites } from '@/api/directory'
 import { listTransfers } from '@/api/transfers'
 import { ApiError } from '@/api/client'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
@@ -27,7 +29,7 @@ import {
   formatTraceEventType,
   formatTransferStatus
 } from '@/utils/formatters'
-import { canInitiateTransfer, canManageSourceBatches, canOperateBatch } from '@/utils/permissions'
+import { canInitiateTransfer, canManageSourceBatches, canOperateBatch, canRecordWarehouseEvent } from '@/utils/permissions'
 import { takeBatchFlash, type BatchFlash } from './batchFlash'
 import { recalledBatchListQuery } from './batchQuery'
 
@@ -74,8 +76,42 @@ const openTransfer = computed(() => transfers.value.find((t) => t.status === 'DR
 const showInitiateTransfer = computed(() => canInitiateTransfer(user.value, batch.value) && transferState.value === 'loaded' && !openTransfer.value)
 /** 加工 / 拆分入口：PROCESSOR 操作员、本组织负责的 ACTIVE + NORMAL 批次、无未结束交接（服务端仍独立校验） */
 const showOperate = computed(() => canOperateBatch(user.value, batch.value) && transferState.value === 'loaded' && !openTransfer.value)
+/** 自有冷库入库 / 出库：只按当前已确定规则显示（当前责任组织 OPERATOR、非平台、ACTIVE + NORMAL）；服务端仍独立校验。 */
+const showWarehouse = computed(() => canRecordWarehouseEvent(user.value, batch.value))
 const submitting = ref(false)
 const submitError = ref('')
+
+/** 仓储事件的冷库名称：按事件记录组织读取场所目录（每个组织只读一次），读取失败时回退为场所编号。 */
+const siteNames = reactive(new Map<number, string>())
+const siteDirectoryOrgs = new Set<number>()
+
+function resolveWarehouseSites(list: TraceEvent[]) {
+  for (const event of list) {
+    if (!isWarehouseEvent(event) || !event.siteId || siteNames.has(event.siteId) || siteDirectoryOrgs.has(event.orgId)) continue
+    const orgId = event.orgId
+    siteDirectoryOrgs.add(orgId)
+    listSites(orgId)
+      .then((sites) => sites.forEach((s) => siteNames.set(s.id, s.name)))
+      .catch(() => siteDirectoryOrgs.delete(orgId))
+  }
+}
+
+function isWarehouseEvent(event: TraceEvent): boolean {
+  return event.eventType === 'WAREHOUSE_IN' || event.eventType === 'WAREHOUSE_OUT'
+}
+
+function warehouseSiteLabel(event: TraceEvent): string {
+  if (!event.siteId) return '未标明'
+  return siteNames.get(event.siteId) ?? `场所 #${event.siteId}`
+}
+
+async function onWarehouseRecorded(event: TraceEvent) {
+  flash.value = {
+    tone: 'success',
+    message: `${formatTraceEventType(event.eventType)}已记录；批次数量、当前责任组织与状态保持不变。`
+  }
+  await load()
+}
 
 /** 只有来源组织 OPERATOR、本组织负责的 DRAFT/NORMAL 来源批次显示“提交激活”；服务端仍独立校验。 */
 const canSubmit = computed(() => {
@@ -240,6 +276,7 @@ async function loadEvents(batchId: number) {
     if (controller.signal.aborted) return
     events.value = result
     eventState.value = 'loaded'
+    resolveWarehouseSites(result)
   } catch (err: unknown) {
     if (controller.signal.aborted) return
     events.value = []
@@ -363,6 +400,7 @@ onBeforeUnmount(() => {
           </li>
           <li v-for="event in history.events" :key="`e-${event.id}`" data-testid="history-event" :data-event-type="event.eventType">
             {{ formatTraceEventType(event.eventType) }} · {{ formatIsoDateTime(event.occurredAt) }} · {{ event.summary }}
+            <template v-if="isWarehouseEvent(event)"> · {{ warehouseSiteLabel(event) }}</template>
           </li>
         </ul>
       </section>
@@ -544,6 +582,15 @@ onBeforeUnmount(() => {
         </template>
       </section>
 
+      <WarehouseEventPanel
+        v-if="showWarehouse && user"
+        :batch="batch"
+        :org-id="user.orgId"
+        :events="events"
+        @recorded="onWarehouseRecorded"
+        @conflict="load"
+      />
+
       <section class="ent-card" aria-labelledby="handover-title" data-testid="batch-transfers">
         <h2 id="handover-title" class="ent-card-title">交接与运输</h2>
         <div v-if="transferState === 'loading'" class="ent-state">正在加载交接记录…</div>
@@ -641,6 +688,10 @@ onBeforeUnmount(() => {
                     <span v-else>{{ fact.value }}</span>
                   </dd>
                 </template>
+              </template>
+              <template v-if="isWarehouseEvent(event)">
+                <dt>冷库场所</dt>
+                <dd data-testid="event-warehouse-site">{{ warehouseSiteLabel(event) }}</dd>
               </template>
               <template v-if="event.eventType === 'TRANSPORT' || event.eventType === 'ARRIVAL'">
                 <template v-for="fact in shipmentFacts(event)" :key="fact.label">

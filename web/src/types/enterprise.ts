@@ -130,6 +130,17 @@ export interface Product {
   version: number
 }
 
+/** 自有冷库出入库（受控人工追溯事件）创建载荷：dataSource 固定 MANUAL，不发送 detailsJson。 */
+export type WarehouseEventType = 'WAREHOUSE_IN' | 'WAREHOUSE_OUT'
+
+export interface CreateWarehouseEventPayload {
+  eventType: WarehouseEventType
+  siteId: number
+  occurredAt: string
+  dataSource: 'MANUAL'
+  summary: string
+}
+
 export interface SiteSummary {
   id: number
   orgId: number

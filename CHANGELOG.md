@@ -6,6 +6,10 @@
 
 ### Added
 
+- Phase A Slice 4 自有冷库出入库（无 Flyway 迁移）：
+  - 批次详情“自有冷库仓储”面板：当前责任组织 OPERATOR 对 ACTIVE + NORMAL 批次记录冷库入库 / 出库，冷库选项来自本组织场所目录（`siteType = COLD_STORE`），时间线展示冷库场所。
+  - 真实浏览器验收 `tests/e2e/real-slice4.spec.ts` 与 MySQL 事实校验（B2 / B3 各一条 IN + OUT，批次数量 / 责任组织 / 状态 / 版本不变，无批次 / 谱系 / 交接 / 运输副作用）。
+
 - Phase A Slice 3 PROCESS / SPLIT：
   - Flyway V10：`batch` 增加 `produced_by_operation_id` / `consumed_by_operation_id`（外键，被操作全量消耗的批次必须 CLOSED）；`batch_operation_item` 增加角色与批次引用形状 CHECK、未删除 OUTPUT 唯一产出（虚拟生成列唯一索引）、同操作同批次唯一与外键；`batch_relation` 增加外键与禁止重复上游边；存在旧协议 DRAFT 批次操作时迁移 fail-fast，历史已提交操作原样保留、不回填。
   - 批次操作 API：`GET /api/v1/batch-operations/{id}`、`GET /api/v1/batch-operations?batchId=`、`DELETE /api/v1/batch-operations/{id}?expectedVersion=`；批次响应新增派生 `remainingQuantity` 与 `producedByOperationId` / `consumedByOperationId`。
@@ -40,6 +44,8 @@
 - Phase 1 可交互原型、测试计划和三条版本化演示数据方案。
 
 ### Changed
+
+- TraceEvent（Slice 4）：`WAREHOUSE_IN` / `WAREHOUSE_OUT` 必须指定调用方组织启用的 `COLD_STORE` 场所（缺失 400、跨组织 403、停用 422 `SITE_NOT_ACTIVE`、非冷库 422 `WAREHOUSE_SITE_TYPE_INVALID`），`dataSource` 必须为 `MANUAL` 且不接受 `detailsJson`；仓储事件只能在 IN ↔ OUT 之间更正（422 `WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN`），更正保留 CLOSED 批次审计能力；人工接口拒绝创建或更正 `SALE`（422 `EVENT_TYPE_NOT_MANUAL`）。不强制 IN / OUT 配对或顺序（契约未定义仓储状态机的最小实现解释）。
 
 - BatchOperation（Slice 3）：PROCESS / SPLIT 恰好一个 INPUT 且必须等于输入批次当前剩余量（禁止部分 INPUT，422 `PARTIAL_INPUT_NOT_ALLOWED`）；OUTPUT 不再由客户端引用既有批次，而由服务端生成为 DRAFT 并只能随操作提交激活（普通批次接口修改 / 提交返回 409 `BATCH_OWNED_BY_OPERATION`）；提交在同一事务内关闭 INPUT、激活 OUTPUT、固化谱系；物料平衡取消 0.001 kg 容差，改为数值精确相等；SPLIT 产出继承输入批次类型；写操作仅限当前责任组织为 PROCESSOR 的 OPERATOR；存在草稿或待接收交接的批次不能作为 INPUT（409 `BATCH_TRANSFER_OPEN`）。`MERGE` / `REPACK` 在当前 Slice 返回 422 `OPERATION_TYPE_NOT_SUPPORTED`（范围限制，非永久规则）。
 - TraceEvent：PROCESS 由 PROCESS 批次操作提交为每个 OUTPUT 自动生成一条，人工接口不得创建或更正 PROCESS；SPLIT 不生成 PACK / PROCESS，普通 PROCESS 不推导 FREEZE。

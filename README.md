@@ -94,6 +94,8 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
 - [x] 完成 Phase A Slice 3：PROCESS / SPLIT（Flyway V10；PROCESS / SPLIT 恰好一个 INPUT 且必须全量消耗剩余量，禁止部分 INPUT；OUTPUT 批次由服务端生成为 DRAFT，提交时同一事务关闭 INPUT、激活 OUTPUT、固化谱系；PROCESS 自动生成 PROCESS 事件，SPLIT 不生成 PACK / PROCESS，普通 PROCESS 不推导 FREEZE；SPLIT 产出继承输入批次类型；服务端按数值精确校验物料平衡；加工 / 拆分向导与操作详情页；原加工企业在批次转出后仍可只读查询本组织操作；真实浏览器验收 1000 = 960 + 30 + 10、960 = 600 + 360）
   - Slice 3 实现规则（已知契约歧义）：SOURCE 批次拆分得到的 SOURCE 类型子批次随批次操作激活时，当前实现不生成新的 SOURCE 事件，来源出处通过 BatchRelation / 谱系追溯到祖先批次。统一业务契约 v1.1 把 SOURCE 触发源写为“SOURCE Batch 从 DRAFT/NORMAL 激活为 ACTIVE/NORMAL 且来源字段完整”，同时规定 SPLIT 谱系由 BatchOperation / BatchRelation 表达，但未明确处理这一情形；这是当前实现选择，不是 v1.1 已明确保证的规范规则，可在后续契约修订中澄清。
   - 当前 Slice 范围限制：`MERGE` / `REPACK` 仍保留在操作类型枚举中，但执行时返回 422 `OPERATION_TYPE_NOT_SUPPORTED`；这是本 Slice 的开发范围限制，不是永久业务规则。多输入加工的来源字段与产品继承规则将在后续单独定义。
+- [x] 完成 Phase A Slice 4：自有冷库 WAREHOUSE_IN / WAREHOUSE_OUT（无迁移；沿用通用追溯事件接口并收紧：仅批次当前责任组织、批次 ACTIVE + NORMAL、`siteId` 必填且必须是本组织启用的 `COLD_STORE`、`dataSource = MANUAL`、不接受 `detailsJson`；仓储事件不改变批次责任组织、数量、状态与版本，不产生批次 / 谱系 / 交接 / 运输记录；仓储事件更正是审计更正，CLOSED 批次仍可在 IN ↔ OUT 之间更正，但不能跨类更正；人工接口同时禁止伪造 SALE；批次详情自有冷库入库 / 出库面板；真实浏览器验收 B2 / B3 各一次入库与出库）
+  - Slice 4 最小实现解释（契约未定义）：统一业务契约 v1.1 没有定义仓储状态机，因此当前不强制 IN / OUT 配对或顺序（无前序 IN 的 OUT、连续 IN、A 库入 B 库出均接受），不派生“当前在库”状态，也不新增批次当前场所字段；运输途中能否记录仓储事件未定义，服务端与页面均不限制。不支持第三方仓储、委托保管与仓储温度记录（Phase B）。
 - [ ] 完成 Phase 0：Batch 双状态、双编号及企业端基础壳纠偏
 - [ ] 完成 Phase A：来源建批至消费者查询的正常业务闭环
 - [ ] 完成 Phase B：温度异常、隔离与模拟召回闭环

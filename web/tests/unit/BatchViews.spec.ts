@@ -212,7 +212,8 @@ describe('BatchDetailView', () => {
     expect(view.text()).toContain('365 天')
     // 非来源企业查看 ACTIVE 批次：不提供提交激活等写操作入口
     expect(view.find('[data-testid="submit-activation"]').exists()).toBe(false)
-    expect(view.findAll('.enterprise-main button')).toHaveLength(0)
+    // 唯一的按钮是当前责任组织的自有冷库入库 / 出库（Slice 4），不含其他写操作
+    expect(view.findAll('.enterprise-main button').map((b) => b.attributes('data-testid'))).toEqual(['warehouse-in', 'warehouse-out'])
     // 当前责任组织操作员查看 ACTIVE/NORMAL 批次且无未结束交接：提供“发起交接”入口（服务端仍独立校验）
     expect(view.find('[data-testid="initiate-transfer"]').attributes('href')).toBe('/app/batches/12/transfers/new')
     expect(view.find('[data-testid="batch-transfers-empty"]').exists()).toBe(true)

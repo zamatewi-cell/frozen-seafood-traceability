@@ -185,8 +185,8 @@ paths:
         schema: {type: integer, format: int64}
     get:
       tags: [Organizations]
-      summary: 查询组织启用场所目录（运输任务起止场所选择）
-      description: 只返回场所白名单摘要，不含详细地址、版本号与审计字段。
+      summary: 查询组织启用场所目录（运输任务起止场所 / 本组织冷库选择）
+      description: 只返回场所白名单摘要，不含详细地址、版本号与审计字段。冷库出入库页面读取本组织目录并按 `siteType = COLD_STORE` 选择场所。
       operationId: listOrganizationSites
       responses:
         '200':
@@ -759,10 +759,22 @@ paths:
       tags: [Trace]
       summary: 提交批次追溯事件（仅限企业操作员）
       description: |
-        受控人工事件接口。`SOURCE`（来源批次激活）、`TRANSPORT`（运输任务发运）、`ARRIVAL`（运输任务到达）只能由结构化业务对象自动生成，
-        本接口拒绝创建，返回 422 `EVENT_TYPE_NOT_MANUAL`。
+        受控人工事件接口。`SOURCE`（来源批次激活）、`PROCESS`（加工批次操作提交）、`TRANSPORT`（运输任务发运）、`ARRIVAL`（运输任务到达）、
+        `SALE`（终端销售，Sale 台账尚未实现）只能由结构化业务对象自动生成，本接口拒绝创建，返回 422 `EVENT_TYPE_NOT_MANUAL`。
         `Idempotency-Key` 不得以服务端保留前缀 `SYS:` 开头（400 `INVALID_REQUEST`）。
-        批次必须为 `ACTIVE` + `NORMAL`，否则 422 `BATCH_FLOW_BLOCKED`；跨组织 403 `ORG_SCOPE_DENIED`；同 key 不同载荷 409 `IDEMPOTENCY_CONFLICT`。
+        只有批次当前责任组织可写，跨组织 403 `ORG_SCOPE_DENIED`（先于场所校验）；批次必须为 `ACTIVE` + `NORMAL`，否则 422 `BATCH_FLOW_BLOCKED`；
+        同 key 不同载荷 409 `IDEMPOTENCY_CONFLICT`，同 key 同载荷重放原事件。
+
+        **自有冷库出入库 `WAREHOUSE_IN` / `WAREHOUSE_OUT`（统一业务契约 v1.1 §8，Phase A Slice 4）**：
+        - `siteId` 必填（400 `INVALID_REQUEST`），场所不存在 404；
+        - 场所必须属于调用方组织（即批次当前责任组织），否则 403 `ORG_SCOPE_DENIED`；不支持第三方仓储；
+        - 场所必须启用，否则 422 `SITE_NOT_ACTIVE`；场所类型必须为 `COLD_STORE`，否则 422 `WAREHOUSE_SITE_TYPE_INVALID`；
+        - `dataSource` 必须为 `MANUAL`，且不接受 `detailsJson`（400 `INVALID_REQUEST`），说明写入 `summary`；
+        - 组织类型不受限，只要求当前责任组织；
+        - 仓储事件只追加追溯事实，不修改批次责任组织、数量、剩余量、流转 / 风险状态与版本，不产生批次、谱系、交接或运输记录；
+        - **当前 Slice 的最小实现解释**：统一业务契约 v1.1 未定义仓储状态机，因此服务端不强制 IN / OUT 配对或顺序
+          （无前序 IN 的 OUT、连续两次 IN、在冷库 A 入库后从冷库 B 出库均被接受），也不派生“当前在库”状态；
+          运输途中能否记录仓储事件在 v1.1 中未定义，当前不做限制。
       operationId: createTraceEvent
       parameters:
         - {$ref: '#/components/parameters/BatchId'}
@@ -802,9 +814,17 @@ paths:
       tags: [Trace]
       summary: 对历史追溯事件提交追加式更正记录（仅限企业操作员）
       description: |
-        不能把事件更正为 `SOURCE` / `TRANSPORT` / `ARRIVAL`（422 `EVENT_TYPE_NOT_MANUAL`），
-        也不能更正由系统自动生成的这三类事件（422 `AUTO_EVENT_NOT_CORRECTABLE`）。
+        不能把事件更正为 `SOURCE` / `PROCESS` / `TRANSPORT` / `ARRIVAL` / `SALE`（422 `EVENT_TYPE_NOT_MANUAL`），
+        也不能更正由系统自动生成的这些事件（422 `AUTO_EVENT_NOT_CORRECTABLE`）。
         `Idempotency-Key` 不得以服务端保留前缀 `SYS:` 开头（400 `INVALID_REQUEST`）。
+        调用方必须同时是批次当前责任组织与原事件记录组织（403 `ORG_SCOPE_DENIED`）；批次必须为 `ACTIVE` 或 `CLOSED`，且 `NORMAL`（422 `BATCH_FLOW_BLOCKED`）。
+
+        **冷库出入库事件更正**：更正是追加式审计更正，不是新的仓储流转，因此 `CLOSED` 批次仍允许更正既有仓储事件
+        （`CLOSED` 批次新建 `WAREHOUSE_IN` / `WAREHOUSE_OUT` 仍被拒绝）。约束：
+        - 只能在 `WAREHOUSE_IN` ↔ `WAREHOUSE_OUT` 之间更正；仓储事件不能更正为其他类型，其他事件也不能更正为仓储事件
+          （422 `WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN`）；
+        - 新版本同样适用创建时的场所规则：`siteId` 必填、本组织、启用、`COLD_STORE`、`MANUAL`、无 `detailsJson`。
+        - `FROZEN` / `RECALLED` 批次的更正语义留待 Phase B，当前保持仅 `NORMAL` 可更正。
       operationId: correctTraceEvent
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -1826,6 +1846,8 @@ components:
         这是当前实现选择而非 v1.1 已明确保证的规范规则，可在后续契约修订中澄清。PROCESS 由 PROCESS 批次操作提交为每个 OUTPUT 批次生成一条
         （SPLIT 不生成 PACK / PROCESS，普通 PROCESS 不推导 FREEZE）；TRANSPORT 由运输任务 PLANNED → IN_TRANSIT 为每个 Batch 生成一条；
         ARRIVAL 由运输任务 IN_TRANSIT → DELIVERED 为每个 Batch 生成一条。Transfer ACCEPTED 不生成 ARRIVAL。
+        SALE 只能由终端 Sale 提交生成（Sale 尚未实现，人工接口拒绝）。
+        WAREHOUSE_IN / WAREHOUSE_OUT 为受控人工事件：当前责任组织在本组织启用的 COLD_STORE 场所记录，不改变批次，不强制配对或顺序（Slice 4 最小实现解释）。
     TraceEventDetailsJson:
       type: [object, 'null']
       maxProperties: 20
@@ -1873,7 +1895,7 @@ components:
       properties:
         eventType: {$ref: '#/components/schemas/TraceEventType'}
         occurredAt: {type: string, format: date-time, description: "业务实际发生时间（ISO 8601 带明确时区偏移）"}
-        siteId: {type: [integer, 'null'], format: int64, description: 发生场所ID}
+        siteId: {type: [integer, 'null'], format: int64, description: "发生场所ID；WAREHOUSE_IN / WAREHOUSE_OUT 必填，且必须为调用方组织启用的 COLD_STORE 场所"}
         dataSource: {$ref: '#/components/schemas/DataSource'}
         summary: {type: string, minLength: 1, maxLength: 500, description: 事件核心摘要说明}
         detailsJson: {$ref: '#/components/schemas/TraceEventDetailsJson'}
@@ -1883,7 +1905,7 @@ components:
       properties:
         eventType: {$ref: '#/components/schemas/TraceEventType'}
         occurredAt: {type: string, format: date-time, description: "修正后的业务实际发生时间（ISO 8601 带明确时区偏移）"}
-        siteId: {type: [integer, 'null'], format: int64, description: 修正后的发生场所ID}
+        siteId: {type: [integer, 'null'], format: int64, description: "修正后的发生场所ID；WAREHOUSE_IN / WAREHOUSE_OUT 必填，且必须为调用方组织启用的 COLD_STORE 场所"}
         dataSource: {$ref: '#/components/schemas/DataSource'}
         summary: {type: string, minLength: 1, maxLength: 500, description: 修正后的事件核心摘要说明}
         detailsJson: {$ref: '#/components/schemas/TraceEventDetailsJson'}

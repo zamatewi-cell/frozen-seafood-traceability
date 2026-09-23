@@ -1,5 +1,5 @@
 ﻿/**
- * Phase 0 + Phase A / Slice 1 + Slice 2 真实浏览器冒烟：真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue。
+ * Phase 0 + Phase A / Slice 1 ~ Slice 4 真实浏览器冒烟：真实 MySQL 8.4 → Spring Boot → Vite proxy → Vue。
  *
  * 1. 在 MySQL 8.4 容器中新建隔离 schema（seafood_trace_phase0_demo_<随机后缀>），绝不触碰 seafood_trace；
  * 2. 以进程级随机 pepper 启动 Spring Boot（Flyway 在空 schema 上执行 V1~V9）；
@@ -9,7 +9,11 @@
  * 5. 浏览器结束后直接查询 MySQL，确认 SRC-2026-001 为 ACTIVE/NORMAL 且恰好一条 SOURCE 事件；
  * 6. Slice 2：另建独立的来源 / 承运 / 加工三个组织、账号与场所，并以来源账号通过真实 API 创建并激活 1000kg 来源批次 B0；
  *    Playwright 以三个隔离浏览器上下文走完 Transfer + Shipment 全链，结束后查询 MySQL 验证全部验收事实；
- * 7. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
+ * 7. Slice 3：加工企业在浏览器中完成 B0 → PROCESS → B1 → SPLIT → B2 600kg / B3 360kg；
+ * 8. Slice 4：加工企业在本组织自有冷库对 B2、B3 各记录一次冷库入库与出库（先经真实 API 探测他组织冷库被 403 拒绝），
+ *    结束后查询 MySQL 验证批次数量 / 责任组织 / 双状态 / 版本不变、每批恰好一条 IN + OUT、场所为加工企业启用冷库，
+ *    且无批次 / 谱系 / 交接 / 运输副作用；
+ * 9. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
  *
  * 密码、pepper、Cookie 与 CSRF 凭据只在进程环境与内存中传递，从不打印。
  * 例外：SMOKE_KEEP=true 手工验收模式只准备 Slice 2 基础资料，打印一次三个临时账号供人工在真实浏览器中操作，
@@ -300,12 +304,16 @@ function seedSlice2MasterData(suffix, passwords) {
     INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
     INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@src, 'S2-PORT', 'Slice2沈家门码头', 'PORT', 'ACTIVE');
     INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@prc, 'S2-FACTORY', 'Slice2舟山加工厂', 'FACTORY', 'ACTIVE');
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@prc, 'S2-COLD', 'Slice2舟山自有冷库', 'COLD_STORE', 'ACTIVE');
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@src, 'S2-SRC-COLD', 'Slice2来源企业冷库', 'COLD_STORE', 'ACTIVE');
     COMMIT;
   `, { database: schema })
   const ids = mysql(`SELECT
       (SELECT id FROM organization WHERE org_no = 'S2_SRC_${suffix}'),
       (SELECT id FROM organization WHERE org_no = 'S2_CAR_${suffix}'),
-      (SELECT id FROM organization WHERE org_no = 'S2_PRC_${suffix}');`, { database: schema }).split('\t').map(Number)
+      (SELECT id FROM organization WHERE org_no = 'S2_PRC_${suffix}'),
+      (SELECT s.id FROM site s JOIN organization o ON o.id = s.org_id WHERE o.org_no = 'S2_PRC_${suffix}' AND s.site_no = 'S2-COLD'),
+      (SELECT s.id FROM site s JOIN organization o ON o.id = s.org_id WHERE o.org_no = 'S2_SRC_${suffix}' AND s.site_no = 'S2-SRC-COLD');`, { database: schema }).split('\t').map(Number)
   return {
     sourceOrgId: ids[0],
     carrierOrgId: ids[1],
@@ -315,6 +323,9 @@ function seedSlice2MasterData(suffix, passwords) {
     processorOrgName: `Slice2水产加工企业_${suffix}`,
     sourceSiteName: 'Slice2沈家门码头',
     processorSiteName: 'Slice2舟山加工厂',
+    coldStoreSiteId: ids[3],
+    coldStoreName: 'Slice2舟山自有冷库',
+    sourceColdStoreSiteId: ids[4],
     usernames: { source: `s2_src_${suffix}`, carrier: `s2_car_${suffix}`, processor: `s2_prc_${suffix}` }
   }
 }
@@ -427,6 +438,94 @@ function verifySlice3Database(master, b0Id) {
   console.log('[smoke] MySQL batch（B0 → B1 → B2 / B3）:')
   console.log(q(`SELECT id, trace_batch_no, batch_type, quantity, flow_status, risk_status, produced_by_operation_id, consumed_by_operation_id FROM batch WHERE id IN (${allIds}) ORDER BY id;`)
     .split('\n').map((line) => `  ${line}`).join('\n'))
+  return { b0Id, b1Id, b2Id: Number(childIds[0]), b3Id: Number(childIds[1]) }
+}
+
+/** Slice 2 三个组织范围内的批次 / 谱系 / 交接 / 运输数量，以及 B2 / B3 批次行与非仓储事件数量快照。 */
+function slice4Snapshot(master, ids) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const orgs = `${master.sourceOrgId}, ${master.carrierOrgId}, ${master.processorOrgId}`
+  const [batches, relations, transfers, shipments, otherEvents] = q(`SELECT
+      (SELECT COUNT(*) FROM batch WHERE creation_org_id IN (${orgs}) OR org_id IN (${orgs})),
+      (SELECT COUNT(*) FROM batch_relation r JOIN batch b ON b.id = r.child_batch_id WHERE b.creation_org_id IN (${orgs}) OR b.org_id IN (${orgs})),
+      (SELECT COUNT(*) FROM transfer WHERE sender_org_id IN (${orgs}) OR receiver_org_id IN (${orgs})),
+      (SELECT COUNT(*) FROM shipment WHERE sender_org_id IN (${orgs}) OR receiver_org_id IN (${orgs}) OR carrier_org_id IN (${orgs})),
+      (SELECT COUNT(*) FROM trace_event WHERE event_type NOT IN ('WAREHOUSE_IN', 'WAREHOUSE_OUT'));`).split('\t')
+  const rows = q(`SELECT id, quantity, org_id, flow_status, risk_status, version FROM batch WHERE id IN (${ids.b2Id}, ${ids.b3Id}) ORDER BY id;`)
+  return { batches, relations, transfers, shipments, otherEvents, rows }
+}
+
+/** 真实 API 越权探测：加工企业引用来源企业（他组织）的冷库记录入库必须 403，且不得落库。 */
+async function probeForeignColdStore(master, ids, password) {
+  const session = new ApiSession()
+  await session.login(master.usernames.processor, password)
+  try {
+    await session.write('POST', `/api/v1/batches/${ids.b2Id}/events`, {
+      eventType: 'WAREHOUSE_IN', siteId: master.sourceColdStoreSiteId, occurredAt: new Date().toISOString(),
+      dataSource: 'MANUAL', summary: '越权引用他组织冷库（冒烟探测）'
+    }, { 'Idempotency-Key': randomUUID() })
+  } catch (error) {
+    if (/-> 403 ORG_SCOPE_DENIED$/.test(error.message)) {
+      console.log('[smoke] API ✔ 加工企业引用来源企业冷库记录入库被拒绝（403 ORG_SCOPE_DENIED）')
+      return
+    }
+    throw error
+  }
+  throw new Error('他组织冷库入库探测未被拒绝')
+}
+
+/**
+ * Slice 4 最终数据库事实：B2 / B3 各恰好一条 WAREHOUSE_IN + WAREHOUSE_OUT，场所为加工企业启用的 COLD_STORE，MANUAL；
+ * 批次数量 / 责任组织 / 双状态 / 版本不变，无批次 / 谱系 / 交接 / 运输及其他事件副作用。
+ * snapshot 为空（SMOKE_KEEP 手工模式）时跳过与浏览器操作前快照的比较，只校验绝对事实。
+ */
+function verifySlice4Database(master, ids, snapshot) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const perBatch = (id) => q(`SELECT
+      b.quantity, b.org_id = ${master.processorOrgId}, b.flow_status, b.risk_status,
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.event_type = 'WAREHOUSE_IN'),
+      (SELECT COUNT(*) FROM trace_event e WHERE e.batch_id = b.id AND e.event_type = 'WAREHOUSE_OUT'),
+      (SELECT COUNT(*) FROM trace_event e JOIN site s ON s.id = e.site_id
+         WHERE e.batch_id = b.id AND e.event_type IN ('WAREHOUSE_IN', 'WAREHOUSE_OUT')
+           AND e.site_id = ${master.coldStoreSiteId} AND s.org_id = ${master.processorOrgId} AND s.site_type = 'COLD_STORE' AND s.status = 'ACTIVE'
+           AND e.org_id = ${master.processorOrgId} AND e.data_source = 'MANUAL' AND e.status = 'SUBMITTED' AND e.details_json IS NULL)
+    FROM batch b WHERE b.id = ${id};`).split('\t')
+  const [b2Qty, b2Owned, b2Flow, b2Risk, b2In, b2Out, b2Valid] = perBatch(ids.b2Id)
+  const [b3Qty, b3Owned, b3Flow, b3Risk, b3In, b3Out, b3Valid] = perBatch(ids.b3Id)
+  const [allWarehouse, foreignSiteEvents] = q(`SELECT
+      (SELECT COUNT(*) FROM trace_event WHERE event_type IN ('WAREHOUSE_IN', 'WAREHOUSE_OUT')),
+      (SELECT COUNT(*) FROM trace_event WHERE site_id = ${master.sourceColdStoreSiteId});`).split('\t')
+  const after = slice4Snapshot(master, ids)
+  const facts = {
+    'B2 = 600kg，加工企业负责，ACTIVE + NORMAL': Number(b2Qty) === 600 && b2Owned === '1' && b2Flow === 'ACTIVE' && b2Risk === 'NORMAL',
+    'B3 = 360kg，加工企业负责，ACTIVE + NORMAL': Number(b3Qty) === 360 && b3Owned === '1' && b3Flow === 'ACTIVE' && b3Risk === 'NORMAL',
+    'B2 WAREHOUSE_IN = 1，WAREHOUSE_OUT = 1': b2In === '1' && b2Out === '1',
+    'B3 WAREHOUSE_IN = 1，WAREHOUSE_OUT = 1': b3In === '1' && b3Out === '1',
+    '全部仓储事件场所 = 加工企业启用 COLD_STORE，记录组织 = 加工企业，MANUAL，无 details': b2Valid === '2' && b3Valid === '2',
+    '全库仓储事件恰好 4 条（B0 / B1 / 越权探测均未写入）': allWarehouse === '4' && foreignSiteEvents === '0',
+    'Batch 数量 = 4（B0 / B1 / B2 / B3，无新批次）': after.batches === '4',
+    'BatchRelation 数量 = 3（无新谱系）': after.relations === '3',
+    'Transfer 数量 = 1（仅 T0）': after.transfers === '1',
+    'Shipment 数量 = 1（仅 S0）': after.shipments === '1'
+  }
+  if (snapshot) {
+    Object.assign(facts, {
+      'B2 / B3 批次行（数量 / 责任组织 / 状态 / 版本）与入库前完全一致': after.rows === snapshot.rows,
+      '批次 / 谱系 / 交接 / 运输数量与入库前一致': after.batches === snapshot.batches && after.relations === snapshot.relations
+        && after.transfers === snapshot.transfers && after.shipments === snapshot.shipments,
+      '非仓储追溯事件数量不变': after.otherEvents === snapshot.otherEvents
+    })
+  } else {
+    console.log('[smoke] SMOKE_KEEP 模式无入库前快照：跳过版本与快照比较')
+  }
+  for (const [fact, ok] of Object.entries(facts)) console.log(`[smoke] MySQL ${ok ? '✔' : '✘'} ${fact}`)
+  if (Object.values(facts).some((ok) => !ok)) {
+    throw new Error(`Slice 4 数据库事实不符合预期: b2=${ids.b2Id} b3=${ids.b3Id} snapshot=${JSON.stringify(snapshot)} after=${JSON.stringify(after)}`)
+  }
+  console.log('[smoke] MySQL trace_event（B2 / B3 仓储事件）:')
+  console.log(q(`SELECT id, batch_id, event_type, org_id, site_id, data_source, status, occurred_at FROM trace_event
+      WHERE batch_id IN (${ids.b2Id}, ${ids.b3Id}) ORDER BY batch_id, occurred_at, id;`)
+    .split('\n').map((line) => `  ${line}`).join('\n'))
 }
 
 function startViteDevServer() {
@@ -512,17 +611,26 @@ try {
     console.log(`[smoke] 加工企业 ${slice2.processorOrgName}: ${slice2.usernames.processor} / ${slice2Passwords.processor}`)
     console.log(`[smoke] B0: /app/batches/${b0.id}  (${b0.traceBatchNo}, 1000 kg ACTIVE/NORMAL)`)
     console.log('[smoke] Slice 3：加工企业接受 B0 后，在 B0 详情执行“加工”（产出 960，损耗 30，留样 10），再对 B1 执行“拆分”（600 + 360）。')
-    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 / Slice 3 数据库事实，再停止服务并删除 schema。')
+    console.log(`[smoke] Slice 4：加工企业在 B2、B3 详情“自有冷库仓储”中选择 ${slice2.coldStoreName}，各执行一次冷库入库与冷库出库。`)
+    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 / Slice 3 / Slice 4 数据库事实，再停止服务并删除 schema。')
     await waitForInterrupt()
     try {
       verifySlice2Database(slice2, b0.id)
     } catch (verifyError) {
       console.error(verifyError.message)
     }
+    let slice3Ids = null
     try {
-      verifySlice3Database(slice2, b0.id)
+      slice3Ids = verifySlice3Database(slice2, b0.id)
     } catch (verifyError) {
       console.error(verifyError.message)
+    }
+    if (slice3Ids) {
+      try {
+        verifySlice4Database(slice2, slice3Ids, null)
+      } catch (verifyError) {
+        console.error(verifyError.message)
+      }
     }
   } else {
   const fixture = await seedBusinessData(suffix, master, passwordA, passwordB)
@@ -574,8 +682,23 @@ try {
     SLICE3_PROCESSOR_PASSWORD: slice2Passwords.processor,
     SLICE3_EXPECTED: JSON.stringify({ b0Id: b0.id, b0TraceBatchNo: b0.traceBatchNo })
   }, 'tests/e2e/real-slice3.spec.ts')
-  verifySlice3Database(slice2, b0.id)
+  const slice3Ids = verifySlice3Database(slice2, b0.id)
   console.log('[smoke] Slice 3 真实加工企业 PROCESS / SPLIT 浏览器验收与 MySQL 事实校验通过')
+
+  const slice4Before = slice4Snapshot(slice2, slice3Ids)
+  await probeForeignColdStore(slice2, slice3Ids, slice2Passwords.processor)
+  await runBrowserSmoke({
+    SLICE4_PROCESSOR_USERNAME: slice2.usernames.processor,
+    SLICE4_PROCESSOR_PASSWORD: slice2Passwords.processor,
+    SLICE4_EXPECTED: JSON.stringify({
+      b2Id: slice3Ids.b2Id,
+      b3Id: slice3Ids.b3Id,
+      coldStoreName: slice2.coldStoreName,
+      processorOrgName: slice2.processorOrgName
+    })
+  }, 'tests/e2e/real-slice4.spec.ts')
+  verifySlice4Database(slice2, slice3Ids, slice4Before)
+  console.log('[smoke] Slice 4 真实加工企业自有冷库入库 / 出库浏览器验收与 MySQL 事实校验通过')
   }
 } catch (error) {
   primaryError = error

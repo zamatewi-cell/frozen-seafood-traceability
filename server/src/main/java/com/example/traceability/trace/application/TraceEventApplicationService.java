@@ -70,14 +70,27 @@ public class TraceEventApplicationService {
 
     /**
      * 只能由结构化业务对象自动投影、人工普通事件接口不得伪造的事件类型（统一业务契约 v1.1 §11）：
-     * SOURCE 由来源批次激活产生；PROCESS 由 PROCESS 批次操作提交产生；TRANSPORT / ARRIVAL 由 Shipment 发运 / 到达产生。
+     * SOURCE 由来源批次激活产生；PROCESS 由 PROCESS 批次操作提交产生；TRANSPORT / ARRIVAL 由 Shipment 发运 / 到达产生；
+     * SALE 只能由终端 Sale 台账提交产生（Sale 本身尚未实现，人工接口先行拒绝伪造）。
      */
     private static final Set<String> AUTO_ONLY_EVENT_TYPES = Set.of(
             TraceEventType.SOURCE.name(),
             TraceEventType.PROCESS.name(),
             TraceEventType.TRANSPORT.name(),
-            TraceEventType.ARRIVAL.name()
+            TraceEventType.ARRIVAL.name(),
+            TraceEventType.SALE.name()
     );
+
+    /**
+     * 受控人工仓储事件（统一业务契约 v1.1 §8、§11）：只记录当前责任组织在本组织自有 {@code Site(COLD_STORE)} 的场所流转事实，
+     * 不改变批次责任组织、数量与状态。v1.1 未定义仓储状态机，本实现不强制 IN / OUT 配对或顺序。
+     */
+    private static final Set<String> WAREHOUSE_EVENT_TYPES = Set.of(
+            TraceEventType.WAREHOUSE_IN.name(),
+            TraceEventType.WAREHOUSE_OUT.name()
+    );
+
+    private static final String SITE_TYPE_COLD_STORE = "COLD_STORE";
 
     private static final Set<String> FORBIDDEN_DETAIL_KEYS = Set.of(
             "id", "batchid", "batch_id", "orgid", "org_id", "siteid", "site_id",
@@ -218,8 +231,12 @@ public class TraceEventApplicationService {
             );
         }
 
-        // 4. 可选场所校验
-        validateSiteId(req.siteId(), orgId);
+        // 4. 场所校验：仓储事件必须引用本组织启用的自有冷库，其余事件场所可选
+        if (WAREHOUSE_EVENT_TYPES.contains(normalizedEventType)) {
+            enforceWarehouseRules(req.siteId(), orgId, normalizedDataSource, req.detailsJson());
+        } else {
+            validateSiteId(req.siteId(), orgId);
+        }
 
         // 5. 构造实体并持久化
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS);
@@ -401,8 +418,24 @@ public class TraceEventApplicationService {
             );
         }
 
-        // 7. 可选场所校验
-        validateSiteId(req.siteId(), orgId);
+        // 7. 仓储事件更正属于追加式审计更正（不是新的仓储流转，CLOSED 批次仍允许）：
+        //    只允许在 WAREHOUSE_IN / WAREHOUSE_OUT 之间更正，且新版本同样必须引用本组织启用的自有冷库
+        boolean targetIsWarehouse = targetEvent.getEventType() != null && WAREHOUSE_EVENT_TYPES.contains(targetEvent.getEventType());
+        boolean newIsWarehouse = WAREHOUSE_EVENT_TYPES.contains(normalizedEventType);
+        if (targetIsWarehouse != newIsWarehouse) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN",
+                    "仓储事件类型不可跨类更正",
+                    "冷库出入库事件只能在 WAREHOUSE_IN 与 WAREHOUSE_OUT 之间更正，其他事件也不能更正为冷库出入库事件（原类型 "
+                            + targetEvent.getEventType() + "，新类型 " + normalizedEventType + "）"
+            );
+        }
+        if (newIsWarehouse) {
+            enforceWarehouseRules(req.siteId(), orgId, normalizedDataSource, req.detailsJson());
+        } else {
+            validateSiteId(req.siteId(), orgId);
+        }
 
         // 8. 单事务执行：插入新更正版本 + 将原事件状态修改为 CORRECTED
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS);
@@ -530,7 +563,7 @@ public class TraceEventApplicationService {
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     "EVENT_TYPE_NOT_MANUAL",
                     "事件类型不允许人工录入",
-                    "事件类型 " + normalizedEventType + " 只能由业务单据自动生成（SOURCE 由来源批次提交激活自动产生，PROCESS 由加工批次操作提交自动产生，TRANSPORT / ARRIVAL 由运输任务发运 / 到达自动产生），人工事件接口不得创建或更正为该类型"
+                    "事件类型 " + normalizedEventType + " 只能由业务单据自动生成（SOURCE 由来源批次提交激活自动产生，PROCESS 由加工批次操作提交自动产生，TRANSPORT / ARRIVAL 由运输任务发运 / 到达自动产生，SALE 只能由终端销售提交自动产生），人工事件接口不得创建或更正为该类型"
             );
         }
     }
@@ -635,6 +668,72 @@ public class TraceEventApplicationService {
                     "SITE_NOT_ACTIVE",
                     "场所未启用",
                     "指定场所未处于启用状态，当前状态为: " + site.getStatus()
+            );
+        }
+    }
+
+    /**
+     * 冷库出入库事件（WAREHOUSE_IN / WAREHOUSE_OUT）的受控人工录入规则（统一业务契约 v1.1 §8）：
+     * <ol>
+     *   <li>必须指定场所；</li>
+     *   <li>场所必须属于调用方组织（调用方已校验为批次当前责任组织），跨组织 403；</li>
+     *   <li>场所必须启用；</li>
+     *   <li>场所类型必须为 COLD_STORE（仅支持自有冷库，不支持第三方仓储）；</li>
+     *   <li>数据来源必须为 MANUAL（受控人工事实，不接受设备 / 导入 / 模拟来源）；</li>
+     *   <li>不接受 detailsJson：仓储不改变数量，温度记录属于 Phase B，说明写入 summary。</li>
+     * </ol>
+     */
+    private void enforceWarehouseRules(Long siteId, Long orgId, String normalizedDataSource, Map<String, Object> detailsJson) {
+        if (siteId == null) {
+            throw new BusinessException(
+                    HttpStatus.BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "参数校验失败",
+                    "冷库出入库事件必须指定本组织启用的冷库场所 siteId"
+            );
+        }
+        Site site = siteMapper.selectByIdIgnoreTenant(siteId);
+        if (site == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + siteId + " 的场所");
+        }
+        if (!Objects.equals(site.getOrgId(), orgId)) {
+            throw new BusinessException(
+                    HttpStatus.FORBIDDEN,
+                    "ORG_SCOPE_DENIED",
+                    "组织数据访问越权",
+                    "冷库出入库只能使用当前责任组织自有的冷库场所，无权引用其他组织的场所"
+            );
+        }
+        if (!"ACTIVE".equals(site.getStatus())) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "SITE_NOT_ACTIVE",
+                    "场所未启用",
+                    "指定场所未处于启用状态，当前状态为: " + site.getStatus()
+            );
+        }
+        if (!SITE_TYPE_COLD_STORE.equals(site.getSiteType())) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "WAREHOUSE_SITE_TYPE_INVALID",
+                    "场所不是冷库",
+                    "冷库出入库事件只能引用类型为 COLD_STORE 的场所，当前场所类型为: " + site.getSiteType()
+            );
+        }
+        if (!DataSource.MANUAL.name().equals(normalizedDataSource)) {
+            throw new BusinessException(
+                    HttpStatus.BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "参数校验失败",
+                    "冷库出入库为受控人工事件，数据来源 dataSource 必须为 MANUAL"
+            );
+        }
+        if (detailsJson != null && !detailsJson.isEmpty()) {
+            throw new BusinessException(
+                    HttpStatus.BAD_REQUEST,
+                    "INVALID_REQUEST",
+                    "参数校验失败",
+                    "冷库出入库事件不接受 detailsJson（仓储不改变数量，温度记录不在本接口登记），说明请写入 summary"
             );
         }
     }

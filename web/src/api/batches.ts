@@ -1,5 +1,5 @@
 import { apiRequest, apiRequestPage } from './client'
-import type { Batch, BatchListQuery, CreateSourceBatchRequest, TraceEvent } from '@/types/enterprise'
+import type { Batch, BatchListQuery, CreateSourceBatchRequest, CreateWarehouseEventPayload, TraceEvent } from '@/types/enterprise'
 import type { PagedResult } from '@/types/api'
 
 /**
@@ -8,6 +8,7 @@ import type { PagedResult } from '@/types/api'
  * - POST /api/v1/batches（仅来源组织 OPERATOR 创建来源批次草稿；需 CSRF + Idempotency-Key）
  * - POST /api/v1/batches/{batchId}/submit（提交激活，服务端同事务自动生成 SOURCE 事件；需 CSRF）
  * - GET  /api/v1/batches/{batchId}/events（追溯事件列表）
+ * - POST /api/v1/batches/{batchId}/events（受控人工事件：自有冷库出入库；需 CSRF + Idempotency-Key）
  */
 
 export function listBatches(query: BatchListQuery, signal?: AbortSignal): Promise<PagedResult<Batch>> {
@@ -47,6 +48,24 @@ export function submitBatch(batchId: number, version: number): Promise<Batch> {
 
 export function listBatchEvents(batchId: number, signal?: AbortSignal): Promise<TraceEvent[]> {
   return apiRequest<TraceEvent[]>(`/api/v1/batches/${encodeURIComponent(String(batchId))}/events`, { signal })
+}
+
+/**
+ * 记录自有冷库入库 / 出库（WAREHOUSE_IN / WAREHOUSE_OUT）。只发送白名单字段；
+ * 场所归属、冷库类型、批次状态与责任组织由服务端最终校验。
+ */
+export function createWarehouseEvent(batchId: number, payload: CreateWarehouseEventPayload, idempotencyKey: string): Promise<TraceEvent> {
+  return apiRequest<TraceEvent>(`/api/v1/batches/${encodeURIComponent(String(batchId))}/events`, {
+    method: 'POST',
+    body: {
+      eventType: payload.eventType,
+      siteId: payload.siteId,
+      occurredAt: payload.occurredAt,
+      dataSource: payload.dataSource,
+      summary: payload.summary
+    },
+    headers: { 'Idempotency-Key': idempotencyKey }
+  })
 }
 
 /** 白名单构造创建载荷，省略未填写的可选字段。 */
