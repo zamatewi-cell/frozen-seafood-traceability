@@ -7,6 +7,7 @@ import { useIdempotentWrite } from '@/composables/useIdempotentWrite'
 import type { Batch, SiteSummary, TraceEvent, WarehouseEventType } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import { formatQuantity } from '@/utils/formatters'
+import { toLocalDateTimeInput } from '@/utils/datetime'
 
 /**
  * 自有冷库入库 / 出库（统一业务契约 v1.1 §8）：当前责任组织在本组织启用的 COLD_STORE 场所记录受控人工事件。
@@ -39,15 +40,7 @@ const writer = useIdempotentWrite()
 let controller: AbortController | null = null
 
 const selectedSite = computed(() => coldStores.value.find((s) => String(s.id) === form.siteId) ?? null)
-const maxOccurredAt = ref(toLocalInput(new Date()))
-
-function pad(n: number) {
-  return String(n).padStart(2, '0')
-}
-
-function toLocalInput(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
+const maxOccurredAt = ref(toLocalDateTimeInput(new Date()))
 
 function defaultSummary(type: WarehouseEventType, site: SiteSummary | null): string {
   return site ? `${LABELS[type]}：${site.name}` : LABELS[type]
@@ -84,7 +77,7 @@ async function open(type: WarehouseEventType) {
   fieldErrors.occurredAt = ''
   fieldErrors.summary = ''
   summaryTouched.value = false
-  maxOccurredAt.value = toLocalInput(new Date())
+  maxOccurredAt.value = toLocalDateTimeInput(new Date())
   form.occurredAt = maxOccurredAt.value
   if (siteState.value !== 'loaded') await loadColdStores()
   form.siteId = type === 'WAREHOUSE_OUT' ? lastInboundSiteId() : ''
@@ -181,7 +174,7 @@ onBeforeUnmount(() => controller?.abort())
           </label>
           <label class="ent-field">
             <span>发生时间 <em>*</em></span>
-            <input v-model="form.occurredAt" type="datetime-local" :max="maxOccurredAt" data-testid="field-warehouse-occurred-at" :aria-invalid="Boolean(fieldErrors.occurredAt)" />
+            <input v-model="form.occurredAt" type="datetime-local" step="1" :max="maxOccurredAt" data-testid="field-warehouse-occurred-at" :aria-invalid="Boolean(fieldErrors.occurredAt)" />
             <small v-if="fieldErrors.occurredAt" class="field-error" data-testid="error-warehouse-occurred-at">{{ fieldErrors.occurredAt }}</small>
           </label>
           <label class="ent-field wide">

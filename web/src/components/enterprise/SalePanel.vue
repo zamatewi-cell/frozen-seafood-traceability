@@ -7,6 +7,7 @@ import { useIdempotentWrite } from '@/composables/useIdempotentWrite'
 import type { Batch, Sale, SiteSummary } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import { formatQuantity } from '@/utils/formatters'
+import { toLocalDateTimeInput } from '@/utils/datetime'
 
 /**
  * 终端销售（统一业务契约 v1.1 §9.1）：零售企业在本组织启用的 STORE 门店面向消费者登记数量出库。
@@ -36,15 +37,7 @@ let controller: AbortController | null = null
 
 const remaining = computed(() => Number(props.batch.remainingQuantity ?? 0))
 const selectedStore = computed(() => stores.value.find((s) => String(s.id) === form.siteId) ?? null)
-const maxOccurredAt = ref(toLocalInput(new Date()))
-
-function pad(n: number) {
-  return String(n).padStart(2, '0')
-}
-
-function toLocalInput(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
+const maxOccurredAt = ref(toLocalDateTimeInput(new Date()))
 
 async function loadStores() {
   controller?.abort()
@@ -69,7 +62,7 @@ async function start() {
   fieldErrors.quantity = ''
   fieldErrors.occurredAt = ''
   form.quantity = ''
-  maxOccurredAt.value = toLocalInput(new Date())
+  maxOccurredAt.value = toLocalDateTimeInput(new Date())
   form.occurredAt = maxOccurredAt.value
   if (siteState.value !== 'loaded') await loadStores()
   if (!form.siteId && stores.value.length === 1) form.siteId = String(stores.value[0].id)
@@ -169,7 +162,7 @@ onBeforeUnmount(() => controller?.abort())
           </label>
           <label class="ent-field">
             <span>销售时间 <em>*</em></span>
-            <input v-model="form.occurredAt" type="datetime-local" :max="maxOccurredAt" data-testid="field-sale-occurred-at" :aria-invalid="Boolean(fieldErrors.occurredAt)" />
+            <input v-model="form.occurredAt" type="datetime-local" step="1" :max="maxOccurredAt" data-testid="field-sale-occurred-at" :aria-invalid="Boolean(fieldErrors.occurredAt)" />
             <small v-if="fieldErrors.occurredAt" class="field-error" data-testid="error-sale-occurred-at">{{ fieldErrors.occurredAt }}</small>
           </label>
         </div>
