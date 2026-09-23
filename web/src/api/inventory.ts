@@ -26,6 +26,7 @@ export interface InventoryBatch {
   originType: string
   originText: string
   productionDate: string | null
+  createdAt: string | null
   traceEventCount: number
 }
 

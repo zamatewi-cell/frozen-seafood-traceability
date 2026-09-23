@@ -24,6 +24,21 @@ const demoAccounts = [
   { username: 'shop_op', label: '电商商家运营' }
 ]
 
+// 按层级分组,方便快速定位角色
+const accountGroups = [
+  { title: '管理员', accounts: ['sys_admin'] },
+  { title: '原料供应商', accounts: ['capt_ship'] },
+  { title: '加工厂', accounts: ['plant_op'] },
+  { title: '分拣机构', accounts: ['whl_op'] },
+  { title: '终端（超市和电商）', accounts: ['market_op', 'shop_op'] },
+  { title: '质检员', accounts: ['capt_qa', 'plant_qa', 'whl_qa', 'market_qa'] }
+].map((g) => ({
+  ...g,
+  items: g.accounts
+    .map((u) => demoAccounts.find((a) => a.username === u))
+    .filter((a): a is { username: string; label: string } => !!a)
+}))
+
 function pickAccount(user: string) {
   username.value = user
 }
@@ -53,18 +68,23 @@ async function handleLogin() {
       <h2 class="login-title">企业工作台登录</h2>
       <p class="login-subtitle">选择演示角色并点击「登录」进入多角色订单管理</p>
 
-      <div class="account-picker">
-        <button
-          v-for="acc in demoAccounts"
-          :key="acc.username"
-          type="button"
-          class="account-chip"
-          :class="{ active: username === acc.username }"
-          @click="pickAccount(acc.username)"
-        >
-          <span class="chip-code">{{ acc.username }}</span>
-          <span class="chip-label">{{ acc.label }}</span>
-        </button>
+      <div class="account-groups">
+        <div v-for="g in accountGroups" :key="g.title" class="account-group">
+          <h3 class="group-title">{{ g.title }}</h3>
+          <div class="account-chips">
+            <button
+              v-for="acc in g.items"
+              :key="acc.username"
+              type="button"
+              class="account-chip"
+              :class="{ active: username === acc.username }"
+              @click="pickAccount(acc.username)"
+            >
+              <span class="chip-code">{{ acc.username }}</span>
+              <span class="chip-label">{{ acc.label }}</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       <form class="login-form" @submit.prevent="handleLogin">
@@ -114,11 +134,30 @@ async function handleLogin() {
   font-size: 13px;
   color: var(--color-text-muted);
 }
-.account-picker {
+.account-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.account-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.group-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  border-left: 3px solid var(--color-ocean);
+  padding-left: 8px;
+  line-height: 1.4;
+}
+.account-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 18px;
 }
 .account-chip {
   display: inline-flex;

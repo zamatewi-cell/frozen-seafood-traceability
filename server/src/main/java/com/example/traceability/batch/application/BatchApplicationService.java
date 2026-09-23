@@ -12,6 +12,7 @@ import com.example.traceability.batch.dto.BatchResponse;
 import com.example.traceability.batch.dto.BatchSubmitRequest;
 import com.example.traceability.batch.dto.DirectStockInRequest;
 import com.example.traceability.batch.dto.ProcessRequest;
+import com.example.traceability.batch.dto.RepackRequest;
 import com.example.traceability.batch.mapper.BatchMapper;
 import com.example.traceability.batch.mapper.BatchRelationMapper;
 import com.example.traceability.common.envelope.PageMeta;
@@ -610,6 +611,78 @@ public class BatchApplicationService {
         // 为成品批次生成加工溯源事件
         insertSystemTraceEvent(outputBatch, "PROCESS", now, principal.getUserId(),
                 "加工: 消耗批次 " + sourceBatch.getBatchNo() + " " + req.consumedQuantity() + "kg, 产出 " + req.outputQuantity() + "kg");
+
+        return BatchResponse.fromEntity(outputBatch);
+    }
+
+    /**
+     * 分拣分装：消耗一个上游批次，产出同种产品的 DISTRIBUTION 批次。
+     * <p>
+     * 用于批发/分装环节将上游加工成品重新分装为分销批次，建立谱系边，使溯源树出现独立的「分拣批发」节点。
+     * </p>
+     */
+    @Transactional
+    public BatchResponse repackBatch(RepackRequest req, TraceSecurityPrincipal principal) {
+        checkOperatorRole(principal);
+        if (req.consumedQuantity() == null || req.consumedQuantity().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "消耗数量必须大于 0");
+        }
+        if (req.outputQuantity() == null || req.outputQuantity().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "产出数量必须大于 0");
+        }
+        Batch sourceBatch = batchMapper.selectById(req.sourceBatchId());
+        if (sourceBatch == null || !sourceBatch.getOrgId().equals(principal.getOrgId())) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ACCESS_DENIED", "无权访问", "来源批次不存在或不属于本组织");
+        }
+        if (!"ACTIVE".equals(sourceBatch.getStatus())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "BATCH_NOT_ACTIVE", "批次不可用", "来源批次状态非ACTIVE");
+        }
+        BigDecimal available = sourceBatch.getQuantity() == null ? BigDecimal.ZERO : sourceBatch.getQuantity();
+        if (available.compareTo(req.consumedQuantity()) < 0) {
+            throw new BusinessException(HttpStatus.CONFLICT, "BATCH_INSUFFICIENT", "来源不足",
+                    "来源批次可用量 " + available + "kg，不足以消耗 " + req.consumedQuantity() + "kg");
+        }
+
+        // 扣减来源批次数量
+        sourceBatch.setQuantity(available.subtract(req.consumedQuantity()));
+        sourceBatch.setUpdatedBy(principal.getUserId());
+        sourceBatch.setUpdatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        if (sourceBatch.getQuantity().compareTo(BigDecimal.ZERO) == 0) {
+            sourceBatch.setStatus("CLOSED");
+        }
+        batchMapper.updateById(sourceBatch);
+
+        // 产出分销批次，沿用来源产品(分拣不改产品)
+        Batch outputBatch = new Batch();
+        outputBatch.setOrgId(principal.getOrgId());
+        outputBatch.setProductId(sourceBatch.getProductId());
+        outputBatch.setBatchNo("DS-" + System.currentTimeMillis());
+        outputBatch.setBatchType("DISTRIBUTION");
+        outputBatch.setQuantity(req.outputQuantity());
+        outputBatch.setUnitCode("kg");
+        outputBatch.setOriginType(sourceBatch.getOriginType());
+        outputBatch.setOriginText("分装自批次 " + sourceBatch.getBatchNo() + " (消耗" + req.consumedQuantity() + "kg)");
+        outputBatch.setProductionDate(java.time.LocalDate.now());
+        outputBatch.setStatus("ACTIVE");
+        outputBatch.setCreatedBy(principal.getUserId());
+        outputBatch.setCreatedAt(LocalDateTime.now(ZoneOffset.UTC));
+        outputBatch.setVersion(0L);
+        outputBatch.setIsDeleted(0);
+        batchMapper.insert(outputBatch);
+
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+
+        // 建立批次谱系关系:来源批次(父) → 分销批次(子)
+        BatchRelation relation = new BatchRelation();
+        relation.setOperationId(0L);
+        relation.setParentBatchId(sourceBatch.getId());
+        relation.setChildBatchId(outputBatch.getId());
+        relation.setRelationType("TRANSFORM");
+        relation.setCreatedAt(now);
+        batchRelationMapper.insert(relation);
+
+        insertSystemTraceEvent(outputBatch, "PACK", now, principal.getUserId(),
+                "分拣分装: 消耗批次 " + sourceBatch.getBatchNo() + " " + req.consumedQuantity() + "kg, 产出 " + req.outputQuantity() + "kg");
 
         return BatchResponse.fromEntity(outputBatch);
     }

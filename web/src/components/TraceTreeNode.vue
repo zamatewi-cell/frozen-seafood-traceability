@@ -26,6 +26,7 @@ const stageMeta: Record<string, { label: string; color: string; soft: string; ic
   PROCESSING: { label: '加工厂', color: '#7c3aed', soft: '#f3e8ff', icon: '工' },
   DISTRIBUTION: { label: '分拣批发', color: '#d97706', soft: '#fef3c7', icon: '装' },
   RETAIL: { label: '零售终端', color: '#059669', soft: '#d1fae5', icon: '售' },
+  RETAIL_SALE: { label: '终端销售', color: '#047857', soft: '#a7f3d0', icon: '销' },
   UNKNOWN: { label: '未知', color: '#64748b', soft: '#f1f5f9', icon: '?' }
 }
 function stageOf(stage: string) {

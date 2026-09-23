@@ -78,6 +78,7 @@ public class InventoryApplicationService {
                     batch.getOriginType(),
                     batch.getOriginText(),
                     batch.getProductionDate(),
+                    batch.getCreatedAt() != null ? batch.getCreatedAt().atOffset(java.time.ZoneOffset.UTC) : null,
                     eventCount
             );
         }).toList();

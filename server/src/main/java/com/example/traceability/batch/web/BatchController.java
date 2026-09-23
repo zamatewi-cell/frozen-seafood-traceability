@@ -166,4 +166,19 @@ public class BatchController {
     ) {
         return SuccessEnvelope.of(batchService.processMaterials(request, principal));
     }
+
+    /**
+     * 分拣分装：消耗上游批次，产出同种产品的 DISTRIBUTION 批次。
+     *
+     * @param request   分拣分装请求参数
+     * @param principal 当前认证主体
+     * @return 产出的分销批次详情
+     */
+    @PostMapping("/repack")
+    public SuccessEnvelope<BatchResponse> repackBatch(
+            @Valid @RequestBody com.example.traceability.batch.dto.RepackRequest request,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal
+    ) {
+        return SuccessEnvelope.of(batchService.repackBatch(request, principal));
+    }
 }

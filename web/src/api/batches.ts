@@ -160,6 +160,28 @@ export async function processMaterials(payload: ProcessPayload): Promise<BatchIt
   return parseEnvelope<BatchItem>(res)
 }
 
+// 批发分拣分装:消耗上游批次 → 产出同产品 DISTRIBUTION 批次
+export interface RepackPayload {
+  sourceBatchId: number
+  consumedQuantity: number
+  outputQuantity: number
+}
+
+export async function repackBatch(payload: RepackPayload): Promise<BatchItem> {
+  const csrf = await fetchCsrf()
+  const res = await fetch('/api/v1/batches/repack', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRF-TOKEN': csrf,
+      'Idempotency-Key': idemKey()
+    },
+    body: JSON.stringify(payload)
+  })
+  return parseEnvelope<BatchItem>(res)
+}
+
 export async function listTransfers(direction?: string, status?: string): Promise<Transfer[]> {
   const params = new URLSearchParams()
   params.set('page', '1')

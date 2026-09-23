@@ -30,6 +30,7 @@ import {
   removeAllocation,
   type PurchaseOrder,
   type SalesOrder,
+  type OrderItem,
   type OrderNote,
   type BatchAllocation
 } from '@/api/orders'
@@ -46,6 +47,7 @@ import {
   bindBatchToPublicCode,
   directStockIn,
   processMaterials,
+  repackBatch,
   type BatchItem,
   type Transfer
 } from '@/api/batches'
@@ -113,6 +115,8 @@ const isTerminal = computed(() => user.value?.orgType === 'RETAILER')
 const isFishingCaptain = computed(() => user.value?.orgType === 'SOURCE')
 // 加工厂:可对原料批次进行加工转换
 const isProcessor = computed(() => user.value?.orgType === 'PROCESSOR')
+// 批发分装:可对加工批次进行分拣分装,产出 DISTRIBUTION 批次
+const isDistributor = computed(() => user.value?.orgType === 'DISTRIBUTOR')
 
 const tabs = computed(() => {
   const t: { key: string; label: string }[] = []
@@ -293,7 +297,84 @@ const myInventory = ref<InventoryBatch[]>([])
 const noteFormOpen = ref<number | null>(null)
 const allocFormOpen = ref<number | null>(null)
 const newNote = ref({ text: '' })
-const newAlloc = ref({ batchId: 0, quantity: 0 })
+
+// 按批次维度选择:每行对应一个具体批次,含编号/产品名/余量
+interface AllocLine {
+  batchId: number
+  batchNo: string
+  productId: number
+  productName: string
+  quantity: number
+  unitCode: string
+  available: number
+}
+const allocDraft = ref<AllocLine[]>([])
+const allocShortage = ref('')
+const allocSaving = ref(false)
+
+// 可选批次:当前库存里有可用余量的每个批次,按 batchId 列出(不按产品合并)
+const allocProducts = computed(() => {
+  return myInventory.value
+    .filter((b) => (Number(b.availableQuantity) || 0) > 0)
+    .map((b) => ({
+      batchId: b.batchId,
+      batchNo: b.batchNo,
+      productId: b.productId,
+      productName: b.productName || '#' + b.productId,
+      available: Number(b.availableQuantity) || 0,
+      unitCode: b.unitCode || 'kg'
+    }))
+})
+
+function newAllocLine(): AllocLine {
+  const first = allocProducts.value[0]
+  return {
+    batchId: first ? first.batchId : 0,
+    batchNo: first ? first.batchNo : '',
+    productId: first ? first.productId : 0,
+    productName: first ? first.productName : '',
+    quantity: 0,
+    unitCode: first ? first.unitCode : 'kg',
+    available: first ? first.available : 0
+  }
+}
+
+function onAllocBatchChange(line: AllocLine) {
+  const b = allocProducts.value.find((x) => x.batchId === line.batchId)
+  if (b) {
+    line.batchNo = b.batchNo
+    line.productId = b.productId
+    line.productName = b.productName
+    line.unitCode = b.unitCode
+    line.available = b.available
+  }
+}
+
+function addAllocLine() {
+  allocDraft.value.push(newAllocLine())
+}
+
+function removeAllocLine(idx: number) {
+  allocDraft.value.splice(idx, 1)
+}
+
+function initAllocDraft() {
+  // 默认给一行空行,用户可点+继续加
+  allocDraft.value = allocProducts.value.length ? [newAllocLine()] : []
+  allocShortage.value = ''
+}
+
+// 校验某产品的总可用量是否满足需要(跨多批次聚合)
+function productAvailable(productId: number): number {
+  return myInventory.value
+    .filter((b) => b.productId === productId)
+    .reduce((s, b) => s + (Number(b.availableQuantity) || 0), 0)
+}
+
+function openAllocForm(poId: number) {
+  allocFormOpen.value = allocFormOpen.value === poId ? null : poId
+  if (allocFormOpen.value !== null) initAllocDraft()
+}
 
 function formatTime(iso: string): string {
   if (!iso) return ''
@@ -337,6 +418,43 @@ async function loadMyInventory() {
     myInventory.value = []
   }
 }
+
+// ==================== 库存筛选 ====================
+const invFilter = ref({
+  availability: 'ALL' as 'ALL' | 'HAS' | 'NONE',
+  keyword: '',
+  sort: 'NEW' as 'NEW' | 'OLD'
+})
+
+const filteredInventory = computed(() => {
+  let list = myInventory.value.slice()
+  const kw = invFilter.value.keyword.trim().toLowerCase()
+  if (kw) {
+    list = list.filter(
+      (b) =>
+        (b.productName || '').toLowerCase().includes(kw) ||
+        b.batchNo.toLowerCase().includes(kw)
+    )
+  }
+  if (invFilter.value.availability === 'HAS') {
+    list = list.filter((b) => Number(b.availableQuantity) > 0)
+  } else if (invFilter.value.availability === 'NONE') {
+    list = list.filter((b) => Number(b.availableQuantity) <= 0)
+  }
+  list.sort((a, b) => {
+    // 入库时间:优先 production_date(真实生产/入库日期,有区分度)
+    // 旧批次 created_at 同秒无区分度,故以 production_date 为主、created_at 兜底
+    const tOf = (x: InventoryBatch) => {
+      const pd = x.productionDate ? new Date(x.productionDate).getTime() : 0
+      const ca = x.createdAt ? new Date(x.createdAt).getTime() : 0
+      return pd || ca || 0
+    }
+    const ta = tOf(a)
+    const tb = tOf(b)
+    return invFilter.value.sort === 'NEW' ? tb - ta : ta - tb
+  })
+  return list
+})
 
 // ==================== 捕捞船长直接入库 ====================
 const allProducts = ref<Product[]>([])
@@ -440,6 +558,41 @@ async function doProcess() {
   }
 }
 
+// ==================== 批发分拣分装 ====================
+const repackFormOpen = ref<number | null>(null)
+const repackForm = ref({ consumedQuantity: 0, outputQuantity: 0 })
+const repackError = ref('')
+
+function openRepackForm(batchId: number) {
+  repackFormOpen.value = batchId
+  repackForm.value = { consumedQuantity: 0, outputQuantity: 0 }
+  repackError.value = ''
+}
+
+async function doRepack() {
+  repackError.value = ''
+  if (!repackForm.value.consumedQuantity || repackForm.value.consumedQuantity <= 0) {
+    repackError.value = '消耗数量必须大于 0'
+    return
+  }
+  if (!repackForm.value.outputQuantity || repackForm.value.outputQuantity <= 0) {
+    repackError.value = '产出数量必须大于 0'
+    return
+  }
+  try {
+    await repackBatch({
+      sourceBatchId: repackFormOpen.value!,
+      consumedQuantity: repackForm.value.consumedQuantity,
+      outputQuantity: repackForm.value.outputQuantity
+    })
+    showToast('分拣分装完成，分销批次已入库')
+    repackFormOpen.value = null
+    await loadMyInventory()
+  } catch (e) {
+    repackError.value = e instanceof Error ? e.message : '分拣分装失败'
+  }
+}
+
 async function doAddNote(poId: number) {
   if (!newNote.value.text.trim()) {
     purchaseError.value = '请填写备注内容'
@@ -458,22 +611,101 @@ async function doAddNote(poId: number) {
   }
 }
 
-async function doAllocate(poId: number) {
-  if (!newAlloc.value.batchId || !newAlloc.value.quantity) {
-    purchaseError.value = '请选择批次并填写分配数量'
+// 查找订单明细(采购单/销售单通用),用于智能分配匹配
+function findOrderItems(orderId: number): OrderItem[] {
+  const po = purchases.value.find((p) => p.id === orderId)
+  if (po) return po.items
+  const so = sales.value.find((s) => s.id === orderId)
+  if (so) return so.items
+  return []
+}
+
+// 一键智能分配:先判断每个订单明细的产品库存是否充足
+// 不足 -> 提示"库存不足无法分配"且不展开批次选择
+// 足够 -> 展开表单并按批次贪心填入(每行一个批次,数量=从该批次取走量)
+function smartAllocate(orderId: number) {
+  const items = findOrderItems(orderId)
+  const shortages: string[] = []
+  for (const it of items) {
+    const need = Number(it.quantity) || 0
+    const have = productAvailable(it.productId)
+    if (have < need) {
+      shortages.push(`${it.productName} 需 ${need}${it.unitCode}，库存仅 ${have}${it.unitCode}`)
+    }
+  }
+  if (shortages.length) {
+    // 库存不足:不展开,仅提示
+    allocFormOpen.value = null
+    salesAllocOpen.value = null
+    allocDraft.value = []
+    allocShortage.value = '库存不足无法分配：' + shortages.join('；')
     return
   }
+  // 库存充足:展开并按批次贪心填入(每个被选中的批次一行)
+  initAllocDraft()
+  const lines: AllocLine[] = []
+  for (const it of items) {
+    let remaining = Number(it.quantity) || 0
+    // 按入库时间早的优先(FIFO),与提交逻辑一致
+    const batches = allocProducts.value
+      .filter((b) => b.productId === it.productId)
+      .slice()
+      .sort((a, b) => a.batchNo.localeCompare(b.batchNo))
+    for (const b of batches) {
+      if (remaining <= 0) break
+      const take = Math.min(remaining, b.available)
+      if (take <= 0) continue
+      lines.push({
+        batchId: b.batchId,
+        batchNo: b.batchNo,
+        productId: b.productId,
+        productName: b.productName,
+        quantity: take,
+        unitCode: b.unitCode,
+        available: b.available
+      })
+      remaining -= take
+    }
+  }
+  allocDraft.value = lines
+  allocShortage.value = ''
+}
+
+// 提交时直接按每行所选 batchId 分配(下拉已按批次选择,无需再拆分)
+async function allocateByProductLines(lines: AllocLine[], errorRef: { value: string }) {
+  const tasks: { batchId: number; allocatedQuantity: number }[] = []
+  for (const line of lines) {
+    if (!line.batchId || !line.quantity || line.quantity <= 0) continue
+    if (line.quantity > line.available) {
+      errorRef.value = `${line.batchNo} 余量不足：需 ${line.quantity}${line.unitCode}，仅剩 ${line.available}${line.unitCode}`
+      return null
+    }
+    tasks.push({ batchId: line.batchId, allocatedQuantity: line.quantity })
+  }
+  if (!tasks.length) {
+    errorRef.value = '请填写分配数量'
+    return null
+  }
+  return tasks
+}
+
+async function doAllocate(poId: number) {
+  purchaseError.value = ''
+  const tasks = await allocateByProductLines(allocDraft.value, purchaseError)
+  if (!tasks) return
+  allocSaving.value = true
   try {
-    await allocateBatch(poId, {
-      batchId: newAlloc.value.batchId,
-      allocatedQuantity: newAlloc.value.quantity
-    })
-    newAlloc.value = { batchId: 0, quantity: 0 }
-    showToast('批次已分配')
+    for (const t of tasks) {
+      await allocateBatch(poId, t)
+    }
+    showToast(`已分配 ${tasks.length} 个批次`)
+    allocFormOpen.value = null
     await loadMyInventory()
     await loadPoNotesAndAllocations()
   } catch (e) {
     purchaseError.value = e instanceof Error ? e.message : '分配失败'
+  } finally {
+    allocSaving.value = false
   }
 }
 
@@ -521,22 +753,31 @@ async function doAddNoteForSales(poId: number) {
   }
 }
 
-async function doAllocateForSales(poId: number) {
-  if (!newAlloc.value.batchId || !newAlloc.value.quantity) {
-    salesError.value = '请选择批次并填写分配数量'
-    return
+function openSalesAllocForm(poId: number) {
+  salesAllocOpen.value = salesAllocOpen.value === poId ? null : poId
+  if (salesAllocOpen.value !== null) {
+    initAllocDraft()
+    loadPoAllocForSales(poId)
   }
+}
+
+async function doAllocateForSales(poId: number) {
+  salesError.value = ''
+  const tasks = await allocateByProductLines(allocDraft.value, salesError)
+  if (!tasks) return
+  allocSaving.value = true
   try {
-    await allocateBatch(poId, {
-      batchId: newAlloc.value.batchId,
-      allocatedQuantity: newAlloc.value.quantity
-    })
-    newAlloc.value = { batchId: 0, quantity: 0 }
-    showToast('批次已分配')
+    for (const t of tasks) {
+      await allocateBatch(poId, t)
+    }
+    showToast(`已分配 ${tasks.length} 个批次`)
+    salesAllocOpen.value = null
     await loadMyInventory()
     await loadPoAllocForSales(poId)
   } catch (e) {
     salesError.value = e instanceof Error ? e.message : '分配失败'
+  } finally {
+    allocSaving.value = false
   }
 }
 
@@ -1226,8 +1467,14 @@ onMounted(async () => {
               v-if="po.status === 'PROCESSING'"
               class="ghost-btn"
               type="button"
-              @click="allocFormOpen = allocFormOpen === po.id ? null : po.id"
+              @click="openAllocForm(po.id)"
             >{{ allocFormOpen === po.id ? '收起' : '分配批次' }}</button>
+            <button
+              v-if="po.status === 'PROCESSING'"
+              class="ghost-btn"
+              type="button"
+              @click="allocFormOpen = po.id; smartAllocate(po.id)"
+            >智能分配</button>
             <button
               v-if="po.status === 'PROCESSING' && poAllocations[po.id]?.length && !qcSubmitted(po.id)"
               class="ghost-btn"
@@ -1277,24 +1524,50 @@ onMounted(async () => {
             </div>
           </div>
 
-          <!-- 分配批次表单 -->
+          <!-- 分配批次表单:产品级多行,加减号增删行 -->
           <div v-if="allocFormOpen === po.id" class="inline-form">
-            <p v-if="!myInventory.length" class="muted">库存为空，无法分配</p>
+            <p v-if="!allocProducts.length" class="muted">库存为空，无法分配</p>
             <div v-else>
-              <div class="row">
-                <label>选择批次
-                  <select v-model="newAlloc.batchId">
-                    <option v-for="b in myInventory" :key="b.batchId" :value="b.batchId">
-                      {{ b.batchNo }} · 可用 {{ b.availableQuantity }}{{ b.unitCode }}
-                    </option>
-                  </select>
-                </label>
-                <label>分配数量(kg)
-                  <input v-model.number="newAlloc.quantity" type="number" min="0" step="0.001" />
-                </label>
+              <p v-if="allocShortage" class="err">{{ allocShortage }}</p>
+              <div class="alloc-list">
+                <div class="row alloc-head">
+                  <span class="prod-col">批次</span>
+                  <span class="avail-col">库存余量</span>
+                  <span class="qty-col">分配数量</span>
+                  <span class="op-col">操作</span>
+                </div>
+                <div
+                  v-for="(l, idx) in allocDraft"
+                  :key="idx"
+                  class="row alloc-row"
+                >
+                  <span class="prod-col">
+                    <select v-model="l.batchId" @change="onAllocBatchChange(l)">
+                      <option v-for="p in allocProducts" :key="p.batchId" :value="p.batchId">{{ p.batchNo }} · {{ p.productName }}（余{{ p.available }}{{ p.unitCode }}）</option>
+                    </select>
+                  </span>
+                  <span class="avail-col">{{ l.available }}{{ l.unitCode }}</span>
+                  <span class="qty-col">
+                    <input
+                      v-model.number="l.quantity"
+                      type="number"
+                      min="0"
+                      :max="l.available"
+                      step="0.001"
+                      placeholder="输入数量"
+                    />
+                  </span>
+                  <span class="op-col">
+                    <button class="mini-btn" type="button" @click="removeAllocLine(idx)" title="删除该行">−</button>
+                    <button class="mini-btn add" type="button" @click="addAllocLine" title="新增一行">+</button>
+                  </span>
+                </div>
               </div>
               <div class="acts">
-                <button class="pri-btn" type="button" @click="doAllocate(po.id)">分配</button>
+                <button class="ghost-btn" type="button" @click="smartAllocate(po.id)">智能分配</button>
+                <button class="pri-btn" type="button" :disabled="allocSaving" @click="doAllocate(po.id)">
+                  {{ allocSaving ? '分配中…' : '分配所选' }}
+                </button>
               </div>
             </div>
           </div>
@@ -1402,8 +1675,14 @@ onMounted(async () => {
               v-if="so.status === 'PROCESSING'"
               class="ghost-btn"
               type="button"
-              @click="salesAllocOpen = salesAllocOpen === so.id ? null : so.id; loadPoAllocForSales(so.id)"
+              @click="openSalesAllocForm(so.id)"
             >{{ salesAllocOpen === so.id ? '收起' : '分配批次' }}</button>
+            <button
+              v-if="so.status === 'PROCESSING'"
+              class="ghost-btn"
+              type="button"
+              @click="salesAllocOpen = so.id; smartAllocate(so.id)"
+            >智能分配</button>
             <button
               v-if="so.status === 'PROCESSING' && (salesAllocs[so.id]?.length) && !qcSubmitted(so.id)"
               class="ghost-btn"
@@ -1480,22 +1759,51 @@ onMounted(async () => {
             </div>
             <div class="acts"><button class="pri-btn" type="button" @click="doAddNoteForSales(so.id)">添加备注</button></div>
           </div>
-          <!-- 分配批次表单 -->
+          <!-- 分配批次表单:产品级多行,加减号增删行 -->
           <div v-if="isDownstreamOrder(so) && salesAllocOpen === so.id" class="inline-form">
-            <p v-if="!myInventory.length" class="muted">库存为空，无法分配</p>
-            <div v-else class="row">
-              <label>选择批次
-                <select v-model.number="newAlloc.batchId">
-                  <option :value="0">请选择</option>
-                  <option v-for="b in myInventory" :key="b.batchId" :value="b.batchId">
-                    {{ b.batchNo }}（可用 {{ b.availableQuantity }}{{ b.unitCode }}）
-                  </option>
-                </select>
-              </label>
-              <label>分配数量(kg)
-                <input v-model.number="newAlloc.quantity" type="number" min="0.01" step="0.01" />
-              </label>
-              <div class="acts"><button class="pri-btn" type="button" @click="doAllocateForSales(so.id)">分配</button></div>
+            <p v-if="!allocProducts.length" class="muted">库存为空，无法分配</p>
+            <div v-else>
+              <p v-if="allocShortage" class="err">{{ allocShortage }}</p>
+              <div class="alloc-list">
+                <div class="row alloc-head">
+                  <span class="prod-col">批次</span>
+                  <span class="avail-col">库存余量</span>
+                  <span class="qty-col">分配数量</span>
+                  <span class="op-col">操作</span>
+                </div>
+                <div
+                  v-for="(l, idx) in allocDraft"
+                  :key="idx"
+                  class="row alloc-row"
+                >
+                  <span class="prod-col">
+                    <select v-model="l.batchId" @change="onAllocBatchChange(l)">
+                      <option v-for="p in allocProducts" :key="p.batchId" :value="p.batchId">{{ p.batchNo }} · {{ p.productName }}（余{{ p.available }}{{ p.unitCode }}）</option>
+                    </select>
+                  </span>
+                  <span class="avail-col">{{ l.available }}{{ l.unitCode }}</span>
+                  <span class="qty-col">
+                    <input
+                      v-model.number="l.quantity"
+                      type="number"
+                      min="0"
+                      :max="l.available"
+                      step="0.001"
+                      placeholder="输入数量"
+                    />
+                  </span>
+                  <span class="op-col">
+                    <button class="mini-btn" type="button" @click="removeAllocLine(idx)" title="删除该行">−</button>
+                    <button class="mini-btn add" type="button" @click="addAllocLine" title="新增一行">+</button>
+                  </span>
+                </div>
+              </div>
+              <div class="acts">
+                <button class="ghost-btn" type="button" @click="smartAllocate(so.id)">智能分配</button>
+                <button class="pri-btn" type="button" :disabled="allocSaving" @click="doAllocateForSales(so.id)">
+                  {{ allocSaving ? '分配中…' : '分配所选' }}
+                </button>
+              </div>
             </div>
           </div>
           <!-- 质检提示 -->
@@ -1519,38 +1827,81 @@ onMounted(async () => {
           <h2>我的库存</h2>
         </div>
 
+        <!-- 库存筛选:余量/名字/入库时间(需求4) -->
+        <div class="inv-filter">
+          <select v-model="invFilter.availability">
+            <option value="ALL">全部余量</option>
+            <option value="HAS">有余量</option>
+            <option value="NONE">无余量</option>
+          </select>
+          <input v-model="invFilter.keyword" type="text" placeholder="按产品名/批次号筛选" />
+          <select v-model="invFilter.sort">
+            <option value="NEW">入库时间 新→旧</option>
+            <option value="OLD">入库时间 旧→新</option>
+          </select>
+        </div>
+
         <!-- 库存汇总:每个角色看到自己组织名下的批次存货 -->
         <div v-if="myInventory.length" class="inv-summary">
           <table class="tb">
             <thead>
               <tr>
-                <th>批次号</th><th>产品</th><th>总量</th><th>已分配</th><th>可用</th><th>状态</th><th>溯源记录</th>
-                <th v-if="isProcessor">操作</th>
+                <th>批次号</th><th>产品</th><th>总量</th><th>已分配</th><th>可用</th><th>入库时间</th><th>状态</th><th>溯源记录</th>
+                <th v-if="isProcessor || isDistributor">操作</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="b in myInventory" :key="b.batchId">
+              <tr v-for="b in filteredInventory" :key="b.batchId">
                 <td class="mono">{{ b.batchNo }}</td>
                 <td>{{ b.productName || '#' + b.productId }}</td>
                 <td>{{ b.totalQuantity }}{{ b.unitCode }}</td>
                 <td>{{ b.allocatedQuantity }}{{ b.unitCode }}</td>
                 <td class="avail">{{ b.availableQuantity }}{{ b.unitCode }}</td>
+                <td class="mono sm">{{ b.productionDate || (b.createdAt ? formatTime(b.createdAt) : '—') }}</td>
                 <td><span class="badge" :class="statusBadge(b.status)">{{ b.status }}</span></td>
                 <td>{{ b.traceEventCount }} 条</td>
-                <td v-if="isProcessor">
+                <td v-if="isProcessor || isDistributor">
                   <button
-                    v-if="b.batchType === 'SOURCE' && b.status === 'ACTIVE' && b.availableQuantity > 0"
+                    v-if="isProcessor && b.batchType === 'SOURCE' && b.status === 'ACTIVE' && b.availableQuantity > 0"
                     class="pri-btn sm"
                     type="button"
                     @click="openProcessForm(b.batchId)"
                   >加工</button>
+                  <button
+                    v-else-if="isDistributor && b.batchType === 'PROCESSED' && b.status === 'ACTIVE' && b.availableQuantity > 0"
+                    class="pri-btn sm"
+                    type="button"
+                    @click="openRepackForm(b.batchId)"
+                  >分拣分装</button>
                   <span v-else class="muted">—</span>
                 </td>
               </tr>
             </tbody>
           </table>
+          <p v-if="!filteredInventory.length" class="muted" style="margin-top: 12px">没有符合筛选条件的批次</p>
         </div>
         <p v-else class="muted">暂无库存批次</p>
+
+        <!-- 批发分拣分装表单(需求5) -->
+        <div v-if="repackFormOpen !== null" class="modal-overlay" @click.self="repackFormOpen = null">
+          <div class="modal-box">
+            <h3>分拣分装</h3>
+            <p class="note">消耗上游加工批次，产出同产品分销批次(DISTRIBUTION)，产出后可在溯源树看到分拣环节</p>
+            <p v-if="repackError" class="err">{{ repackError }}</p>
+            <div class="form-row">
+              <label>消耗数量(kg)</label>
+              <input v-model.number="repackForm.consumedQuantity" type="number" step="0.001" min="0.001" placeholder="输入消耗加工批次数量" />
+            </div>
+            <div class="form-row">
+              <label>产出数量(kg)</label>
+              <input v-model.number="repackForm.outputQuantity" type="number" step="0.001" min="0.001" placeholder="输入产出分销批次数量" />
+            </div>
+            <div class="acts">
+              <button class="pri-btn" type="button" @click="doRepack">确认分装</button>
+              <button type="button" @click="repackFormOpen = null">取消</button>
+            </div>
+          </div>
+        </div>
 
         <!-- 加工厂加工表单 -->
         <div v-if="processFormOpen !== null" class="modal-overlay" @click.self="processFormOpen = null">
@@ -2198,6 +2549,59 @@ textarea {
   border-left: 3px solid #3b82f6;
   border-radius: 4px;
 }
+/* 分配表单:产品级多行 grid 布局 */
+.alloc-list .row.alloc-head,
+.alloc-list .row.alloc-row {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr 1fr 0.7fr;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+}
+.alloc-list .row.alloc-head {
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+  border-bottom: 1px solid #e2e8f0;
+}
+.alloc-list .row.alloc-row {
+  border-bottom: 1px dashed #e2e8f0;
+}
+.alloc-list .row.alloc-row .qty-col input,
+.alloc-list .row.alloc-row .prod-col select {
+  width: 100%;
+  padding: 3px 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.alloc-list .row.alloc-row .avail-col {
+  font-size: 13px;
+  color: #059669;
+  font-weight: 600;
+}
+.mini-btn {
+  width: 26px;
+  height: 26px;
+  line-height: 1;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  background: #fff;
+  color: #334155;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  margin-right: 4px;
+  transition: all 0.15s;
+}
+.mini-btn:hover {
+  border-color: #2563eb;
+  color: #2563eb;
+}
+.mini-btn.add:hover {
+  border-color: #059669;
+  color: #059669;
+}
 .contact-info {
   display: flex;
   gap: 16px;
@@ -2321,6 +2725,29 @@ textarea {
 .ghost-btn.sm {
   padding: 3px 8px;
   font-size: 12px;
+}
+.inv-filter {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 0 0 12px 0;
+}
+.inv-filter select,
+.inv-filter input {
+  padding: 5px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.inv-filter input {
+  flex: 1;
+  min-width: 180px;
+}
+.mono.sm {
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
 }
 .inv-summary {
   margin: 10px 0 16px 0;

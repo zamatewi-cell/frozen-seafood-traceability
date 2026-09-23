@@ -78,6 +78,7 @@ public class PublicTraceApplicationService {
     private final PublicTraceCodeIdempotencyMapper idempotencyMapper;
     private final com.example.traceability.trace.mapper.TransferMapper transferMapper;
     private final com.example.traceability.identity.mapper.OrganizationMapper organizationMapper;
+    private final com.example.traceability.identity.mapper.AppUserMapper appUserMapper;
 
     public PublicTraceApplicationService(
             BatchMapper batchMapper,
@@ -88,7 +89,8 @@ public class PublicTraceApplicationService {
             PublicTraceCodeBatchMapper publicTraceCodeBatchMapper,
             PublicTraceCodeIdempotencyMapper idempotencyMapper,
             com.example.traceability.trace.mapper.TransferMapper transferMapper,
-            com.example.traceability.identity.mapper.OrganizationMapper organizationMapper
+            com.example.traceability.identity.mapper.OrganizationMapper organizationMapper,
+            com.example.traceability.identity.mapper.AppUserMapper appUserMapper
     ) {
         this.batchMapper = batchMapper;
         this.batchRelationMapper = batchRelationMapper;
@@ -99,6 +101,7 @@ public class PublicTraceApplicationService {
         this.idempotencyMapper = idempotencyMapper;
         this.transferMapper = transferMapper;
         this.organizationMapper = organizationMapper;
+        this.appUserMapper = appUserMapper;
     }
 
     /**
@@ -648,7 +651,11 @@ public class PublicTraceApplicationService {
         if (batch == null || Objects.equals(batch.getIsDeleted(), 1)) {
             return null;
         }
-        com.example.traceability.identity.domain.Organization org = organizationMapper.selectById(batch.getOrgId());
+        // 溯源树应展示执行该环节的组织(批次创建者所属组织)，而非当前持有组织
+        // (批次经交接后 org_id 会转移到接收方，但创建者组织不变，代表真正执行该环节的企业)
+        Long creatorOrgId = batch.getCreatedBy() != null ? resolveCreatorOrgId(batch.getCreatedBy()) : null;
+        Long displayOrgId = creatorOrgId != null ? creatorOrgId : batch.getOrgId();
+        com.example.traceability.identity.domain.Organization org = organizationMapper.selectById(displayOrgId);
         String orgName = org != null ? org.getName() : "未知组织";
 
         List<PublicTraceProjectionResponse.TimelineItem> timeline =
@@ -687,13 +694,27 @@ public class PublicTraceApplicationService {
         );
     }
 
+    /**
+     * 解析批次创建者所属组织ID，用于溯源树展示真正执行该环节的企业。
+     * 用户组织不可变，故创建者组织即批次产生时的归属企业。
+     */
+    private Long resolveCreatorOrgId(Long createdByUserId) {
+        if (createdByUserId == null) {
+            return null;
+        }
+        com.example.traceability.identity.domain.AppUser creator = appUserMapper.selectById(createdByUserId);
+        return creator != null ? creator.getOrgId() : null;
+    }
+
     private String mapBatchTypeToStage(String batchType) {
         if (batchType == null) return "UNKNOWN";
         return switch (batchType) {
             case "SOURCE" -> "SOURCE";
             case "PROCESSING" -> "PROCESSING";
             case "DISTRIBUTION" -> "DISTRIBUTION";
-            case "SALE" -> "RETAIL";
+            // SALE 批次映射为独立"终端销售"层,与顶点 RETAIL(零售组织)区分
+            // 这样溯源树层级为: 零售终端(组织) > 终端销售(SALE) > 分拣批发 > 加工厂 > 捕捞船队
+            case "SALE" -> "RETAIL_SALE";
             default -> "UNKNOWN";
         };
     }
