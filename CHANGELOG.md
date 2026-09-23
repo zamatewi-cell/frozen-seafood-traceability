@@ -6,6 +6,17 @@
 
 ### Added
 
+- Phase A Slice 6 PublicTraceCode 与消费者全链（无 Flyway 迁移）：
+  - 消费者公开投影 `GET /api/public/v1/public/traces/{publicTraceId}` 聚合祖先谱系：一次 recursive CTE 只沿 `batch_relation` 向上遍历（兄弟批次永不进入、DAG 共同祖先去重、环安全），新增 `lineage`（响应内局部键 `N1…Nk`、世代、角色、产品公开名，谱系边来自已提交批次操作而非追溯事件）；时间线聚合目标与祖先批次的有效（SUBMITTED）事件，新增 `eventType` / `nodeKey`，按业务时间 → 世代 → 固定公开事件权重 → 内部稳定次序排序。
+  - 显式公开事件白名单（SOURCE、PROCESS、FREEZE、PACK、WAREHOUSE_IN、WAREHOUSE_OUT、TRANSPORT、ARRIVAL、SALE），SQL 只读取白名单列与白名单类型；PURCHASE 与未知类型不再出现在匿名投影中，未知数据来源不回显原值。
+  - 谱系完整性失败关闭：祖先批次缺失 / 已删除、谱系边批次操作无法解析、未受控操作类型或成环时返回 500 `PUBLIC_TRACE_LINEAGE_INTEGRITY`（通用说明、无内部 ID），绝不返回截断谱系。
+  - 只读事务一致性快照、固定 5 次集合查询（与谱系深度无关）；已售罄 CLOSED + RECALLED 时同时展示流转已关闭与按流转状态措辞的模拟召回提示（仅由批次风险状态决定）。
+  - 企业端 `GET /api/v1/batches/{batchId}/public-trace-code`：当前责任组织任意角色与平台只读；未激活 404 `PUBLIC_TRACE_CODE_NOT_FOUND`；激活 / 停用语义保持不变（一批一码、交接不换码、停用终态、关闭后不能首次激活）。
+  - 生产 Vue：批次详情“公开追溯码”面板（激活、查看 / 复制 / 打开消费者入口、二次确认停用）；消费者页新增“批次上游谱系”与时间线节点标签，公开码标签改为“公开追溯码”（移除“证书”措辞）。
+  - 业务时间精度：自有冷库出入库与终端销售表单改为按秒登记（`datetime-local step="1"`，本地 `YYYY-MM-DDTHH:mm:ss`，不编造毫秒），修复同一分钟内晚于运输到达的销售被登记为更早时间、公开时间线呈现“先销售后到达”的问题；服务端语义不变。
+  - 消费者 RECALLED 综合状态改为“模拟召回演练”，并在同一条可见信息中声明仅用于教学实训、不代表真实产品召回、安全鉴定或监管结论（移除脱离演练语境的“请勿继续食用或销售”）。
+  - 真实浏览器验收：`real-slice5.spec.ts` 在零售接受之后、终端销售之前激活 B2 / B3 公开追溯码；新增 `real-slice6.spec.ts` 以未登录浏览器扫码查询已售罄的 B2（B0 → B1 → B2）与 B3（B0 → B1 → B3），并做匿名探测、业务时间先后（S1 发运 ≤ 到达 ≤ 销售）与零写入校验。
+
 - Phase A Slice 5 终端 Sale：
   - Flyway V11：新建追加式终端销售台账 `sale`（正数量、kg、仅 `SUBMITTED`、组织内幂等键唯一 + 请求语义哈希、`(site_id, org_id)` 复合外键保证场所属于销售组织；无消费者 / 支付 / 订单 / 发票字段）；`site` 增加 `UNIQUE (id, org_id)`；`batch` 增加写一次标记 `first_sale_id`，复合外键 `(first_sale_id, id, org_id) → sale(id, batch_id, org_id)` 保证只能指向同批次同组织的 Sale，CHECK 禁止同时被操作全量消耗、禁止 DRAFT；历史批次不回填。
   - 终端销售 API `POST / GET /api/v1/batches/{batchId}/sales`：仅当前责任 RETAILER 的 OPERATOR 在本组织启用 STORE 门店提交；部分销售、超卖 422、售罄同事务 CLOSED；每笔成功 Sale 自动生成且仅生成一条 SALE 追溯事件（`SYS:SALE:SALE:{saleId}`）；幂等重放先于状态校验，业务时间统一规范化为 UTC 微秒参与哈希与持久化。
