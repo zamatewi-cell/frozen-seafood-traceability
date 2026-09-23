@@ -82,10 +82,23 @@ async function recordWarehouse(page: Page, batchId: number, direction: 'in' | 'o
   expect(optionValue).toBeTruthy()
   await site.selectOption(optionValue as string)
   await expect(page.getByTestId('field-warehouse-summary')).toHaveValue(`${direction === 'in' ? '冷库入库' : '冷库出库'}：${expected.coldStoreName}`)
+  // 业务时间精确到秒（step=1），界面值 → 请求载荷 → 数据库回读一致，不编造毫秒
+  const occurredInput = page.getByTestId('field-warehouse-occurred-at')
+  await expect(occurredInput).toHaveAttribute('step', '1')
+  const uiValue = await occurredInput.inputValue()
   const post = waitForApi(page, 'POST', new RegExp(`^/api/v1/batches/${batchId}/events$`))
   await page.getByTestId('warehouse-submit').click()
-  expect((await post).status()).toBe(201)
+  const response = await post
+  expect(response.status()).toBe(201)
+  const payloadOccurredAt = JSON.parse(response.request().postData() || '{}').occurredAt as string
+  expect(payloadOccurredAt).toBe(new Date(uiValue).toISOString())
+  expect(payloadOccurredAt).toMatch(/:\d{2}\.000Z$/)
+  const eventId = (await response.json()).data.id as number
   await expect(page.getByTestId('batch-flash')).toContainText(direction === 'in' ? '冷库入库已记录' : '冷库出库已记录')
+  const stored = ((await (await page.request.get(`/api/v1/batches/${batchId}/events`)).json()).data as Array<{ id: number; occurredAt: string }>)
+    .find((e) => e.id === eventId)
+  expect(stored, 'warehouse event read back from the database').toBeDefined()
+  expect(Date.parse(stored!.occurredAt)).toBe(Date.parse(payloadOccurredAt))
 }
 
 test('Slice 4: PROCESSOR records own cold-store WAREHOUSE_IN / WAREHOUSE_OUT for B2 and B3 without changing the batches', async ({ browser }) => {

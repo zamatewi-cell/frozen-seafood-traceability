@@ -247,6 +247,8 @@ async function seedBusinessData(suffix, master, passwordA, passwordB) {
   const recalled = await createBatch(sessionA, { ...base, productId: master.productShrimp, externalBatchNo: 'P0-EXT-004', quantity: 60 }, true)
   const closed = await createBatch(sessionA, { ...base, productId: master.productFish, quantity: 12.345 }, true)
   const publicCode = await sessionA.write('POST', `/api/v1/batches/${active.id}/public-trace-code/activate`, undefined, { 'Idempotency-Key': randomUUID() })
+  // Slice 6 只读回归：在批次仍为 ACTIVE + NORMAL 时正常激活，再由下方种子 SQL 置为 CLOSED + RECALLED（Phase A 无风险写入接口）
+  const recalledCode = await sessionA.write('POST', `/api/v1/batches/${recalled.id}/public-trace-code/activate`, undefined, { 'Idempotency-Key': randomUUID() })
 
   const sessionB = new ApiSession()
   await sessionB.login(`p0_src_b_${suffix}`, passwordB)
@@ -259,7 +261,7 @@ async function seedBusinessData(suffix, master, passwordA, passwordB) {
     UPDATE batch SET flow_status = 'CLOSED' WHERE id = ${closed.id};
   `, { database: schema })
 
-  return { active, draft, frozen, recalled, closed, foreign, publicTraceId: publicCode.publicId }
+  return { active, draft, frozen, recalled, closed, foreign, publicTraceId: publicCode.publicId, recalledPublicTraceId: recalledCode.publicId }
 }
 
 function databaseEvidence(orgA) {
@@ -684,6 +686,84 @@ function runBrowserSmoke(env, spec = 'tests/e2e/real-smoke.spec.ts') {
   })
 }
 
+/**
+ * Slice 5 / 6 公开追溯码事实：B2 / B3 各恰好一个 ACTIVE 码且持有组织为零售企业（交接不换码、不复制）；
+ * 激活发生在该批次第一笔终端销售之前（契约 v1.1 §12 第 18 → 19 步）；售罄 CLOSED 不会自动停用已激活码；
+ * 激活不产生任何追溯事件。
+ */
+function verifySlice5PublicCodes(retail, ids) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const perBatch = (id) => q(`SELECT
+      (SELECT COUNT(*) FROM public_trace_code WHERE batch_id = ${id}),
+      (SELECT COUNT(*) FROM public_trace_code WHERE batch_id = ${id} AND status = 'ACTIVE' AND is_deleted = 0 AND org_id = ${retail.retailerOrgId}),
+      (SELECT COUNT(*) FROM public_trace_code p WHERE p.batch_id = ${id}
+         AND p.activated_at <= (SELECT MIN(s.created_at) FROM sale s WHERE s.batch_id = ${id})),
+      (SELECT flow_status FROM batch WHERE id = ${id}),
+      (SELECT COUNT(*) FROM public_trace_code_idempotency WHERE batch_id = ${id} AND action = 'ACTIVATE' AND org_id = ${retail.retailerOrgId});`).split('\t')
+  const [b2Codes, b2Active, b2BeforeSale, b2Flow, b2Idem] = perBatch(ids.b2Id)
+  const [b3Codes, b3Active, b3BeforeSale, b3Flow, b3Idem] = perBatch(ids.b3Id)
+  const [otherCodes, activationEvents] = q(`SELECT
+      (SELECT COUNT(*) FROM public_trace_code WHERE batch_id IN (${ids.b0Id}, ${ids.b1Id})),
+      (SELECT COUNT(*) FROM trace_event WHERE org_id = ${retail.retailerOrgId} AND event_type <> 'SALE');`).split('\t')
+  const facts = {
+    'B2 / B3 各恰好一个公开追溯码（一批一码）': b2Codes === '1' && b3Codes === '1',
+    'B2 / B3 公开追溯码 ACTIVE 且持有组织为零售企业（售罄 CLOSED 不自动停用）': b2Active === '1' && b3Active === '1' && b2Flow === 'CLOSED' && b3Flow === 'CLOSED',
+    '激活时间早于该批次第一笔终端销售（接受 → 激活 → 销售）': b2BeforeSale === '1' && b3BeforeSale === '1',
+    '激活由零售企业以幂等键提交': Number(b2Idem) >= 1 && Number(b3Idem) >= 1,
+    'B0 / B1 未激活公开追溯码（祖先不另外发码）': otherCodes === '0',
+    '激活不产生追溯事件（零售企业只有 SALE 事件）': activationEvents === '0'
+  }
+  for (const [fact, ok] of Object.entries(facts)) console.log(`[smoke] MySQL ${ok ? '✔' : '✘'} ${fact}`)
+  if (Object.values(facts).some((ok) => !ok)) {
+    throw new Error(`Slice 5 公开追溯码事实不符合预期: b2=${perBatch(ids.b2Id)} b3=${perBatch(ids.b3Id)} others=${otherCodes} events=${activationEvents}`)
+  }
+}
+
+/**
+ * Slice 5 业务时间先后（数据库中存储的业务事实，而非页面位置）：S1 发运 ≤ S1 到达 ≤ 各批次第一笔销售，同一批次销售按提交顺序不倒退；
+ * 冷库与销售表单按秒登记业务时间（不向下取整到分钟、不编造毫秒），存储值没有亚秒部分。
+ */
+function verifySlice5Chronology(retail, ids) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const perBatch = (id) => q(`SELECT
+      (SELECT s.loaded_at <= s.unloaded_at FROM shipment s JOIN transfer t ON t.shipment_id = s.id
+         WHERE t.batch_id = ${id} AND t.receiver_org_id = ${retail.retailerOrgId}),
+      (SELECT s.unloaded_at <= (SELECT MIN(x.occurred_at) FROM sale x WHERE x.batch_id = ${id})
+         FROM shipment s JOIN transfer t ON t.shipment_id = s.id WHERE t.batch_id = ${id} AND t.receiver_org_id = ${retail.retailerOrgId}),
+      (SELECT COUNT(*) FROM sale a JOIN sale b ON a.batch_id = b.batch_id AND a.id < b.id AND a.occurred_at > b.occurred_at WHERE a.batch_id = ${id}),
+      (SELECT COUNT(*) FROM sale WHERE batch_id = ${id} AND MICROSECOND(occurred_at) <> 0),
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id = ${id} AND event_type IN ('WAREHOUSE_IN', 'WAREHOUSE_OUT') AND MICROSECOND(occurred_at) <> 0),
+      (SELECT CONCAT_WS(' <= ', DATE_FORMAT(s.loaded_at, '%H:%i:%s.%f'), DATE_FORMAT(s.unloaded_at, '%H:%i:%s.%f'),
+              (SELECT GROUP_CONCAT(DATE_FORMAT(x.occurred_at, '%H:%i:%s.%f') ORDER BY x.id SEPARATOR ' <= ') FROM sale x WHERE x.batch_id = ${id}))
+         FROM shipment s JOIN transfer t ON t.shipment_id = s.id WHERE t.batch_id = ${id} AND t.receiver_org_id = ${retail.retailerOrgId});`).split('\t')
+  const [b2LoadedBeforeUnloaded, b2ArrivalBeforeSale, b2SaleInversions, b2SaleSubSecond, b2WarehouseSubSecond, b2Line] = perBatch(ids.b2Id)
+  const [b3LoadedBeforeUnloaded, b3ArrivalBeforeSale, b3SaleInversions, b3SaleSubSecond, b3WarehouseSubSecond, b3Line] = perBatch(ids.b3Id)
+  const facts = {
+    'S1 发运（loaded_at）≤ S1 到达（unloaded_at）': b2LoadedBeforeUnloaded === '1' && b3LoadedBeforeUnloaded === '1',
+    'S1 到达 ≤ B2 第一笔销售，S1 到达 ≤ B3 销售': b2ArrivalBeforeSale === '1' && b3ArrivalBeforeSale === '1',
+    'B2 两笔销售业务时间按提交顺序不倒退': b2SaleInversions === '0' && b3SaleInversions === '0',
+    '销售与冷库业务时间按秒登记（无亚秒部分，界面不编造毫秒）': b2SaleSubSecond === '0' && b3SaleSubSecond === '0'
+      && b2WarehouseSubSecond === '0' && b3WarehouseSubSecond === '0'
+  }
+  for (const [fact, ok] of Object.entries(facts)) console.log(`[smoke] MySQL ${ok ? '✔' : '✘'} ${fact}`)
+  console.log(`[smoke] MySQL B2 业务时间（UTC）：S1 发运 <= S1 到达 <= 销售: ${b2Line}`)
+  console.log(`[smoke] MySQL B3 业务时间（UTC）：S1 发运 <= S1 到达 <= 销售: ${b3Line}`)
+  if (Object.values(facts).some((ok) => !ok)) {
+    throw new Error(`Slice 5 业务时间先后不符合预期: b2=${perBatch(ids.b2Id)} b3=${perBatch(ids.b3Id)}`)
+  }
+}
+
+/** Slice 6 前后快照：消费者匿名查询与零售企业只读查看不得产生任何业务写入。 */
+function slice6Snapshot(ids) {
+  const all = [ids.b0Id, ids.b1Id, ids.b2Id, ids.b3Id].join(',')
+  return mysql(`SELECT
+      (SELECT GROUP_CONCAT(CONCAT(id, ':', version, ':', flow_status, ':', risk_status, ':', org_id) ORDER BY id) FROM batch WHERE id IN (${all})),
+      (SELECT GROUP_CONCAT(CONCAT(id, ':', status, ':', version, ':', org_id) ORDER BY id) FROM public_trace_code WHERE batch_id IN (${all})),
+      (SELECT COUNT(*) FROM trace_event), (SELECT COUNT(*) FROM audit_log), (SELECT COUNT(*) FROM batch),
+      (SELECT COUNT(*) FROM batch_relation), (SELECT COUNT(*) FROM sale), (SELECT COUNT(*) FROM transfer),
+      (SELECT COUNT(*) FROM shipment), (SELECT COUNT(*) FROM public_trace_code), (SELECT COUNT(*) FROM public_trace_code_idempotency);`, { database: schema })
+}
+
 let backend
 let viteServer
 let schemaCreated = false
@@ -731,8 +811,9 @@ try {
     console.log('[smoke] Slice 3：加工企业接受 B0 后，在 B0 详情执行“加工”（产出 960，损耗 30，留样 10），再对 B1 执行“拆分”（600 + 360）。')
     console.log(`[smoke] Slice 4：加工企业在 B2、B3 详情“自有冷库仓储”中选择 ${slice2.coldStoreName}，各执行一次冷库入库与冷库出库。`)
     console.log(`[smoke] Slice 5：加工企业为 B2、B3 分别发起交接给 ${retail.retailerOrgName}，在同一运输任务装载两张交接（目的地 ${retail.storeName}）并提交；承运商发运、到达；`)
-    console.log(`[smoke]          零售企业接受后在 B2 详情"终端销售"中于 ${retail.storeName} 先售 200、再售 400，在 B3 售出全部 360。`)
-    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 ~ Slice 5 数据库事实，再停止服务并删除 schema。')
+    console.log(`[smoke]          零售企业接受后先在 B2、B3 详情“公开追溯码”中激活公开追溯码，再在 B2 详情"终端销售"中于 ${retail.storeName} 先售 200、再售 400，在 B3 售出全部 360。`)
+    console.log('[smoke] Slice 6：在零售企业 B2 / B3 详情复制消费者查询链接，用未登录的浏览器窗口打开，查看 B0 → B1 → B2（或 B3）谱系与公开事实。')
+    console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 ~ Slice 6 数据库事实，再停止服务并删除 schema。')
     await waitForInterrupt()
     try {
       verifySlice2Database(slice2, b0.id)
@@ -756,6 +837,16 @@ try {
       } catch (verifyError) {
         console.error(verifyError.message)
       }
+      try {
+        verifySlice5PublicCodes(retail, slice3Ids)
+      } catch (verifyError) {
+        console.error(verifyError.message)
+      }
+      try {
+        verifySlice5Chronology(retail, slice3Ids)
+      } catch (verifyError) {
+        console.error(verifyError.message)
+      }
     }
   } else {
   const fixture = await seedBusinessData(suffix, master, passwordA, passwordB)
@@ -772,7 +863,8 @@ try {
     recalled: fixture.recalled.traceBatchNo,
     closed: fixture.closed.traceBatchNo,
     foreign: fixture.foreign.traceBatchNo,
-    publicTraceId: fixture.publicTraceId
+    publicTraceId: fixture.publicTraceId,
+    recalledPublicTraceId: fixture.recalledPublicTraceId
   }
   await runBrowserSmoke({
     SMOKE_USERNAME: `p0_src_a_${suffix}`,
@@ -850,7 +942,34 @@ try {
     })
   }, 'tests/e2e/real-slice5.spec.ts')
   verifySlice5Database(slice2, retail, slice3Ids)
-  console.log('[smoke] Slice 5 真实加工 → 零售交接与终端 Sale 浏览器验收与 MySQL 事实校验通过')
+  verifySlice5PublicCodes(retail, slice3Ids)
+  verifySlice5Chronology(retail, slice3Ids)
+  console.log('[smoke] Slice 5 真实加工 → 零售交接、销售前激活公开追溯码与终端 Sale 浏览器验收与 MySQL 事实校验通过')
+
+  const slice6Before = slice6Snapshot(slice3Ids)
+  await runBrowserSmoke({
+    SLICE6_RETAILER_USERNAME: retail.username,
+    SLICE6_RETAILER_PASSWORD: slice5Password,
+    SLICE6_EXPECTED: JSON.stringify({
+      b2Id: slice3Ids.b2Id,
+      b3Id: slice3Ids.b3Id,
+      b2TraceBatchNo: traceNo(slice3Ids.b2Id),
+      b3TraceBatchNo: traceNo(slice3Ids.b3Id),
+      // 这些内部 / 企业信息绝不能出现在匿名消费者页面或响应中
+      forbidden: [
+        traceNo(slice3Ids.b0Id), traceNo(slice3Ids.b1Id),
+        slice2.sourceOrgName, slice2.carrierOrgName, slice2.processorOrgName, retail.retailerOrgName,
+        slice2.sourceSiteName, slice2.processorSiteName, slice2.coldStoreName, retail.storeName,
+        slice2.usernames.source, slice2.usernames.carrier, slice2.usernames.processor, retail.username,
+        '浙L·冷S2001', '浙L·冷S5001', '东海舟山渔场（Slice 2 验收）', 'S2-B0', 'SYS:', 'detailsJson', 'summary'
+      ]
+    })
+  }, 'tests/e2e/real-slice6.spec.ts')
+  const slice6After = slice6Snapshot(slice3Ids)
+  const slice6ReadOnly = slice6After === slice6Before
+  console.log(`[smoke] MySQL ${slice6ReadOnly ? '✔' : '✘'} Slice 6 匿名消费者查询与零售企业只读查看零写入（批次 / 公开码版本与全部业务表行数不变）`)
+  if (!slice6ReadOnly) throw new Error(`Slice 6 查询产生了写入: before=${slice6Before} after=${slice6After}`)
+  console.log('[smoke] Slice 6 真实匿名消费者扫码 B2 / B3 公开全链浏览器验收与 MySQL 零写入校验通过')
   }
 } catch (error) {
   primaryError = error

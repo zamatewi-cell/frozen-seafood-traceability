@@ -19,6 +19,8 @@ interface Expected {
   closed: string
   foreign: string
   publicTraceId: string
+  /** 正常激活后由隔离 schema 种子 SQL 置为 CLOSED + RECALLED 的批次公开码（Phase A 无风险写入接口） */
+  recalledPublicTraceId: string
 }
 
 const expected: Expected = JSON.parse(process.env.SMOKE_EXPECTED || '{}')
@@ -196,6 +198,35 @@ test('consumer trace stays anonymous against the real backend', async ({ browser
   for (const line of evidence) expect(line.requestId).not.toBe('')
   console.log('[real-smoke] consumer API evidence:')
   for (const line of evidence) console.log(`  ${line.method} ${line.path} ${line.status} ${line.requestId}`)
+  await context.close()
+})
+
+test('seeded CLOSED + RECALLED batch shows sold-out flow status and the simulated recall notice together (real backend, anonymous)', async ({ browser }) => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const evidence: EvidenceLine[] = []
+  recordApiTraffic(page, evidence)
+
+  const traceResponse = waitForApi(page, 'GET', (url) => url.pathname === `/api/public/v1/public/traces/${expected.recalledPublicTraceId}`)
+  await page.goto(`/trace/${expected.recalledPublicTraceId}`)
+  const response = await traceResponse
+  expect(response.status()).toBe(200)
+  const body = (await response.json()).data
+  expect(body.flowStatus).toBe('CLOSED')
+  expect(body.riskStatus).toBe('RECALLED')
+  await expect(page.locator('.recall-alert-card')).toContainText('已结束正常流转')
+  await expect(page.locator('.recall-alert-card')).toContainText('教学演练推演')
+  await expect(page.locator('.recall-alert-card')).toContainText('不替代企业真实法定公告')
+  await expect(page.getByTestId('public-flow-status')).toHaveText('已关闭')
+  await expect(page.getByTestId('public-risk-status')).toHaveText('模拟召回')
+  // 综合状态结论与双维状态同屏：明确“模拟召回演练”，不出现脱离演练语境的现实处置指令
+  await expect(page.getByTestId('public-status-badge')).toContainText('模拟召回演练')
+  await expect(page.getByTestId('public-status-note')).toContainText('此批次当前处于系统模拟召回状态')
+  await expect(page.getByTestId('public-status-note')).toContainText('本提示仅用于教学实训，不代表真实产品召回、安全鉴定或监管结论')
+  await expect(page.locator('body')).not.toContainText('请勿')
+  await expect(page.locator('.temp-summary-card')).toContainText('暂无实时时序采集')
+  await expect(page.locator('body')).not.toContainText(expected.recalled)
+  expect(evidence.some((line) => line.path.startsWith('/api/v1/'))).toBe(false)
   await context.close()
 })
 
