@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { mockSuccessTrace, mockRecalledTrace, mockEmptyTimelineTrace } from './fixtures'
+import { mockSuccessTrace, mockRecalledTrace, mockEmptyTimelineTrace, mockClosedRecalledTrace } from './fixtures'
 
 test.describe('Consumer Trace Flow', () => {
   test('manual entry flow on /trace with keyboard and click submission', async ({ page }) => {
@@ -57,7 +57,39 @@ test.describe('Consumer Trace Flow', () => {
     await expect(page.locator('.temp-disclaimer')).toContainText('不伪造温控合规结论')
     await expect(page.locator('.trace-disclosure-card')).toContainText('查询时间')
     await expect(page.locator('.trace-disclosure-card')).toContainText(mockSuccessTrace.disclosure)
+    // 上游谱系：来源批次 → 加工 → 加工批次 → 拆分 → 本批次；时间线项目标注所属谱系节点
+    await expect(page.getByTestId('lineage-node')).toHaveCount(3)
+    await expect(page.getByTestId('lineage-node').nth(0)).toHaveAttribute('data-role', 'ORIGIN')
+    await expect(page.getByTestId('lineage-node').nth(2)).toContainText('本批次')
+    await expect(page.getByTestId('lineage-edge')).toHaveCount(2)
+    await expect(page.getByTestId('lineage-edge').nth(1)).toHaveAttribute('data-operation-type', 'SPLIT')
+    await expect(page.getByTestId('public-timeline-node').first()).toHaveText('来源批次')
+    await expect(page.locator('.trace-id-badge')).toContainText('公开追溯码')
+    await expect(page.locator('body')).not.toContainText('证书')
     expect(requestCount).toBe(1)
+  })
+
+  test('seeded CLOSED + RECALLED shows sold-out flow status and the simulated recall notice at the same time', async ({ page }) => {
+    await page.route('**/api/public/v1/public/traces/CLSRCL2C4P4Q6T7XZ2M7K3B2AC', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: mockClosedRecalledTrace, meta: { requestId: 'req-e2e-05', timestamp: '2026-09-10T08:00:00Z' } })
+      })
+    })
+
+    await page.goto('/trace/CLSRCL2C4P4Q6T7XZ2M7K3B2AC')
+    await expect(page.locator('.recall-alert-card')).toContainText('已结束正常流转')
+    await expect(page.locator('.recall-alert-card')).toContainText('教学演练推演')
+    await expect(page.getByTestId('public-flow-status')).toHaveText('已关闭')
+    await expect(page.getByTestId('public-risk-status')).toHaveText('模拟召回')
+    await expect(page.getByTestId('public-status-badge')).toContainText('模拟召回演练')
+    await expect(page.getByTestId('public-status-note')).toContainText('此批次当前处于系统模拟召回状态')
+    await expect(page.getByTestId('public-status-note')).toContainText('本提示仅用于教学实训，不代表真实产品召回、安全鉴定或监管结论')
+    await expect(page.locator('body')).not.toContainText('请勿')
+    await expect(page.locator('.temp-summary-card')).toContainText('暂无实时时序采集')
+    await expect(page.locator('.trace-disclosure-card')).toContainText(mockClosedRecalledTrace.disclosure)
+    await expect(page.getByTestId('lineage-node')).toHaveCount(3)
   })
 
   test('recalled state renders prominent simulated recall drill banner', async ({ page }) => {
@@ -78,6 +110,9 @@ test.describe('Consumer Trace Flow', () => {
     await expect(recallAlert).toContainText('系统模拟召回演练声明')
     await expect(recallAlert).toContainText('教学演练推演')
     await expect(recallAlert).toContainText('此批次海产品已启动系统模拟召回演练')
+    await expect(page.getByTestId('public-status-badge')).toContainText('模拟召回演练')
+    await expect(page.getByTestId('public-status-note')).toContainText('本提示仅用于教学实训，不代表真实产品召回、安全鉴定或监管结论')
+    await expect(page.locator('body')).not.toContainText('请勿继续食用或销售')
   })
 
   test('empty timeline state renders friendly empty notice instead of broken table', async ({ page }) => {

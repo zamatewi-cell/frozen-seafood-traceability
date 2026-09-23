@@ -16,14 +16,14 @@ const riskInfo = computed(() => formatRiskStatus(props.trace.riskStatus))
 <template>
   <section class="consumer-hero-card" aria-label="批次概述与状态">
     <div class="hero-top-row">
-      <div class="status-badge" :class="statusInfo.tone" role="status">
+      <div class="status-badge" :class="statusInfo.tone" role="status" data-testid="public-status-badge">
         <AppIcons v-if="statusInfo.tone === 'success'" name="check-circle" size="14" />
         <AppIcons v-else-if="statusInfo.tone === 'danger'" name="alert-triangle" size="14" />
         <AppIcons v-else-if="statusInfo.tone === 'warning'" name="alert-triangle" size="14" />
         <AppIcons v-else name="info" size="14" />
         <span>{{ statusInfo.label }}</span>
       </div>
-      <span class="status-note">{{ statusInfo.description }}</span>
+      <span class="status-note" data-testid="public-status-note">{{ statusInfo.description }}</span>
     </div>
 
     <p class="dual-status-row" aria-label="批次双维状态">
@@ -43,8 +43,8 @@ const riskInfo = computed(() => formatRiskStatus(props.trace.riskStatus))
     </div>
 
     <div class="trace-id-badge">
-      <span class="trace-id-label">查验证书编码：</span>
-      <code class="trace-id-code mono">{{ trace.publicTraceId }}</code>
+      <span class="trace-id-label">公开追溯码：</span>
+      <code class="trace-id-code mono" data-testid="public-trace-id">{{ trace.publicTraceId }}</code>
     </div>
   </section>
 </template>

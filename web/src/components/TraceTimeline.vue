@@ -3,9 +3,13 @@ import AppIcons from '@/components/icons/AppIcons.vue'
 import type { TimelineItem } from '@/types/trace'
 import { formatIsoDateTime } from '@/utils/formatters'
 
-defineProps<{
+withDefaults(defineProps<{
   timeline: TimelineItem[]
-}>()
+  /** 谱系节点键 → 展示标签（来源批次 / 加工批次 / 本批次 …）；缺省时不显示节点标签 */
+  nodeLabels?: Record<string, string>
+}>(), {
+  nodeLabels: () => ({})
+})
 
 function isSimulatedSource(label: string): boolean {
   return label.includes('SIMULATED') || label.includes('模拟')
@@ -31,7 +35,14 @@ function isDeviceSource(label: string): boolean {
     </div>
 
     <ol v-else class="timeline-list">
-      <li v-for="(item, idx) in timeline" :key="idx" class="timeline-item">
+      <li
+        v-for="(item, idx) in timeline"
+        :key="idx"
+        class="timeline-item"
+        data-testid="public-timeline-item"
+        :data-event-type="item.eventType"
+        :data-node-key="item.nodeKey"
+      >
         <div class="timeline-marker">
           <span class="marker-number">{{ idx + 1 }}</span>
           <span v-if="idx < timeline.length - 1" class="marker-line" />
@@ -42,6 +53,9 @@ function isDeviceSource(label: string): boolean {
             <time class="item-time mono">{{ formatIsoDateTime(item.occurredAt) }}</time>
           </div>
           <div class="item-source-row">
+            <span v-if="item.nodeKey && nodeLabels[item.nodeKey]" class="node-tag" data-testid="public-timeline-node">
+              {{ nodeLabels[item.nodeKey] }}
+            </span>
             <span class="source-label-tag" :class="{ 'simulated-tag': isSimulatedSource(item.dataSourceLabel) }">
               {{ item.dataSourceLabel }}
             </span>
@@ -145,6 +159,14 @@ function isDeviceSource(label: string): boolean {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+.node-tag {
+  font-size: 11px;
+  color: var(--color-ocean-hover);
+  background-color: var(--color-ocean-subtle);
+  border: 1px solid var(--color-ocean-border);
+  padding: 1px 6px;
+  border-radius: 4px;
 }
 .source-label-tag {
   font-size: 11px;

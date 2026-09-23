@@ -62,9 +62,11 @@ describe('Security & Truthfulness Audits', () => {
       props: {
         timeline: [
           {
+            eventType: 'SOURCE',
             event: '原料采收/出塘',
             occurredAt: '2026-09-01T08:00:00Z',
-            dataSourceLabel: '教学演练与仿真模拟数据（SIMULATED）'
+            dataSourceLabel: '教学演练与仿真模拟数据（SIMULATED）',
+            nodeKey: 'N1'
           }
         ]
       }
@@ -79,9 +81,11 @@ describe('Security & Truthfulness Audits', () => {
       props: {
         timeline: [
           {
+            eventType: 'TRANSPORT',
             event: '冷链干线运输',
             occurredAt: '2026-09-02T10:00:00Z',
-            dataSourceLabel: '标准预留设备标识（DEVICE，未接入真实硬件）'
+            dataSourceLabel: '标准预留设备标识（DEVICE，未接入真实硬件）',
+            nodeKey: 'N1'
           }
         ]
       }
