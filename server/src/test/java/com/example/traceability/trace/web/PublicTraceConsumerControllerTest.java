@@ -8,6 +8,7 @@ import com.example.traceability.identity.mapper.AppUserMapper;
 import com.example.traceability.identity.mapper.OrganizationMapper;
 import com.example.traceability.identity.mapper.RoleMapper;
 import com.example.traceability.identity.mapper.UserRoleMapper;
+import com.example.traceability.trace.PublicTraceJsonWhitelist;
 import com.example.traceability.trace.application.PublicTraceApplicationService;
 import com.example.traceability.trace.dto.PublicTraceProjectionResponse;
 import org.junit.jupiter.api.DisplayName;
@@ -19,6 +20,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
 
@@ -45,6 +47,9 @@ class PublicTraceConsumerControllerTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @MockitoBean
     private PublicTraceApplicationService publicTraceService;
@@ -105,9 +110,16 @@ class PublicTraceConsumerControllerTest {
                 SAMPLE_PUBLIC_ID,
                 new PublicTraceProjectionResponse.ProductProjection("舟山大黄鱼", "FISH", "500g-600g/条"),
                 new PublicTraceProjectionResponse.BatchProjection("SEC****999", "DOMESTIC_CAPTURE", "SE****EA", "2026-09-01"),
+                new PublicTraceProjectionResponse.LineageProjection(
+                        List.of(
+                                new PublicTraceProjectionResponse.LineageNode("N1", 0, "ORIGIN", "舟山大黄鱼（原料）"),
+                                new PublicTraceProjectionResponse.LineageNode("N2", 1, "TARGET", "舟山大黄鱼")
+                        ),
+                        List.of(new PublicTraceProjectionResponse.LineageEdge("N1", "N2", "PROCESS", "2026-09-01T10:00:00Z"))
+                ),
                 List.of(
-                        new PublicTraceProjectionResponse.TimelineItem("捕捞采收", "2026-09-01T08:00:00Z", "企业人工填报"),
-                        new PublicTraceProjectionResponse.TimelineItem("速冻冷冻", "2026-09-01T12:00:00Z", "教学演练与仿真模拟数据（SIMULATED）")
+                        new PublicTraceProjectionResponse.TimelineItem("SOURCE", "原料采收/出塘", "2026-09-01T08:00:00Z", "企业人工填报", "N1"),
+                        new PublicTraceProjectionResponse.TimelineItem("FREEZE", "速冻冷冻", "2026-09-01T12:00:00Z", "教学演练与仿真模拟数据（SIMULATED）", "N2")
                 ),
                 new PublicTraceProjectionResponse.TemperatureSummaryProjection("INSUFFICIENT_DATA", "当前切片尚未接入冷链实时温控采集流"),
                 "ACTIVE",
@@ -129,9 +141,16 @@ class PublicTraceConsumerControllerTest {
                 .andExpect(jsonPath("$.data.riskStatus").value("NORMAL"))
                 .andExpect(jsonPath("$.data.temperatureSummary.result").value("INSUFFICIENT_DATA"))
                 .andExpect(jsonPath("$.data.timeline[1].dataSourceLabel").value(org.hamcrest.Matchers.containsString("SIMULATED")))
+                .andExpect(jsonPath("$.data.timeline[1].eventType").value("FREEZE"))
+                .andExpect(jsonPath("$.data.timeline[1].nodeKey").value("N2"))
+                .andExpect(jsonPath("$.data.lineage.nodes.length()").value(2))
+                .andExpect(jsonPath("$.data.lineage.edges[0].operationType").value("PROCESS"))
+                // non_null 序列化：非 RECALLED 时 recallNotice 字段整体省略
+                .andExpect(jsonPath("$.data.recallNotice").doesNotExist())
                 .andReturn();
 
         String responseBody = result.getResponse().getContentAsString();
+        PublicTraceJsonWhitelist.assertOnlyWhitelistedKeys(objectMapper.readTree(responseBody));
 
         // 严格禁止字段字典校验 (Forbidden-field dictionary checks)
         assertThat(responseBody).doesNotContain(RAW_BATCH_NO);
@@ -162,6 +181,21 @@ class PublicTraceConsumerControllerTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("PUBLIC_TRACE_NOT_FOUND"))
                 .andExpect(jsonPath("$.detail").value("未找到对应的公开追溯信息或追溯码已失效"));
+    }
+
+    @Test
+    @DisplayName("谱系完整性失败：500 PUBLIC_TRACE_LINEAGE_INTEGRITY，通用说明不含内部 ID，不返回任何部分投影")
+    void testLineageIntegrityFailure() throws Exception {
+        when(publicTraceService.getPublicTrace(eq(SAMPLE_PUBLIC_ID)))
+                .thenThrow(new BusinessException(HttpStatus.INTERNAL_SERVER_ERROR, "PUBLIC_TRACE_LINEAGE_INTEGRITY",
+                        "追溯谱系数据不完整", "公开追溯谱系数据完整性校验未通过，暂时无法提供查询，请稍后重试"));
+
+        MvcResult result = mockMvc.perform(get("/api/public/v1/public/traces/" + SAMPLE_PUBLIC_ID))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("PUBLIC_TRACE_LINEAGE_INTEGRITY"))
+                .andExpect(jsonPath("$.data").doesNotExist())
+                .andReturn();
+        assertThat(result.getResponse().getContentAsString()).doesNotContain("\"lineage\"").doesNotContain("\"timeline\"").doesNotContain("\"nodes\"");
     }
 
     @Test

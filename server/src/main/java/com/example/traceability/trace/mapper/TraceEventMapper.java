@@ -8,6 +8,7 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -137,13 +138,29 @@ public interface TraceEventMapper extends BaseMapper<TraceEvent> {
     );
 
     /**
-     * 查询指定批次下所有生效中（状态为 SUBMITTED）的追溯事件列表（排除已被更正的历史事件，用于消费者公开时间线投影）。
+     * 消费者公开投影专用：批量读取一组批次（目标批次及其祖先）的有效公开事件。
+     * <p>
+     * 只返回生效版本（{@code status = 'SUBMITTED'}、未逻辑删除），更正前的 CORRECTED 历史版本不会出现；
+     * 只取公开投影与服务端稳定排序所需的列（id、batch_id、event_type、occurred_at、recorded_at、data_source），
+     * 从不装载 summary、details_json、操作人、组织、场所、幂等键或更正原因；事件类型限定为调用方传入的公开白名单。
+     * 单条 SQL 覆盖整条谱系，避免逐个祖先查询。
+     * </p>
      *
-     * @param batchId 批次 ID
-     * @return 稳定排序的有效追溯事件列表
+     * @param batchIds   目标批次及其祖先批次 ID（非空）
+     * @param eventTypes 公开事件类型白名单（非空）
+     * @return 有效公开事件（未排序语义由调用方决定）
      */
-    @Select("SELECT * FROM trace_event WHERE batch_id = #{batchId} AND status = 'SUBMITTED' AND is_deleted = 0 ORDER BY occurred_at ASC, recorded_at ASC, id ASC")
-    List<TraceEvent> selectEffectiveEventsByBatchId(@Param("batchId") Long batchId);
+    @Select("<script>" +
+            "SELECT id, batch_id, event_type, occurred_at, recorded_at, data_source FROM trace_event " +
+            "WHERE status = 'SUBMITTED' AND is_deleted = 0 " +
+            "AND batch_id IN <foreach collection='batchIds' item='bid' open='(' separator=',' close=')'>#{bid}</foreach> " +
+            "AND event_type IN <foreach collection='eventTypes' item='t' open='(' separator=',' close=')'>#{t}</foreach> " +
+            "ORDER BY occurred_at ASC, recorded_at ASC, id ASC" +
+            "</script>")
+    List<TraceEvent> selectEffectivePublicEventsByBatchIds(
+            @Param("batchIds") Collection<Long> batchIds,
+            @Param("eventTypes") Collection<String> eventTypes
+    );
 
     /**
      * 查询指定批次下全部追溯事件（含已更正历史版本），供当前责任组织读取完整时间线。

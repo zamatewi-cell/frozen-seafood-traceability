@@ -3,7 +3,9 @@ package com.example.traceability.trace.application;
 import com.example.traceability.batch.domain.Batch;
 import com.example.traceability.batch.domain.BatchFlowStatus;
 import com.example.traceability.batch.domain.BatchRiskStatus;
+import com.example.traceability.batch.domain.BatchLineageEdge;
 import com.example.traceability.batch.mapper.BatchMapper;
+import com.example.traceability.batch.mapper.BatchRelationMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
@@ -25,6 +27,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -34,6 +37,8 @@ import org.springframework.http.HttpStatus;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -45,8 +50,10 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -65,6 +72,9 @@ class PublicTraceApplicationServiceTest {
 
     @Mock
     private BatchMapper batchMapper;
+
+    @Mock
+    private BatchRelationMapper batchRelationMapper;
 
     @Mock
     private ProductMapper productMapper;
@@ -562,10 +572,7 @@ class PublicTraceApplicationServiceTest {
             event.setSummary(secretSentinel); // 填入机密哨兵字符串
             event.setStatus("SUBMITTED");
 
-            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
-            when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
-            when(productMapper.selectById(10L)).thenReturn(product);
-            when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of(event));
+            stubProjection(code, List.of(), List.of(batch), List.of(product), List.of(event));
 
             PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
 
@@ -579,12 +586,19 @@ class PublicTraceApplicationServiceTest {
             assertThat(resp.recallNotice()).isNull();
             assertThat(resp.temperatureSummary().result()).isEqualTo("INSUFFICIENT_DATA");
             assertThat(resp.timeline()).hasSize(1);
+            // 单批次（无上游）：谱系恰好一个 TARGET 节点、零条边
+            assertThat(resp.lineage().nodes()).hasSize(1);
+            assertThat(resp.lineage().nodes().get(0).role()).isEqualTo("TARGET");
+            assertThat(resp.lineage().nodes().get(0).productName()).isEqualTo("舟山大黄鱼");
+            assertThat(resp.lineage().edges()).isEmpty();
 
             // 验证公开 timeline 中的 event 仅为受控业务标签，绝不包含自由文本 summary！
             PublicTraceProjectionResponse.TimelineItem item = resp.timeline().get(0);
+            assertThat(item.eventType()).isEqualTo("SOURCE");
             assertThat(item.event()).isEqualTo("原料采收/出塘");
             assertThat(item.event()).doesNotContain(secretSentinel);
             assertThat(item.dataSourceLabel()).contains("SIMULATED");
+            assertThat(item.nodeKey()).isEqualTo("N1");
         }
 
         @Test
@@ -608,6 +622,8 @@ class PublicTraceApplicationServiceTest {
             assertThat(ex2.getCode()).isEqualTo("PUBLIC_TRACE_NOT_FOUND");
             assertThat(ex2.getMessage()).isEqualTo(ex1.getMessage());
             assertThat(ex2.getTitle()).isEqualTo(ex1.getTitle());
+            // 未知码与停用码都只查询一次公开码表，不触碰谱系、批次、产品或事件
+            verifyNoInteractions(batchRelationMapper, batchMapper, productMapper, traceEventMapper);
         }
 
         @Test
@@ -618,16 +634,45 @@ class PublicTraceApplicationServiceTest {
 
             PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
             Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.RECALLED.name());
-
-            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
-            when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
-            when(productMapper.selectById(anyLong())).thenReturn(null);
-            when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of());
+            stubProjection(code, List.of(), List.of(batch), List.of(), List.of());
 
             PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
             assertThat(resp.flowStatus()).isEqualTo("ACTIVE");
             assertThat(resp.riskStatus()).isEqualTo("RECALLED");
             assertThat(resp.recallNotice()).contains("模拟召回演练");
+        }
+
+        @Test
+        @DisplayName("CLOSED + RECALLED：流转状态与风险状态独立输出，同时给出与已结束流转相符的模拟召回提示")
+        void testClosedAndRecalledShownTogether() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            Long batchId = 1000L;
+
+            PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.CLOSED.name(), BatchRiskStatus.RECALLED.name());
+            stubProjection(code, List.of(), List.of(batch), List.of(), List.of());
+
+            PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
+            assertThat(resp.flowStatus()).isEqualTo("CLOSED");
+            assertThat(resp.riskStatus()).isEqualTo("RECALLED");
+            assertThat(resp.recallNotice()).contains("模拟召回演练").contains("已结束正常流转").doesNotContain("流通环节已暂停");
+        }
+
+        @Test
+        @DisplayName("公开追溯码自身状态 RECALLED（将来的 Phase B 状态）不会被本切片新增拒绝；召回提示仍只由批次风险状态决定")
+        void testRecalledCodeStatusStillQueryable() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            Long batchId = 1000L;
+
+            PublicTraceCode recalledCode = createCode(1L, batchId, 201L, publicId, "RECALLED");
+            Batch batch = createBatch(batchId, 201L, BatchFlowStatus.CLOSED.name(), BatchRiskStatus.NORMAL.name());
+            stubProjection(recalledCode, List.of(), List.of(batch), List.of(), List.of());
+
+            PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
+            assertThat(resp.flowStatus()).isEqualTo("CLOSED");
+            assertThat(resp.riskStatus()).isEqualTo("NORMAL");
+            // 码状态 RECALLED 但批次风险状态 NORMAL：不显示召回提示（三个状态概念相互独立）
+            assertThat(resp.recallNotice()).isNull();
         }
 
         @Test
@@ -638,11 +683,7 @@ class PublicTraceApplicationServiceTest {
 
             PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
             Batch batch = createBatch(batchId, 201L, BatchFlowStatus.CLOSED.name(), BatchRiskStatus.NORMAL.name());
-
-            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
-            when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
-            when(productMapper.selectById(anyLong())).thenReturn(null);
-            when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of());
+            stubProjection(code, List.of(), List.of(batch), List.of(), List.of());
 
             PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
             assertThat(resp.flowStatus()).isEqualTo("CLOSED");
@@ -658,11 +699,7 @@ class PublicTraceApplicationServiceTest {
 
             PublicTraceCode code = createCode(1L, batchId, 201L, publicId, "ACTIVE");
             Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.FROZEN.name());
-
-            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
-            when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
-            when(productMapper.selectById(anyLong())).thenReturn(null);
-            when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of());
+            stubProjection(code, List.of(), List.of(batch), List.of(), List.of());
 
             PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
             assertThat(resp.flowStatus()).isEqualTo("ACTIVE");
@@ -680,16 +717,129 @@ class PublicTraceApplicationServiceTest {
             Batch batch = createBatch(batchId, 201L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.NORMAL.name());
             batch.setTraceBatchNo("TB-SECRET-TRACE-BATCH-999");
             batch.setExternalBatchNo(null);
-
-            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
-            when(batchMapper.selectByIdIgnoreTenant(batchId)).thenReturn(batch);
-            when(productMapper.selectById(anyLong())).thenReturn(null);
-            when(traceEventMapper.selectEffectiveEventsByBatchId(batchId)).thenReturn(List.of());
+            stubProjection(code, List.of(), List.of(batch), List.of(), List.of());
 
             PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
             assertThat(resp.batch().publicBatchNo()).isEqualTo("****");
             assertThat(resp.batch().publicBatchNo()).doesNotContain("TB-SECRET-TRACE-BATCH-999");
         }
+
+        @Test
+        @DisplayName("目标批次不存在或已逻辑删除：保持 404 PUBLIC_TRACE_NOT_FOUND（不是谱系完整性错误）")
+        void testMissingTargetIsNotFound() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            PublicTraceCode code = createCode(1L, 1000L, 201L, publicId, "ACTIVE");
+            when(publicTraceCodeMapper.selectByPublicId(publicId)).thenReturn(code);
+            when(batchRelationMapper.selectAncestorEdges(1000L)).thenReturn(List.of());
+            when(batchMapper.selectByIdsIgnoreTenant(any())).thenReturn(List.of());
+
+            BusinessException ex = assertThrows(BusinessException.class, () -> service.getPublicTrace(publicId));
+            assertThat(ex.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+            assertThat(ex.getCode()).isEqualTo("PUBLIC_TRACE_NOT_FOUND");
+            verifyNoInteractions(productMapper, traceEventMapper);
+        }
+
+        @Test
+        @DisplayName("50 代深链谱系：固定 5 次集合查询（码 / 祖先边 / 批次 / 产品 / 事件），无逐节点查询")
+        void testBoundedQueryCountForDeepChain() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            int depth = 50;
+            List<Batch> batches = new ArrayList<>();
+            List<BatchLineageEdge> edges = new ArrayList<>();
+            List<TraceEvent> events = new ArrayList<>();
+            for (long i = 1; i <= depth; i++) {
+                batches.add(createBatch(i, 201L, BatchFlowStatus.CLOSED.name()));
+                if (i > 1) {
+                    edges.add(new BatchLineageEdge(i - 1, i, "TRANSFORM", 500L + i, "PROCESS", "SUBMITTED", 0,
+                            LocalDateTime.of(2026, 9, 1, 0, 0).plusMinutes(i)));
+                }
+                TraceEvent e = new TraceEvent();
+                e.setId(9000L + i);
+                e.setBatchId(i);
+                e.setEventType(i == 1 ? "SOURCE" : "PROCESS");
+                e.setOccurredAt(LocalDateTime.of(2026, 9, 1, 0, 0).plusMinutes(i));
+                e.setRecordedAt(e.getOccurredAt());
+                e.setDataSource("MANUAL");
+                events.add(e);
+            }
+            PublicTraceCode code = createCode(1L, (long) depth, 201L, publicId, "ACTIVE");
+            Product product = new Product();
+            product.setId(10L);
+            product.setPublicName("深链产品");
+            stubProjection(code, edges, batches, List.of(product), events);
+
+            PublicTraceProjectionResponse resp = service.getPublicTrace(publicId);
+
+            assertThat(resp.lineage().nodes()).hasSize(depth);
+            assertThat(resp.lineage().edges()).hasSize(depth - 1);
+            assertThat(resp.lineage().nodes().get(0).role()).isEqualTo("ORIGIN");
+            assertThat(resp.lineage().nodes().get(depth - 1).role()).isEqualTo("TARGET");
+            assertThat(resp.lineage().nodes().get(depth - 1).generation()).isEqualTo(depth - 1);
+            assertThat(resp.timeline()).hasSize(depth);
+
+            verify(publicTraceCodeMapper, times(1)).selectByPublicId(publicId);
+            verify(batchRelationMapper, times(1)).selectAncestorEdges((long) depth);
+            verify(batchMapper, times(1)).selectByIdsIgnoreTenant(any());
+            verify(productMapper, times(1)).selectByIds(any());
+            verify(traceEventMapper, times(1)).selectEffectivePublicEventsByBatchIds(any(), any());
+            verifyNoMoreInteractions(publicTraceCodeMapper, batchRelationMapper, batchMapper, productMapper, traceEventMapper);
+            verifyNoInteractions(idempotencyMapper);
+        }
+
+        @Test
+        @DisplayName("事件查询只请求公开事件白名单（PURCHASE 等契约未定义类型不在请求中）")
+        void testEventQueryUsesExplicitPublicWhitelist() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            PublicTraceCode code = createCode(1L, 1000L, 201L, publicId, "ACTIVE");
+            Batch batch = createBatch(1000L, 201L, BatchFlowStatus.ACTIVE.name());
+            stubProjection(code, List.of(), List.of(batch), List.of(), List.of());
+
+            service.getPublicTrace(publicId);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<Collection<String>> types = ArgumentCaptor.forClass(Collection.class);
+            verify(traceEventMapper).selectEffectivePublicEventsByBatchIds(any(), types.capture());
+            assertThat(types.getValue()).containsExactlyInAnyOrder(
+                    "SOURCE", "PROCESS", "FREEZE", "PACK", "WAREHOUSE_IN", "WAREHOUSE_OUT", "TRANSPORT", "ARRIVAL", "SALE");
+            assertThat(types.getValue()).doesNotContain("PURCHASE");
+        }
+
+        @Test
+        @DisplayName("谱系完整性失败（祖先批次缺失 / 已删除）：500 PUBLIC_TRACE_LINEAGE_INTEGRITY，响应不含内部 ID，绝不返回截断谱系")
+        void testLineageIntegrityFailureFailsClosed() {
+            String publicId = VALID_TEST_PUBLIC_ID;
+            Long b0 = 70001L;
+            Long b1 = 70002L;
+            Long b2 = 70003L;
+            PublicTraceCode code = createCode(1L, b2, 201L, publicId, "ACTIVE");
+            List<BatchLineageEdge> edges = List.of(
+                    new BatchLineageEdge(b0, b1, "TRANSFORM", 1L, "PROCESS", "SUBMITTED", 0, LocalDateTime.of(2026, 9, 1, 1, 0)),
+                    new BatchLineageEdge(b1, b2, "SPLIT", 2L, "SPLIT", "SUBMITTED", 0, LocalDateTime.of(2026, 9, 1, 2, 0))
+            );
+            // 祖先 B0 已逻辑删除：批量读取只返回 B1、B2
+            stubProjection(code, edges,
+                    List.of(createBatch(b1, 201L, BatchFlowStatus.CLOSED.name()), createBatch(b2, 201L, BatchFlowStatus.CLOSED.name())),
+                    List.of(), List.of());
+
+            BusinessException ex = assertThrows(BusinessException.class, () -> service.getPublicTrace(publicId));
+            assertThat(ex.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+            assertThat(ex.getCode()).isEqualTo("PUBLIC_TRACE_LINEAGE_INTEGRITY");
+            assertThat(ex.getMessage()).doesNotContain(String.valueOf(b0)).doesNotContain(String.valueOf(b1)).doesNotContain(String.valueOf(b2));
+        }
+    }
+
+    private void stubProjection(
+            PublicTraceCode code,
+            List<BatchLineageEdge> edges,
+            List<Batch> batches,
+            List<Product> products,
+            List<TraceEvent> events
+    ) {
+        when(publicTraceCodeMapper.selectByPublicId(code.getPublicId())).thenReturn(code);
+        when(batchRelationMapper.selectAncestorEdges(code.getBatchId())).thenReturn(edges);
+        when(batchMapper.selectByIdsIgnoreTenant(any())).thenReturn(batches);
+        when(productMapper.selectByIds(any())).thenReturn(products);
+        when(traceEventMapper.selectEffectivePublicEventsByBatchIds(any(), any())).thenReturn(events);
     }
 
     private Batch createBatch(Long batchId, Long orgId, String flowStatus, String riskStatus) {

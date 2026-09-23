@@ -2,8 +2,10 @@ package com.example.traceability.trace.application;
 
 import com.example.traceability.batch.domain.Batch;
 import com.example.traceability.batch.domain.BatchFlowStatus;
+import com.example.traceability.batch.domain.BatchLineageEdge;
 import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.mapper.BatchMapper;
+import com.example.traceability.batch.mapper.BatchRelationMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
@@ -20,6 +22,8 @@ import com.example.traceability.trace.dto.PublicTraceProjectionResponse;
 import com.example.traceability.trace.mapper.PublicTraceCodeIdempotencyMapper;
 import com.example.traceability.trace.mapper.PublicTraceCodeMapper;
 import com.example.traceability.trace.mapper.TraceEventMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -31,17 +35,20 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
 
 /**
  * 公开追溯码与消费者投影应用服务。
  * <p>
- * 负责批次公开追溯码的生成与激活、停用终态管理，以及匿名消费者公开追溯信息安全投影。
+ * 负责批次公开追溯码的生成与激活、停用终态管理、当前码查询，以及匿名消费者公开追溯信息安全投影（含祖先谱系聚合）。
  * 严格落实组织隔离（企业路径 SQL 始终显式带 org_id）、排他行级锁（消除 TOCTOU）、
  * 统一幂等记录表 (public_trace_code_idempotency) 绑定（覆盖 action+batch 语义指纹）、
  * 穿透 MySQL REPEATABLE READ 快照盲区的当前锁定读恢复，以及严格白名单字段过滤与机密信息隔离。
@@ -53,10 +60,9 @@ import java.util.regex.Pattern;
 @Service
 public class PublicTraceApplicationService {
 
-    private static final Pattern PUBLIC_TRACE_ID_PATTERN = Pattern.compile("^[A-Z2-7]{26}$");
+    private static final Logger log = LoggerFactory.getLogger(PublicTraceApplicationService.class);
 
-    private static final String SIMULATED_RECALL_NOTICE =
-            "此批次海产品已启动系统模拟召回演练，流通环节已暂停，请联系销售商或质量管理部门处理（本提示为系统教学演练模拟信息）。";
+    private static final Pattern PUBLIC_TRACE_ID_PATTERN = Pattern.compile("^[A-Z2-7]{26}$");
 
     private static final String PUBLIC_DISCLOSURE_STATEMENT =
             "本溯源信息仅反映供应链各节点企业申报登记的电子履历，不作为货物物理真实性或防伪验证凭证；系统相关模拟标识仅用于教学实训推演。";
@@ -65,6 +71,7 @@ public class PublicTraceApplicationService {
             "当前切片尚未接入冷链实时温控时序采集流，暂无有效温控监测记录，不构成本项目温控合规依据。";
 
     private final BatchMapper batchMapper;
+    private final BatchRelationMapper batchRelationMapper;
     private final ProductMapper productMapper;
     private final TraceEventMapper traceEventMapper;
     private final PublicTraceCodeMapper publicTraceCodeMapper;
@@ -72,12 +79,14 @@ public class PublicTraceApplicationService {
 
     public PublicTraceApplicationService(
             BatchMapper batchMapper,
+            BatchRelationMapper batchRelationMapper,
             ProductMapper productMapper,
             TraceEventMapper traceEventMapper,
             PublicTraceCodeMapper publicTraceCodeMapper,
             PublicTraceCodeIdempotencyMapper idempotencyMapper
     ) {
         this.batchMapper = batchMapper;
+        this.batchRelationMapper = batchRelationMapper;
         this.productMapper = productMapper;
         this.traceEventMapper = traceEventMapper;
         this.publicTraceCodeMapper = publicTraceCodeMapper;
@@ -328,19 +337,24 @@ public class PublicTraceApplicationService {
      * 消费者匿名根据 26 位 Base32 公开标识查询追溯投影。
      * <p>
      * 业务规则：
-     * 1. 匿名免认证免 CSRF 访问；
+     * 1. 匿名免认证免 CSRF 访问；只读事务（一致性快照，任何写入都会被数据库拒绝）；
      * 2. 格式严格限定为 ^[A-Z2-7]{26}$；不符合正则统一返回 404 且绝不访问底层持久层；
-     * 3. 未知与停用码统一返回 404 PUBLIC_TRACE_NOT_FOUND，外部无法探测停用码存在性；
-     * 4. 已激活码绑定的批次即使处于 FROZEN/CLOSED/RECALLED 状态，依然如实返回 200 与对应的 batchStatus；
-     * 5. 若批次为 RECALLED，返回显著的模拟召回声明 notice；
-     * 6. 严格白名单投影：时间线仅包含有效 SUBMITTED 事件（排除 CORRECTED 原版本），按业务时间与登记时间确定性排序；
-     *    公开 timeline 中的 event 仅为受控业务标签，严禁拼接 summary 等自由文本；
-     * 7. 温度摘要如实返回 INSUFFICIENT_DATA 与诚实说明；SIMULATED 明确标为模拟，DEVICE 严禁暗示接入真实硬件。
+     * 3. 未知、停用 (DISABLED) 或已删除的码统一返回 404 PUBLIC_TRACE_NOT_FOUND，外部无法探测停用码存在性；
+     *    其他码状态（ACTIVE，以及将来的 RECALLED 码状态）照常可查询；
+     * 4. 批次即使处于 FROZEN/CLOSED/RECALLED 状态，依然如实返回 200 与独立的 flowStatus / riskStatus；
+     * 5. 模拟召回提示只由批次 riskStatus=RECALLED 决定，与公开追溯码自身状态无关；
+     * 6. 谱系：只沿 BatchRelation 向上聚合祖先批次（兄弟批次永不进入），谱系边来自已提交批次操作，不伪造事件；
+     *    谱系结构不完整时整体拒绝 (PUBLIC_TRACE_LINEAGE_INTEGRITY)，绝不返回截断谱系；
+     * 7. 时间线只包含公开事件白名单内的有效 SUBMITTED 事件（排除 CORRECTED 原版本），确定性排序，
+     *    event 仅为受控业务标签，严禁拼接 summary / detailsJson 等自由文本；
+     * 8. 温度摘要如实返回 INSUFFICIENT_DATA 与诚实说明；SIMULATED 明确标为模拟，DEVICE 严禁暗示接入真实硬件；
+     * 9. 固定 5 次集合查询（码、祖先谱系边、批次、产品、事件），与谱系深度和规模无关。
      * </p>
      *
      * @param publicTraceId 消费者公开追溯标识 (26 位 Base32)
      * @return 白名单脱敏投影
      */
+    @Transactional(readOnly = true)
     public PublicTraceProjectionResponse getPublicTrace(String publicTraceId) {
         if (publicTraceId == null || !PUBLIC_TRACE_ID_PATTERN.matcher(publicTraceId).matches()) {
             // 输入不合规直接统一返回 404，不访问底层 mapper
@@ -353,13 +367,63 @@ public class PublicTraceApplicationService {
             // 未知与停用码对外表现完全一致，统一返回 404 PUBLIC_TRACE_NOT_FOUND
             throw notFoundException();
         }
+        Long targetBatchId = code.getBatchId();
 
-        Batch batch = batchMapper.selectByIdIgnoreTenant(code.getBatchId());
+        // 1 次递归查询取得全部祖先谱系边；只向上遍历，兄弟批次不会进入
+        List<BatchLineageEdge> edges = batchRelationMapper.selectAncestorEdges(targetBatchId);
+        Set<Long> nodeIds = new TreeSet<>();
+        nodeIds.add(targetBatchId);
+        for (BatchLineageEdge edge : edges) {
+            if (edge.getParentBatchId() != null) {
+                nodeIds.add(edge.getParentBatchId());
+            }
+            if (edge.getChildBatchId() != null) {
+                nodeIds.add(edge.getChildBatchId());
+            }
+        }
+
+        // 1 次集合查询读取全部谱系节点（仅未删除批次）
+        Map<Long, Batch> batches = new HashMap<>();
+        for (Batch b : batchMapper.selectByIdsIgnoreTenant(nodeIds)) {
+            batches.put(b.getId(), b);
+        }
+        Batch batch = batches.get(targetBatchId);
         if (batch == null || Objects.equals(batch.getIsDeleted(), 1)) {
             throw notFoundException();
         }
 
-        Product product = productMapper.selectById(batch.getProductId());
+        // 1 次集合查询读取全部节点产品
+        Set<Long> productIds = new TreeSet<>();
+        for (Batch b : batches.values()) {
+            if (b.getProductId() != null) {
+                productIds.add(b.getProductId());
+            }
+        }
+        Map<Long, Product> products = new HashMap<>();
+        if (!productIds.isEmpty()) {
+            for (Product p : productMapper.selectByIds(productIds)) {
+                products.put(p.getId(), p);
+            }
+        }
+
+        // 1 次集合查询读取全部节点的有效公开事件（只取白名单列与白名单事件类型）
+        List<TraceEvent> events = traceEventMapper.selectEffectivePublicEventsByBatchIds(
+                nodeIds, PublicTraceProjectionAssembler.PUBLIC_EVENT_TYPES.keySet());
+
+        PublicTraceProjectionAssembler.Assembly assembly;
+        try {
+            assembly = PublicTraceProjectionAssembler.assemble(targetBatchId, edges, batches, products, events);
+        } catch (PublicTraceProjectionAssembler.LineageIntegrityException e) {
+            log.error("公开追溯谱系完整性校验失败，拒绝返回不完整谱系: publicTraceId={}, reason={}", cleanPublicId, e.getMessage());
+            throw new BusinessException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "PUBLIC_TRACE_LINEAGE_INTEGRITY",
+                    "追溯谱系数据不完整",
+                    "公开追溯谱系数据完整性校验未通过，暂时无法提供查询，请稍后重试"
+            );
+        }
+
+        Product product = products.get(batch.getProductId());
         String prodName = product != null ? product.getPublicName() : "冷冻水产品";
         String prodCategory = product != null ? product.getCategory() : "OTHER";
         String prodSpec = product != null ? product.getSpecification() : "规格以包装标称为准";
@@ -375,12 +439,6 @@ public class PublicTraceApplicationService {
                         batch.getProductionDate() != null ? batch.getProductionDate().toString() : null
                 );
 
-        // 仅查询当前批次有效 SUBMITTED 事件 (排除 CORRECTED)，稳定升序排序
-        List<TraceEvent> events = traceEventMapper.selectEffectiveEventsByBatchId(batch.getId());
-        List<PublicTraceProjectionResponse.TimelineItem> timeline = events.stream()
-                .map(this::toTimelineItem)
-                .toList();
-
         PublicTraceProjectionResponse.TemperatureSummaryProjection tempSummary =
                 new PublicTraceProjectionResponse.TemperatureSummaryProjection(
                         "INSUFFICIENT_DATA",
@@ -389,14 +447,15 @@ public class PublicTraceApplicationService {
 
         String flowStatus = batch.getFlowStatus();
         String riskStatus = batch.getRiskStatus();
-        String recallNotice = BatchRiskStatus.RECALLED.name().equals(riskStatus) ? SIMULATED_RECALL_NOTICE : null;
+        String recallNotice = PublicTraceProjectionAssembler.recallNotice(flowStatus, riskStatus);
         String queriedAt = Instant.now().toString();
 
         return new PublicTraceProjectionResponse(
                 cleanPublicId,
                 productProj,
                 batchProj,
-                timeline,
+                assembly.lineage(),
+                assembly.timeline(),
                 tempSummary,
                 flowStatus,
                 riskStatus,
@@ -404,51 +463,6 @@ public class PublicTraceApplicationService {
                 queriedAt,
                 PUBLIC_DISCLOSURE_STATEMENT
         );
-    }
-
-    /**
-     * 将追溯事件转换为公开时间线节点。
-     * <p>
-     * 关键安全要求：event 仅输出受控类型标准标签，严禁拼接 summary 等自由文本字段。
-     * </p>
-     */
-    private PublicTraceProjectionResponse.TimelineItem toTimelineItem(TraceEvent event) {
-        String eventLabel = resolveEventLabel(event.getEventType());
-        String occurredAt = event.getOccurredAt().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-        String sourceLabel = resolveDataSourceLabel(event.getDataSource());
-        return new PublicTraceProjectionResponse.TimelineItem(eventLabel, occurredAt, sourceLabel);
-    }
-
-    private String resolveEventLabel(String eventType) {
-        if (eventType == null) {
-            return "追溯节点";
-        }
-        return switch (eventType) {
-            case "SOURCE" -> "原料采收/出塘";
-            case "PURCHASE" -> "原料采购入库";
-            case "PROCESS" -> "粗加工/精加工";
-            case "FREEZE" -> "速冻冷冻";
-            case "PACK" -> "分装与包装";
-            case "WAREHOUSE_IN" -> "冷库入库";
-            case "WAREHOUSE_OUT" -> "冷库出库";
-            case "TRANSPORT" -> "冷链干线运输";
-            case "ARRIVAL" -> "冷链运输到达";
-            case "SALE" -> "终端零售销售";
-            default -> eventType;
-        };
-    }
-
-    private String resolveDataSourceLabel(String dataSource) {
-        if (dataSource == null) {
-            return "企业人工填报";
-        }
-        return switch (dataSource) {
-            case "SIMULATED" -> "教学演练与仿真模拟数据（SIMULATED）";
-            case "DEVICE" -> "标准预留设备标识（DEVICE，未接入真实硬件）";
-            case "MANUAL" -> "企业人工填报";
-            case "IMPORT" -> "企业系统导入";
-            default -> dataSource;
-        };
     }
 
     private void bindIdempotencyKey(
