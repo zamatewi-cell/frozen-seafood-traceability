@@ -102,6 +102,7 @@ test.describe('Enterprise shell', () => {
     })
     await page.route('**/api/v1/batches/12', (route) => json(route, 200, { data: batch, meta }))
     await page.route('**/api/v1/batches/12/events', (route) => json(route, 200, { data: [], meta }))
+    await page.route('**/api/v1/batches/12/sales', (route) => json(route, 200, { data: [], meta }))
     await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: { ...meta, page: { number: 1, size: 20, totalElements: 0, totalPages: 0 } } }))
     await page.route('**/api/v1/batch-operations?*', (route) => json(route, 200, { data: [], meta: emptyPage }))
     await page.route('**/api/v1/products/5', (route) => json(route, 200, {
@@ -163,6 +164,7 @@ test.describe('Enterprise shell', () => {
     })
     await page.route('**/api/v1/batches/101', (route) => json(route, 200, { data: batch, meta }))
     await page.route('**/api/v1/batches/101/events', (route) => json(route, 200, { data: events, meta }))
+    await page.route('**/api/v1/batches/101/sales', (route) => json(route, 200, { data: [], meta }))
     await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: { ...meta, page: { number: 1, size: 20, totalElements: 0, totalPages: 0 } } }))
     await page.route('**/api/v1/batch-operations?*', (route) => json(route, 200, { data: [], meta: emptyPage }))
     await page.route('**/api/v1/batches/101/submit', (route) => {
@@ -233,8 +235,10 @@ test.describe('Enterprise shell', () => {
     await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: emptyPage }))
     await page.route('**/api/v1/batches/101', (route) => json(route, 200, { data: input, meta }))
     await page.route('**/api/v1/batches/101/events', (route) => json(route, 200, { data: [], meta }))
+    await page.route('**/api/v1/batches/101/sales', (route) => json(route, 200, { data: [], meta }))
     await page.route('**/api/v1/batches/201', (route) => json(route, 200, { data: output, meta }))
     await page.route('**/api/v1/batches/201/events', (route) => json(route, 200, { data: outputEvents, meta }))
+    await page.route('**/api/v1/batches/201/sales', (route) => json(route, 200, { data: [], meta }))
     await page.route('**/api/v1/batch-operations?*', (route) => {
       const batchId = Number(new URL(route.request().url()).searchParams.get('batchId'))
       const related = operation && (batchId === 101 || batchId === 201) ? [operation] : []
