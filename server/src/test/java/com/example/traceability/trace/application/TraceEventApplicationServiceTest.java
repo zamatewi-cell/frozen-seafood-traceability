@@ -1137,11 +1137,11 @@ class TraceEventApplicationServiceTest {
     }
 
     @Nested
-    @DisplayName("自动投影类型全集（SOURCE / PROCESS / TRANSPORT / ARRIVAL）禁止人工伪造，PROCESS 仅由批次操作投影")
+    @DisplayName("自动投影类型全集（SOURCE / PROCESS / TRANSPORT / ARRIVAL / SALE）禁止人工伪造，PROCESS 仅由批次操作投影")
     class AutoOnlyAndProcessProjectionTests {
 
         @org.junit.jupiter.params.ParameterizedTest
-        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL", "process", " Transport "})
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL", "SALE", "process", " Transport ", "sale"})
         @DisplayName("人工创建自动投影类型被拒绝 (422 EVENT_TYPE_NOT_MANUAL)，不读取批次、不落库")
         void createEvent_AutoOnlyType_Rejected(String eventType) {
             CreateTraceEventRequest req = new CreateTraceEventRequest(eventType, OCCURRED_AT, null, "MANUAL", "伪造自动事件", null);
@@ -1157,7 +1157,7 @@ class TraceEventApplicationServiceTest {
         }
 
         @org.junit.jupiter.params.ParameterizedTest
-        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL"})
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL", "SALE"})
         @DisplayName("人工更正为自动投影类型被拒绝 (422 EVENT_TYPE_NOT_MANUAL)")
         void correctEvent_ToAutoOnlyType_Rejected(String eventType) {
             CorrectTraceEventRequest req = new CorrectTraceEventRequest(eventType, OCCURRED_AT, null, "MANUAL", "改为自动事件", null, "伪造");
@@ -1168,7 +1168,7 @@ class TraceEventApplicationServiceTest {
         }
 
         @org.junit.jupiter.params.ParameterizedTest
-        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL"})
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"SOURCE", "PROCESS", "TRANSPORT", "ARRIVAL", "SALE"})
         @DisplayName("更正（作废）既有自动投影事件被拒绝 (422 AUTO_EVENT_NOT_CORRECTABLE)")
         void correctEvent_ExistingAutoOnlyEvent_Rejected(String eventType) {
             when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
@@ -1249,6 +1249,244 @@ class TraceEventApplicationServiceTest {
             var tx = method.getAnnotation(org.springframework.transaction.annotation.Transactional.class);
             assertThat(tx).isNotNull();
             assertThat(tx.propagation()).isEqualTo(org.springframework.transaction.annotation.Propagation.MANDATORY);
+        }
+    }
+
+    @Nested
+    @DisplayName("自有冷库出入库事件（WAREHOUSE_IN / WAREHOUSE_OUT）受控人工录入与审计更正")
+    class WarehouseEventTests {
+
+        private static final Long COLD_STORE_ID = 700L;
+
+        private Site site(Long id, Long orgId, String status, String siteType) {
+            Site s = createSite(id, orgId, status);
+            s.setSiteType(siteType);
+            return s;
+        }
+
+        private CreateTraceEventRequest create(String type, Long siteId) {
+            return new CreateTraceEventRequest(type, OCCURRED_AT, siteId, "MANUAL", "冷库出入库", null);
+        }
+
+        private CorrectTraceEventRequest correct(String type, Long siteId) {
+            return new CorrectTraceEventRequest(type, OCCURRED_AT, siteId, "MANUAL", "更正冷库出入库", null, "录入方向错误");
+        }
+
+        private void assertProblem(Runnable call, HttpStatus status, String code) {
+            assertThatThrownBy(call::run)
+                    .isInstanceOf(BusinessException.class)
+                    .satisfies(e -> {
+                        BusinessException be = (BusinessException) e;
+                        assertThat(be.getStatus()).isEqualTo(status);
+                        assertThat(be.getCode()).isEqualTo(code);
+                    });
+            verify(traceEventMapper, never()).insert(any(TraceEvent.class));
+        }
+
+        private void stubActiveBatchAndColdStore() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            when(siteMapper.selectByIdIgnoreTenant(COLD_STORE_ID)).thenReturn(site(COLD_STORE_ID, 10L, "ACTIVE", "COLD_STORE"));
+        }
+
+        private TraceEvent storedEvent(String type, Long siteId) {
+            TraceEvent e = new TraceEvent();
+            e.setId(500L);
+            e.setBatchId(1000L);
+            e.setOrgId(10L);
+            e.setSiteId(siteId);
+            e.setEventType(type);
+            e.setStatus(TraceEventStatus.SUBMITTED.name());
+            return e;
+        }
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"WAREHOUSE_IN", "WAREHOUSE_OUT"})
+        @DisplayName("本组织启用冷库：创建成功并保存场所与 MANUAL；不修改批次，不查询历史仓储事件（无 IN/OUT 状态机，OUT 可无前序 IN）")
+        void create_OwnActiveColdStore_Success(String type) {
+            stubActiveBatchAndColdStore();
+
+            TraceEventResponse resp = eventService.createEvent(1000L, create(type, COLD_STORE_ID), VALID_KEY, operatorOrg1);
+
+            ArgumentCaptor<TraceEvent> captor = ArgumentCaptor.forClass(TraceEvent.class);
+            verify(traceEventMapper).insert(captor.capture());
+            assertThat(captor.getValue().getEventType()).isEqualTo(type);
+            assertThat(captor.getValue().getSiteId()).isEqualTo(COLD_STORE_ID);
+            assertThat(captor.getValue().getOrgId()).isEqualTo(10L);
+            assertThat(captor.getValue().getDataSource()).isEqualTo("MANUAL");
+            assertThat(captor.getValue().getDetailsJson()).isNull();
+            assertThat(resp.siteId()).isEqualTo(COLD_STORE_ID);
+            verify(batchMapper, never()).updateById(any(Batch.class));
+            verify(traceEventMapper, never()).selectByBatchId(anyLong());
+        }
+
+        @Test
+        @DisplayName("缺少 siteId：400 INVALID_REQUEST")
+        void create_MissingSite_Rejected() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            assertProblem(() -> eventService.createEvent(1000L, create("WAREHOUSE_IN", null), VALID_KEY, operatorOrg1),
+                    HttpStatus.BAD_REQUEST, "INVALID_REQUEST");
+        }
+
+        @Test
+        @DisplayName("场所不存在：404")
+        void create_UnknownSite_NotFound() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            assertThatThrownBy(() -> eventService.createEvent(1000L, create("WAREHOUSE_IN", 999L), VALID_KEY, operatorOrg1))
+                    .isInstanceOf(ResourceNotFoundException.class);
+            verify(traceEventMapper, never()).insert(any(TraceEvent.class));
+        }
+
+        @Test
+        @DisplayName("其他组织的冷库：403 ORG_SCOPE_DENIED")
+        void create_ForeignColdStore_Denied() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            when(siteMapper.selectByIdIgnoreTenant(701L)).thenReturn(site(701L, 20L, "ACTIVE", "COLD_STORE"));
+            assertProblem(() -> eventService.createEvent(1000L, create("WAREHOUSE_IN", 701L), VALID_KEY, operatorOrg1),
+                    HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED");
+        }
+
+        @Test
+        @DisplayName("本组织停用冷库：422 SITE_NOT_ACTIVE")
+        void create_InactiveColdStore_Rejected() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            when(siteMapper.selectByIdIgnoreTenant(702L)).thenReturn(site(702L, 10L, "INACTIVE", "COLD_STORE"));
+            assertProblem(() -> eventService.createEvent(1000L, create("WAREHOUSE_OUT", 702L), VALID_KEY, operatorOrg1),
+                    HttpStatus.UNPROCESSABLE_ENTITY, "SITE_NOT_ACTIVE");
+        }
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"FACTORY", "PORT", "STORE", "LOGISTICS_HUB"})
+        @DisplayName("本组织非冷库场所：422 WAREHOUSE_SITE_TYPE_INVALID")
+        void create_NonColdStoreSite_Rejected(String siteType) {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            when(siteMapper.selectByIdIgnoreTenant(703L)).thenReturn(site(703L, 10L, "ACTIVE", siteType));
+            assertProblem(() -> eventService.createEvent(1000L, create("WAREHOUSE_IN", 703L), VALID_KEY, operatorOrg1),
+                    HttpStatus.UNPROCESSABLE_ENTITY, "WAREHOUSE_SITE_TYPE_INVALID");
+        }
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"DEVICE", "IMPORT", "SIMULATED"})
+        @DisplayName("非 MANUAL 数据来源：400 INVALID_REQUEST")
+        void create_NonManualDataSource_Rejected(String dataSource) {
+            stubActiveBatchAndColdStore();
+            CreateTraceEventRequest req = new CreateTraceEventRequest("WAREHOUSE_IN", OCCURRED_AT, COLD_STORE_ID, dataSource, "入库", null);
+            assertProblem(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1), HttpStatus.BAD_REQUEST, "INVALID_REQUEST");
+        }
+
+        @Test
+        @DisplayName("携带 detailsJson（数量 / 温度声明）：400 INVALID_REQUEST")
+        void create_WithDetails_Rejected() {
+            stubActiveBatchAndColdStore();
+            CreateTraceEventRequest req = new CreateTraceEventRequest("WAREHOUSE_IN", OCCURRED_AT, COLD_STORE_ID, "MANUAL", "入库",
+                    Map.of("quantity", 300, "temperature", -18));
+            assertProblem(() -> eventService.createEvent(1000L, req, VALID_KEY, operatorOrg1), HttpStatus.BAD_REQUEST, "INVALID_REQUEST");
+        }
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.CsvSource({"CLOSED,NORMAL", "DRAFT,NORMAL", "ACTIVE,FROZEN", "ACTIVE,RECALLED", "CLOSED,RECALLED"})
+        @DisplayName("新建仓储事件必须 ACTIVE + NORMAL：CLOSED 后禁止仓储流转 (422 BATCH_FLOW_BLOCKED)，不读取场所")
+        void create_BlockedBatchStatus_Rejected(String flow, String risk) {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, flow, risk));
+            assertProblem(() -> eventService.createEvent(1000L, create("WAREHOUSE_IN", COLD_STORE_ID), VALID_KEY, operatorOrg1),
+                    HttpStatus.UNPROCESSABLE_ENTITY, "BATCH_FLOW_BLOCKED");
+            verify(siteMapper, never()).selectByIdIgnoreTenant(anyLong());
+        }
+
+        @Test
+        @DisplayName("非当前责任组织：即使缺少 siteId 也优先返回 403 ORG_SCOPE_DENIED")
+        void create_NonResponsibleOrg_DeniedBeforeSiteRules() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 20L, BatchFlowStatus.ACTIVE.name()));
+            assertProblem(() -> eventService.createEvent(1000L, create("WAREHOUSE_IN", null), VALID_KEY, operatorOrg1),
+                    HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED");
+        }
+
+        @Test
+        @DisplayName("组织类型不受限：任意当前责任组织（如加工企业）使用自有冷库均可记录")
+        void create_ProcessorOrg_Success() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(2000L)).thenReturn(createBatch(2000L, 20L, BatchFlowStatus.ACTIVE.name()));
+            when(siteMapper.selectByIdIgnoreTenant(710L)).thenReturn(site(710L, 20L, "ACTIVE", "COLD_STORE"));
+            eventService.createEvent(2000L, create("WAREHOUSE_IN", 710L), VALID_KEY, operatorOrg2);
+            verify(traceEventMapper).insert(any(TraceEvent.class));
+        }
+
+        @Test
+        @DisplayName("同幂等键同语义重放返回原事件且不锁批次；不同语义 409 IDEMPOTENCY_CONFLICT")
+        void create_IdempotentReplayAndConflict() {
+            TraceEvent existing = storedEvent("WAREHOUSE_IN", COLD_STORE_ID);
+            existing.setOperatorId(100L);
+            existing.setOccurredAt(OCCURRED_AT.atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime());
+            existing.setDataSource("MANUAL");
+            existing.setSummary("冷库出入库");
+            when(traceEventMapper.selectByOrgIdAndIdempotencyKey(10L, VALID_KEY)).thenReturn(existing);
+
+            TraceEventResponse replay = eventService.createEvent(1000L, create("WAREHOUSE_IN", COLD_STORE_ID), VALID_KEY, operatorOrg1);
+            assertThat(replay.id()).isEqualTo(500L);
+
+            assertProblem(() -> eventService.createEvent(1000L, create("WAREHOUSE_OUT", COLD_STORE_ID), VALID_KEY, operatorOrg1),
+                    HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT");
+            verify(batchMapper, never()).selectByIdIgnoreTenantForUpdate(anyLong());
+        }
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.CsvSource({"ACTIVE,WAREHOUSE_IN,WAREHOUSE_OUT", "ACTIVE,WAREHOUSE_OUT,WAREHOUSE_OUT",
+                "CLOSED,WAREHOUSE_IN,WAREHOUSE_IN", "CLOSED,WAREHOUSE_OUT,WAREHOUSE_IN"})
+        @DisplayName("仓储事件审计更正：ACTIVE 与 CLOSED 批次均允许，IN ↔ OUT 可互改，新版本引用本组织冷库，不修改批次")
+        void correct_WarehouseFamily_AllowedOnActiveAndClosed(String flow, String targetType, String newType) {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, flow));
+            when(traceEventMapper.selectByIdIgnoreTenantForUpdate(500L)).thenReturn(storedEvent(targetType, COLD_STORE_ID));
+            when(siteMapper.selectByIdIgnoreTenant(COLD_STORE_ID)).thenReturn(site(COLD_STORE_ID, 10L, "ACTIVE", "COLD_STORE"));
+            when(traceEventMapper.updateStatusToCorrected(eq(500L), eq(1000L), eq(10L), eq(100L), any())).thenReturn(1);
+
+            TraceEventResponse resp = eventService.correctEvent(1000L, 500L, correct(newType, COLD_STORE_ID), VALID_KEY, operatorOrg1);
+
+            assertThat(resp.eventType()).isEqualTo(newType);
+            assertThat(resp.siteId()).isEqualTo(COLD_STORE_ID);
+            assertThat(resp.correctsEventId()).isEqualTo(500L);
+            verify(batchMapper, never()).updateById(any(Batch.class));
+        }
+
+        @org.junit.jupiter.params.ParameterizedTest
+        @org.junit.jupiter.params.provider.CsvSource({"WAREHOUSE_IN,FREEZE", "WAREHOUSE_OUT,PACK", "FREEZE,WAREHOUSE_IN", "PURCHASE,WAREHOUSE_OUT"})
+        @DisplayName("跨类更正（仓储 ↔ 非仓储）：422 WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN（CLOSED 批次也不能借更正伪造仓储流转）")
+        void correct_CrossFamily_Rejected(String targetType, String newType) {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.CLOSED.name()));
+            when(traceEventMapper.selectByIdIgnoreTenantForUpdate(500L)).thenReturn(storedEvent(targetType, null));
+            assertProblem(() -> eventService.correctEvent(1000L, 500L, correct(newType, COLD_STORE_ID), VALID_KEY, operatorOrg1),
+                    HttpStatus.UNPROCESSABLE_ENTITY, "WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN");
+            verify(traceEventMapper, never()).updateStatusToCorrected(anyLong(), anyLong(), anyLong(), anyLong(), any());
+        }
+
+        @Test
+        @DisplayName("更正不能绕过场所规则：非冷库 422、跨组织冷库 403、缺少场所 400")
+        void correct_SiteRulesStillApply() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name()));
+            when(traceEventMapper.selectByIdIgnoreTenantForUpdate(500L)).thenReturn(storedEvent("WAREHOUSE_IN", COLD_STORE_ID));
+            when(siteMapper.selectByIdIgnoreTenant(703L)).thenReturn(site(703L, 10L, "ACTIVE", "FACTORY"));
+            when(siteMapper.selectByIdIgnoreTenant(701L)).thenReturn(site(701L, 20L, "ACTIVE", "COLD_STORE"));
+
+            assertProblem(() -> eventService.correctEvent(1000L, 500L, correct("WAREHOUSE_IN", 703L), VALID_KEY, operatorOrg1),
+                    HttpStatus.UNPROCESSABLE_ENTITY, "WAREHOUSE_SITE_TYPE_INVALID");
+            assertProblem(() -> eventService.correctEvent(1000L, 500L, correct("WAREHOUSE_IN", 701L), VALID_KEY, operatorOrg1),
+                    HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED");
+            assertProblem(() -> eventService.correctEvent(1000L, 500L, correct("WAREHOUSE_IN", null), VALID_KEY, operatorOrg1),
+                    HttpStatus.BAD_REQUEST, "INVALID_REQUEST");
+        }
+
+        @Test
+        @DisplayName("FROZEN 批次仓储更正仍被拒绝（Phase A 保持 NORMAL 规则，FROZEN / RECALLED 更正语义留待 Phase B）")
+        void correct_FrozenBatch_Rejected() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(
+                    createBatch(1000L, 10L, BatchFlowStatus.ACTIVE.name(), BatchRiskStatus.FROZEN.name()));
+            assertProblem(() -> eventService.correctEvent(1000L, 500L, correct("WAREHOUSE_IN", COLD_STORE_ID), VALID_KEY, operatorOrg1),
+                    HttpStatus.UNPROCESSABLE_ENTITY, "BATCH_FLOW_BLOCKED");
+        }
+
+        @Test
+        @DisplayName("历史参与组织不能更正已转出批次的仓储事件（403）")
+        void correct_HistoricalOrg_Denied() {
+            when(batchMapper.selectByIdIgnoreTenantForUpdate(1000L)).thenReturn(createBatch(1000L, 20L, BatchFlowStatus.ACTIVE.name()));
+            assertProblem(() -> eventService.correctEvent(1000L, 500L, correct("WAREHOUSE_OUT", COLD_STORE_ID), VALID_KEY, operatorOrg1),
+                    HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED");
         }
     }
 }

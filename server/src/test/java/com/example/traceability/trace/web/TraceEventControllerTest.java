@@ -431,4 +431,68 @@ class TraceEventControllerTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("EVENT_ALREADY_CORRECTED"));
     }
+
+    @Test
+    @DisplayName("冷库入库：siteId 从 JSON 绑定到服务层，201 返回场所")
+    void createEvent_WarehouseIn_BindsSiteId() throws Exception {
+        CreateTraceEventRequest req = new CreateTraceEventRequest(
+                "WAREHOUSE_IN", OCCURRED_AT, 700L, "MANUAL", "冷库入库：自有冷库", null
+        );
+        TraceEventResponse resp = new TraceEventResponse(
+                600L, 1000L, 10L, 700L, "WAREHOUSE_IN", OCCURRED_AT, OCCURRED_AT, 101L, "MANUAL", "SUBMITTED",
+                "冷库入库：自有冷库", null, null, null
+        );
+        org.mockito.ArgumentCaptor<CreateTraceEventRequest> captor = org.mockito.ArgumentCaptor.forClass(CreateTraceEventRequest.class);
+        when(traceEventService.createEvent(eq(1000L), captor.capture(), eq(VALID_KEY), any())).thenReturn(resp);
+
+        mockMvc.perform(post("/api/v1/batches/1000/events")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.eventType").value("WAREHOUSE_IN"))
+                .andExpect(jsonPath("$.data.siteId").value(700));
+        org.assertj.core.api.Assertions.assertThat(captor.getValue().siteId()).isEqualTo(700L);
+        org.assertj.core.api.Assertions.assertThat(captor.getValue().eventType()).isEqualTo("WAREHOUSE_IN");
+    }
+
+    @Test
+    @DisplayName("冷库出入库引用非冷库场所返回 422 WAREHOUSE_SITE_TYPE_INVALID")
+    void createEvent_WarehouseNonColdStore_Returns422() throws Exception {
+        CreateTraceEventRequest req = new CreateTraceEventRequest(
+                "WAREHOUSE_OUT", OCCURRED_AT, 701L, "MANUAL", "冷库出库", null
+        );
+        when(traceEventService.createEvent(eq(1000L), any(), eq(VALID_KEY), any()))
+                .thenThrow(new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "WAREHOUSE_SITE_TYPE_INVALID", "场所不是冷库", "FACTORY"));
+
+        mockMvc.perform(post("/api/v1/batches/1000/events")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("WAREHOUSE_SITE_TYPE_INVALID"));
+    }
+
+    @Test
+    @DisplayName("仓储事件跨类更正返回 422 WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN")
+    void correctEvent_WarehouseCrossFamily_Returns422() throws Exception {
+        CorrectTraceEventRequest req = new CorrectTraceEventRequest(
+                "FREEZE", OCCURRED_AT, null, "MANUAL", "改为速冻", null, "原因"
+        );
+        when(traceEventService.correctEvent(eq(1000L), eq(500L), any(), eq(VALID_KEY), any()))
+                .thenThrow(new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN", "仓储事件类型不可跨类更正", "IN -> FREEZE"));
+
+        mockMvc.perform(post("/api/v1/batches/1000/events/500/corrections")
+                        .with(user(operatorPrincipal))
+                        .with(csrf())
+                        .header("Idempotency-Key", VALID_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN"));
+    }
 }
