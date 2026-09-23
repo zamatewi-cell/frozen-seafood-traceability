@@ -45,7 +45,7 @@ import java.util.regex.Pattern;
  *   <li>追溯事件创建：支持双时间体系，严格按批次生命周期状态矩阵（仅 ACTIVE 允许）校验；</li>
  *   <li>追加式非分叉更正：单事务写入新版本并将旧版本从 SUBMITTED 流转为 CORRECTED；</li>
  *   <li>多维度组织级防重幂等：支持同语义重放与异构语义 409 IDEMPOTENCY_CONFLICT 精准分类；</li>
- *   <li>受控 detailsJson：单层、最多 20 属性、键名正则校验、标量/null 限定、UTF-8 序列化最大 8 KiB。</li>
+ *   <li>受控 detailsJson：单层、最多 20 属性、键名正则校验、标量/嵌套对象或列表限定、UTF-8 序列化最大 8 KiB。</li>
  * </ul>
  * </p>
  *
@@ -607,7 +607,7 @@ public class TraceEventApplicationService {
      * 1. 仅单层对象，最多 20 个属性；
      * 2. key 匹配 ^[a-z][A-Za-z0-9]{0,63}$；
      * 3. key 不能占用系统核心字段与持久层字段；
-     * 4. value 仅允许标量 (String, Number, Boolean) 或 null，严禁嵌套 Map 或 Collection；
+     * 4. value 允许标量 (String, Number, Boolean)、null 或嵌套 Map/Collection (如质检清单项)；
      * 5. 字符串类型属性值最长 500 字符；
      * 6. UTF-8 序列化最大 8 KiB (8192 字节)。
      */
@@ -647,14 +647,6 @@ public class TraceEventApplicationService {
 
             Object val = entry.getValue();
             if (val != null) {
-                if (val instanceof Map || val instanceof Iterable || val.getClass().isArray()) {
-                    throw new BusinessException(
-                            HttpStatus.BAD_REQUEST,
-                            "INVALID_REQUEST",
-                            "参数校验失败",
-                            "detailsJson 仅支持单层标量属性，禁止嵌套复杂对象或列表: " + key
-                    );
-                }
                 if (val instanceof String strVal) {
                     if (strVal.length() > 500) {
                         throw new BusinessException(
@@ -664,12 +656,16 @@ public class TraceEventApplicationService {
                                 "detailsJson 字符串属性值长度不得超过 500 个字符: " + key
                         );
                     }
-                } else if (!(val instanceof Number || val instanceof Boolean)) {
+                } else if (val instanceof Number || val instanceof Boolean) {
+                    // scalar OK
+                } else if (val instanceof Map || val instanceof Iterable || val.getClass().isArray()) {
+                    // allow nested structures (e.g. checklist items), 8 KiB total limit guards abuse
+                } else {
                     throw new BusinessException(
                             HttpStatus.BAD_REQUEST,
                             "INVALID_REQUEST",
                             "参数校验失败",
-                            "detailsJson 仅允许标量类型 (字符串、数值、布尔) 或 null: " + key
+                            "detailsJson 仅允许标量类型 (字符串、数值、布尔) 或嵌套对象/列表: " + key
                     );
                 }
             }
