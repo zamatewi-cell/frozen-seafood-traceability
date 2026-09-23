@@ -6,6 +6,12 @@
 
 ### Added
 
+- Phase A Slice 5 终端 Sale：
+  - Flyway V11：新建追加式终端销售台账 `sale`（正数量、kg、仅 `SUBMITTED`、组织内幂等键唯一 + 请求语义哈希、`(site_id, org_id)` 复合外键保证场所属于销售组织；无消费者 / 支付 / 订单 / 发票字段）；`site` 增加 `UNIQUE (id, org_id)`；`batch` 增加写一次标记 `first_sale_id`，复合外键 `(first_sale_id, id, org_id) → sale(id, batch_id, org_id)` 保证只能指向同批次同组织的 Sale，CHECK 禁止同时被操作全量消耗、禁止 DRAFT；历史批次不回填。
+  - 终端销售 API `POST / GET /api/v1/batches/{batchId}/sales`：仅当前责任 RETAILER 的 OPERATOR 在本组织启用 STORE 门店提交；部分销售、超卖 422、售罄同事务 CLOSED；每笔成功 Sale 自动生成且仅生成一条 SALE 追溯事件（`SYS:SALE:SALE:{saleId}`）；幂等重放先于状态校验，业务时间统一规范化为 UTC 微秒参与哈希与持久化。
+  - 生产 Vue：批次详情“终端销售”面板（门店选项来自本组织场所目录 STORE、剩余量只展示服务端派生值、全部剩余快捷填入、幂等重试）、终端销售记录表、首次销售 / 售罄提示、SALE 事件结构化事实。
+  - 真实浏览器验收 `tests/e2e/real-slice5.spec.ts`（加工企业 T2 / T3 同一 S1 → 承运 → 零售接受 → B2 200 + 400、B3 360 售罄，首次销售后真实 API 拒绝探测）与 MySQL 事实校验。
+
 - Phase A Slice 4 自有冷库出入库（无 Flyway 迁移）：
   - 批次详情“自有冷库仓储”面板：当前责任组织 OPERATOR 对 ACTIVE + NORMAL 批次记录冷库入库 / 出库，冷库选项来自本组织场所目录（`siteType = COLD_STORE`），时间线展示冷库场所。
   - 真实浏览器验收 `tests/e2e/real-slice4.spec.ts` 与 MySQL 事实校验（B2 / B3 各一条 IN + OUT，批次数量 / 责任组织 / 状态 / 版本不变，无批次 / 谱系 / 交接 / 运输副作用）。
@@ -44,6 +50,11 @@
 - Phase 1 可交互原型、测试计划和三条版本化演示数据方案。
 
 ### Changed
+
+- 首次销售锁定（Slice 5）：批次 `firstSaleId` 非空后，交接创建 / 提交 / 接受、运输任务装载与批次操作创建 / 提交一律 409 `BATCH_SALE_STARTED`（剩余量大于 0 时同样适用）；守卫读取已持有行锁的批次行，REPEATABLE READ 事务中也能看到并发已提交的首次销售。
+- `remainingQuantity` 改为 `声明数量 - 已提交 INPUT 消耗量 - 已提交终端销售数量`，批次列表 / 详情、批次操作全量投入校验与终端销售超卖校验共用同一派生服务；批次响应新增 `firstSaleId`。
+- 消费者公开标签 SALE 由“经销零售出库”改为“终端零售销售”（Sale 只表示终端消费出库，企业间流转使用 Transfer）。
+- 批次详情：已开始终端销售的批次隐藏“发起交接”与加工 / 拆分入口。
 
 - TraceEvent（Slice 4）：`WAREHOUSE_IN` / `WAREHOUSE_OUT` 必须指定调用方组织启用的 `COLD_STORE` 场所（缺失 400、跨组织 403、停用 422 `SITE_NOT_ACTIVE`、非冷库 422 `WAREHOUSE_SITE_TYPE_INVALID`），`dataSource` 必须为 `MANUAL` 且不接受 `detailsJson`；仓储事件只能在 IN ↔ OUT 之间更正（422 `WAREHOUSE_EVENT_TYPE_CHANGE_FORBIDDEN`），更正保留 CLOSED 批次审计能力；人工接口拒绝创建或更正 `SALE`（422 `EVENT_TYPE_NOT_MANUAL`）。不强制 IN / OUT 配对或顺序（契约未定义仓储状态机的最小实现解释）。
 
