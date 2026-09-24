@@ -169,6 +169,25 @@ export interface Sale {
  * 批次公开追溯码（企业端视图）。一批一码、跨交接不换码；DISABLED 为终态（消费者查询与未知码一致返回未找到）。
  * RECALLED 码状态属于 Phase B，当前切片不会写入。
  */
+/** 风险状态转换来源类型：PB1 只有人工（MANUAL）；ALERT / RECALL 随后续阶段的数据库约束同时加入。 */
+export type BatchRiskSourceType = 'MANUAL'
+
+/**
+ * 批次风险状态转换（PB1：人工 NORMAL ⇄ FROZEN）。orgId 为转换时的责任组织，flowStatus 为转换时的流转状态快照（转换不改变流转状态）。
+ */
+export interface BatchRiskTransition {
+  id: number
+  batchId: number
+  orgId: number
+  flowStatus: 'ACTIVE' | 'CLOSED'
+  fromStatus: BatchRiskStatus
+  toStatus: BatchRiskStatus
+  sourceType: BatchRiskSourceType
+  reason: string
+  actorUserId: number | null
+  occurredAt: string
+}
+
 export interface PublicTraceCode {
   id: number
   batchId: number

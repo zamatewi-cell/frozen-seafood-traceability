@@ -50,7 +50,8 @@ describe('Display Formatters', () => {
 
   it('derives the consumer status conclusion with risk taking precedence over flow', () => {
     expect(formatPublicTraceStatus('ACTIVE', 'NORMAL')).toMatchObject({ tone: 'success', label: '当前记录正常' })
-    expect(formatPublicTraceStatus('ACTIVE', 'FROZEN')).toMatchObject({ tone: 'warning', label: '业务冻结状态' })
+    expect(formatPublicTraceStatus('ACTIVE', 'FROZEN')).toMatchObject({ tone: 'warning', label: '模拟风险冻结' })
+    expect(formatPublicTraceStatus('CLOSED', 'FROZEN')).toMatchObject({ tone: 'warning', label: '模拟风险冻结' })
     expect(formatPublicTraceStatus('ACTIVE', 'RECALLED')).toMatchObject({ tone: 'danger', label: '模拟召回演练' })
     expect(formatPublicTraceStatus('CLOSED', 'NORMAL')).toMatchObject({ tone: 'neutral', label: '流转已关闭' })
     expect(formatPublicTraceStatus('CLOSED', 'RECALLED')).toMatchObject({ tone: 'danger', label: '模拟召回演练' })

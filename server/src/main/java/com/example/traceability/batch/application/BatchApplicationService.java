@@ -23,6 +23,7 @@ import com.example.traceability.trace.application.TraceEventApplicationService;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -78,6 +79,9 @@ public class BatchApplicationService {
      * @param principal 当前认证主体
      * @return 包含分页元数据的批次列表封套
      */
+    // 授权所依据的可变责任组织事实与构造响应的全部数据必须来自同一 InnoDB 一致性快照：只读 REPEATABLE READ 事务
+    // 让首个一致性读建立读视图，后续非锁定读复用它，看不到交接接受后新责任组织才提交的行（不加任何锁）
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public SuccessEnvelope<List<BatchResponse>> listBatches(BatchQueryCriteria criteria, TraceSecurityPrincipal principal) {
         if (criteria.page() < 1) {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "参数校验失败", "页码 page 最小值为 1");
@@ -133,6 +137,9 @@ public class BatchApplicationService {
      * @param principal 当前认证主体
      * @return 批次详情响应 DTO
      */
+    // 授权所依据的可变责任组织事实与构造响应的全部数据必须来自同一 InnoDB 一致性快照：只读 REPEATABLE READ 事务
+    // 让首个一致性读建立读视图，后续非锁定读复用它，看不到交接接受后新责任组织才提交的行（不加任何锁）
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public BatchResponse getBatchById(Long batchId, TraceSecurityPrincipal principal) {
         Batch batch = batchMapper.selectByIdIgnoreTenant(batchId);
         if (batch == null) {

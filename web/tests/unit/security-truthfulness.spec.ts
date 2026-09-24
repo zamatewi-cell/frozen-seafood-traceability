@@ -4,6 +4,7 @@ import path from 'node:path'
 import { mount } from '@vue/test-utils'
 import TraceTimeline from '@/components/TraceTimeline.vue'
 import TraceTemperatureCard from '@/components/TraceTemperatureCard.vue'
+import { formatPublicTraceStatus } from '@/utils/formatters'
 
 describe('Security & Truthfulness Audits', () => {
   const srcDir = path.resolve(__dirname, '../../src')
@@ -130,5 +131,18 @@ describe('Security & Truthfulness Audits', () => {
         expect(content, `${file} contains ${forbidden}`).not.toContain(forbidden)
       }
     }
+  })
+  it('TRUTHFULNESS: the consumer FROZEN conclusion is a training simulation, never a real authority action or product hold (PB1)', () => {
+    const formatters = fs.readFileSync(path.join(srcDir, 'utils/formatters.ts'), 'utf8')
+    expect(formatters).not.toContain('业务冻结状态')
+    expect(formatters).not.toContain('质量管理部门已暂停')
+    for (const flow of ['ACTIVE', 'CLOSED']) {
+      const info = formatPublicTraceStatus(flow, 'FROZEN')
+      expect(`${info.label}${info.description}`).toContain('模拟')
+      expect(info.description).toContain('不代表')
+    }
+    const panel = fs.readFileSync(path.join(srcDir, 'components/enterprise/BatchRiskPanel.vue'), 'utf8')
+    expect(panel).toContain('教学实训中的模拟质量处置')
+    expect(panel).toContain('不代表真实的产品扣留、安全判定或监管措施')
   })
 })

@@ -98,6 +98,29 @@ export function canManagePublicTraceCode(user: CurrentUser | null | undefined, b
 }
 
 /**
+ * 风险冻结 / 解除冻结（Phase B PB1）：批次当前责任组织的质量管理员（QUALITY_MANAGER，非平台 / 系统管理员），
+ * 只对 ACTIVE 或 CLOSED 批次开放（DRAFT 不参与风险转换，RECALLED 为终态）。服务端仍独立校验全部前提。
+ */
+export function canManageBatchRisk(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
+  return Boolean(user && batch
+    && user.roles.includes('QUALITY_MANAGER')
+    && !user.roles.includes('SYSTEM_ADMIN')
+    && !user.scopes.includes('PLATFORM')
+    && batch.orgId === user.orgId
+    && (batch.flowStatus === 'ACTIVE' || batch.flowStatus === 'CLOSED'))
+}
+
+/** 风险冻结：NORMAL → FROZEN。 */
+export function canFreezeBatch(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
+  return canManageBatchRisk(user, batch) && batch?.riskStatus === 'NORMAL'
+}
+
+/** 解除冻结：FROZEN → NORMAL。 */
+export function canReleaseBatch(user: CurrentUser | null | undefined, batch: Batch | null | undefined): boolean {
+  return canManageBatchRisk(user, batch) && batch?.riskStatus === 'FROZEN'
+}
+
+/**
  * 首次激活公开追溯码：只对 ACTIVE + NORMAL 批次开放（契约正常流程在零售接受之后、终端销售之前激活）。
  * 已激活的码在批次关闭后继续可查询，不需要也不能在关闭后首次激活。
  */

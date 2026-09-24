@@ -45,6 +45,7 @@ function backend(overrides: Overrides = {}) {
     'GET /api/v1/transfers': () => ({ status: 200, body: envelope([], { number: 1, size: 20, totalElements: 0, totalPages: 0 }) }),
     'GET /api/v1/batch-operations': () => ({ status: 200, body: envelope([], { number: 1, size: 20, totalElements: 0, totalPages: 0 }) }),
     'GET /api/v1/batches/12/public-trace-code': () => problem(404, 'PUBLIC_TRACE_CODE_NOT_FOUND', '该批次尚未激活公开追溯码'),
+    'GET /api/v1/batches/12/risk-transitions': () => ({ status: 200, body: envelope([]) }),
     ...overrides
   })
 }
@@ -213,7 +214,10 @@ describe('BatchDetailView', () => {
     expect(view.text()).toContain('365 天')
     // 非来源企业查看 ACTIVE 批次：不提供提交激活等写操作入口
     expect(view.find('[data-testid="submit-activation"]').exists()).toBe(false)
-    // 按钮只有当前责任组织的公开追溯码激活（Slice 6）与自有冷库入库 / 出库（Slice 4），不含其他写操作
+    // 按钮只有当前责任组织的公开追溯码激活（Slice 6）与自有冷库入库 / 出库（Slice 4），不含其他写操作；
+    // OPERATOR 不是质量管理员，风险状态面板只读（无风险冻结 / 解除冻结入口，PB1）
+    expect(view.find('[data-testid="risk-panel"]').exists()).toBe(true)
+    expect(view.find('[data-testid="risk-history-empty"]').exists()).toBe(true)
     expect(view.findAll('.enterprise-main button').map((b) => b.attributes('data-testid'))).toEqual(['warehouse-in', 'warehouse-out', 'public-code-activate'])
     // 当前责任组织操作员查看 ACTIVE/NORMAL 批次且无未结束交接：提供“发起交接”入口（服务端仍独立校验）
     expect(view.find('[data-testid="initiate-transfer"]').attributes('href')).toBe('/app/batches/12/transfers/new')

@@ -66,6 +66,14 @@ export const mockClosedRecalledTrace: PublicTrace = {
   recallNotice: '此批次海产品已结束正常流转（已售罄或处置完毕），并已进入系统模拟召回演练，如持有该批次产品请联系销售商或质量管理部门处理（本提示为系统教学演练模拟信息）。'
 }
 
+/** PB1：已售罄关闭后的模拟风险冻结（CLOSED + FROZEN），无召回提示。 */
+export const mockClosedFrozenTrace: PublicTrace = {
+  ...mockSuccessTrace,
+  publicTraceId: 'CLSFRZ2C4P4Q6T7XZ2M7K3B2AC',
+  flowStatus: 'CLOSED',
+  riskStatus: 'FROZEN'
+}
+
 export const mockEmptyTimelineTrace: PublicTrace = {
   ...mockSuccessTrace,
   publicTraceId: 'EMPTY23C4P4Q6T7XZ2M7K3B2AC',

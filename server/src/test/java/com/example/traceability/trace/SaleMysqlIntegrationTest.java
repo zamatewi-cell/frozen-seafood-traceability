@@ -209,6 +209,71 @@ class SaleMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT {
         };
     }
 
+    /**
+     * 确定性同键交错（门闩）：holder 先插入一行<b>未提交</b>的同组织同幂等键 Sale（引用与本用例无关的哑批次，外键共享锁不落在被测批次上）。
+     * 请求 A 预读看不到该键 → 取得批次行锁 → 持锁复读仍看不到 → 插入 Sale 时阻塞于 {@code uk_sale_org_idempotency}（此时 A 持有批次行锁）；
+     * 请求 B 随后预读同样看不到该键（A 与 holder 都未提交）→ 阻塞于 batch 行锁。holder 回滚后 A 完成并提交，
+     * B 取得批次行锁后的复读必须看到 A 已提交的 Sale。锁顺序仍为 batch → sale 幂等索引，不引入新边。
+     */
+    private MvcResult[] gatedBySaleKey(String idemKey, Long dummyBatchId, Call first, Call second) throws Exception {
+        AtomicReference<MvcResult> r1 = new AtomicReference<>();
+        AtomicReference<MvcResult> r2 = new AtomicReference<>();
+        AtomicReference<Throwable> e1 = new AtomicReference<>();
+        AtomicReference<Throwable> e2 = new AtomicReference<>();
+        Thread w1 = new Thread(() -> {
+            try {
+                r1.set(first.run());
+            } catch (Throwable t) {
+                e1.set(t);
+            }
+        }, "sale-same-key-A");
+        Thread w2 = new Thread(() -> {
+            try {
+                r2.set(second.run());
+            } catch (Throwable t) {
+                e2.set(t);
+            }
+        }, "sale-same-key-B");
+        Connection holder = dataSource.getConnection();
+        try {
+            holder.setAutoCommit(false);
+            try (PreparedStatement ps = holder.prepareStatement(
+                    "INSERT INTO sale (org_id, batch_id, site_id, quantity, unit_code, occurred_at, status, idempotency_key, request_hash, created_by) "
+                            + "VALUES (?, ?, ?, 1, 'kg', UTC_TIMESTAMP(6), 'SUBMITTED', ?, REPEAT('g', 64), ?)")) {
+                ps.setLong(1, receiverOrg.getId());
+                ps.setLong(2, dummyBatchId);
+                ps.setLong(3, receiverSite.getId());
+                ps.setString(4, idemKey);
+                ps.setLong(5, receiverUser.getId());
+                ps.executeUpdate();
+            }
+            w1.start();
+            awaitRowLockWait(w1, "sale");
+            w2.start();
+            awaitRowLockWait(w2, "batch");
+        } finally {
+            try {
+                holder.rollback();
+            } finally {
+                holder.close();
+            }
+            for (Thread w : List.of(w1, w2)) {
+                if (w.getState() != Thread.State.NEW) {
+                    w.join(30_000);
+                    assertThat(w.isAlive()).as("race worker %s did not finish", w.getName()).isFalse();
+                }
+            }
+        }
+        if (e1.get() != null || e2.get() != null) {
+            throw new AssertionError("gated sale request failed", e1.get() != null ? e1.get() : e2.get());
+        }
+        return new MvcResult[]{r1.get(), r2.get()};
+    }
+
+    private JsonNode data(MvcResult r) throws Exception {
+        return objectMapper.readTree(r.getResponse().getContentAsString()).get("data");
+    }
+
     private MvcResult[] race(Call first, Call second) throws Exception {
         CyclicBarrier barrier = new CyclicBarrier(2);
         CountDownLatch latch = new CountDownLatch(2);
@@ -469,6 +534,60 @@ class SaleMysqlIntegrationTest extends AbstractTransferShipmentMysqlIT {
         expectProblem(saleRequest(receiverSession, b, receiverSite.getId(), "299", at, k), 409, "IDEMPOTENCY_CONFLICT");
         // 亚毫秒（微秒）不同 409：哈希与落库同为微秒精度
         expectProblem(saleRequest(receiverSession, b, receiverSite.getId(), "300", at.plusNanos(1_000), k), 409, "IDEMPOTENCY_CONFLICT");
+        assertSaleLedgerConsistent(b, 1);
+    }
+
+    @Test
+    @DisplayName("确定性同键售罄竞态：A / B 同组织同键同载荷且等待批次锁前都预读不到该键；A 先售罄提交，B 持锁复读到 A 的 Sale 并重放 201（同一 Sale），绝不 422")
+    void sameKeySameSellOut_secondRequestReplaysAfterLock() throws Exception {
+        Long b = receiverHeldBatch("S5-SKR-" + suffix, new BigDecimal("300.000"));
+        Long dummy = createAndSubmitActiveBatch(senderSession, "S5-GATE-" + suffix, new BigDecimal("1.000"));
+        OffsetDateTime at = occurredAt();
+        String k = key("idem-sale-same");
+
+        MvcResult[] r = gatedBySaleKey(k, dummy,
+                () -> perform(saleRequest(receiverSession, b, receiverSite.getId(), "300", at, k)),
+                () -> perform(saleRequest(receiverSession, b, receiverSite.getId(), "300", at, k)));
+        assertThat(status(r[0])).as(r[0].getResponse().getContentAsString()).isEqualTo(201);
+        assertThat(status(r[1])).as("B must replay A's committed sale, got %s", r[1].getResponse().getContentAsString()).isEqualTo(201);
+        long saleId = data(r[0]).get("id").asLong();
+        assertThat(data(r[1]).get("id").asLong()).isEqualTo(saleId);
+        for (String field : List.of("batchId", "orgId", "siteId", "occurredAt", "status", "createdBy", "createdAt")) {
+            assertThat(data(r[1]).get(field)).as(field).isEqualTo(data(r[0]).get(field));
+        }
+        // 数量数值相等（原始响应回显请求数量，重放读取 DECIMAL(18,3)，JSON 表示可为 300 与 300.0）
+        assertThat(new BigDecimal(data(r[1]).get("quantity").toString())).isEqualByComparingTo(new BigDecimal(data(r[0]).get("quantity").toString()));
+
+        assertThat(saleRows(b)).isEqualTo(1);
+        assertThat(countEvents(b, "SALE")).isEqualTo(1);
+        assertThat(saleEventsBackedBySale(b)).isEqualTo(1);
+        Map<String, Object> row = batchRow(b);
+        assertThat(((Number) row.get("first_sale_id")).longValue()).isEqualTo(saleId);
+        assertThat(row.get("flow_status")).isEqualTo("CLOSED");
+        assertThat(new BigDecimal(batchView(b).get("remainingQuantity").toString())).isEqualByComparingTo("0");
+        assertSaleLedgerConsistent(b, 1);
+
+        // 同键改载荷仍然 409（不因售罄而变成 422）
+        expectProblem(saleRequest(receiverSession, b, receiverSite.getId(), "299", at, k), 409, "IDEMPOTENCY_CONFLICT");
+        assertThat(saleRows(b)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("确定性同键不同载荷竞态：A 先售罄提交，B（同键、不同数量）持锁复读到 A 的 Sale 并得到 409 IDEMPOTENCY_CONFLICT，而不是 422 BATCH_FLOW_BLOCKED")
+    void sameKeyDifferentPayload_secondRequestConflictsAfterLock() throws Exception {
+        Long b = receiverHeldBatch("S5-SKC-" + suffix, new BigDecimal("300.000"));
+        Long dummy = createAndSubmitActiveBatch(senderSession, "S5-GATE2-" + suffix, new BigDecimal("1.000"));
+        OffsetDateTime at = occurredAt();
+        String k = key("idem-sale-diff");
+
+        MvcResult[] r = gatedBySaleKey(k, dummy,
+                () -> perform(saleRequest(receiverSession, b, receiverSite.getId(), "300", at, k)),
+                () -> perform(saleRequest(receiverSession, b, receiverSite.getId(), "100", at, k)));
+        assertThat(status(r[0])).isEqualTo(201);
+        assertThat(status(r[1])).as(r[1].getResponse().getContentAsString()).isEqualTo(409);
+        assertThat(code(r[1])).isEqualTo("IDEMPOTENCY_CONFLICT");
+        assertThat(saleRows(b)).isEqualTo(1);
+        assertThat(batchRow(b).get("flow_status")).isEqualTo("CLOSED");
         assertSaleLedgerConsistent(b, 1);
     }
 

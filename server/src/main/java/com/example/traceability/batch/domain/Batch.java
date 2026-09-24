@@ -1,5 +1,6 @@
 package com.example.traceability.batch.domain;
 
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
@@ -81,7 +82,12 @@ public class Batch {
     @TableField("flow_status")
     private String flowStatus;
 
-    @TableField("risk_status")
+    /**
+     * 风险状态：插入时写入 NORMAL；此后只能经 {@code BatchRiskService} → {@code BatchRiskStateMapper} 在同一事务内
+     * 连同风险转换台账一起变更。更新策略 NEVER：通用实体更新（updateById / update(entity, wrapper)）永不写入该列，
+     * 过期实体不能覆盖冻结状态。
+     */
+    @TableField(value = "risk_status", updateStrategy = FieldStrategy.NEVER)
     private String riskStatus;
 
     /** 产出该批次的批次操作 ID；仅服务端生成的操作输出批次非空（Slice 3 起）。 */

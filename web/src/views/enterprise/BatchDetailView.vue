@@ -5,6 +5,7 @@ import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import WarehouseEventPanel from '@/components/enterprise/WarehouseEventPanel.vue'
 import SalePanel from '@/components/enterprise/SalePanel.vue'
 import PublicTraceCodePanel from '@/components/enterprise/PublicTraceCodePanel.vue'
+import BatchRiskPanel from '@/components/enterprise/BatchRiskPanel.vue'
 import { getBatch, listBatchEvents, submitBatch } from '@/api/batches'
 import { listBatchOperations } from '@/api/batchOperations'
 import { listSites } from '@/api/directory'
@@ -13,7 +14,7 @@ import { listTransfers } from '@/api/transfers'
 import { ApiError } from '@/api/client'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
 import { useSession } from '@/stores/session'
-import type { Batch, BatchOperation, PublicTraceCode, Sale, TraceEvent, Transfer } from '@/types/enterprise'
+import type { Batch, BatchOperation, BatchRiskTransition, PublicTraceCode, Sale, TraceEvent, Transfer } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import {
   formatBatchType,
@@ -120,6 +121,20 @@ function onPublicTraceCodeChanged(code: PublicTraceCode) {
   flash.value = code.status === 'DISABLED'
     ? { tone: 'success', message: '公开追溯码已停用（终态）；消费者查询将显示未找到。' }
     : { tone: 'success', message: '公开追溯码已激活；批次状态与数量不变，消费者可通过该码查询公开信息。' }
+}
+
+/** 风险冻结 / 解除冻结成功：以服务端最新数据刷新详情（版本变化会让各面板按新的风险状态重新判断入口）。 */
+async function onRiskChanged(transition: BatchRiskTransition) {
+  await load()
+  flash.value = transition.toStatus === 'FROZEN'
+    ? { tone: 'warning', message: '已风险冻结（模拟质量处置）：正常流转已暂停；批次数量、当前责任组织与流转状态保持不变。' }
+    : { tone: 'success', message: '已解除冻结：批次风险状态恢复为正常；批次数量、当前责任组织与流转状态保持不变。' }
+}
+
+/** 风险转换 409：批次状态已被修改或请求冲突，刷新为服务端最新状态并保留原因提示。 */
+async function onRiskConflict(message: string) {
+  await load()
+  flash.value = { tone: 'warning', message }
 }
 
 /** SALE 由终端销售自动生成：展示可追溯到销售记录的结构化事实。 */
@@ -496,6 +511,15 @@ onBeforeUnmount(() => {
       <p v-else-if="batch.firstSaleId" class="ent-next-step" data-testid="sale-started">
         <strong>已开始终端销售：</strong>该批次不能再交接、加工或拆分，剩余量只能继续终端销售。
       </p>
+
+      <BatchRiskPanel
+        v-if="batch.flowStatus !== 'DRAFT'"
+        :batch="batch"
+        :user="user"
+        :org-label="directory.organizationLabel"
+        @changed="onRiskChanged"
+        @conflict="onRiskConflict"
+      />
 
       <section v-if="canSubmit" class="ent-card activation-card" aria-labelledby="activation-title" data-testid="activation-card">
         <h2 id="activation-title" class="ent-card-title">提交激活</h2>

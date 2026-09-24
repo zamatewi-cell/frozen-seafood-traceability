@@ -81,6 +81,8 @@ tags:
     description: 企业交接确认
   - name: Sales
     description: 零售企业终端销售数量台账
+  - name: Risk
+    description: 批次风险状态（Phase B PB1：人工风险冻结 / 解除冻结，教学实训中的模拟质量处置）
   - name: Organizations
     description: 企业端最小只读组织目录
   - name: Products
@@ -946,6 +948,96 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/risk/freeze:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    post:
+      tags: [Risk]
+      summary: 风险冻结 NORMAL → FROZEN（仅限批次当前责任组织的 QUALITY_MANAGER）
+      description: |
+        `batch.risk_status` 的唯一运行期写入口（与解除冻结共用同一核心）。校验顺序：
+        1. 未认证 401；平台 / 系统管理员 403 `ADMIN_RESTRICTED`；非 `QUALITY_MANAGER`（含 OPERATOR）403 `ACCESS_DENIED`；
+           幂等键缺失 / 格式错误 / 使用保留前缀 `SYS:`、原因为空或超过 500 字符（去除首尾空白后）、夹带未声明字段（例如 `occurredAt`、`targetStatus`）：400 `INVALID_REQUEST`；
+        2. 同组织同 `Idempotency-Key`：同语义重放原转换（**先于一切状态与责任组织校验**：状态已被之后的转换改变、或批次已交接给其他组织后，
+           原责任组织重试仍返回本组织原转换，不产生新写入）；语义不同（原因不同、冻结键用于解除、同键不同批次）409 `IDEMPOTENCY_CONFLICT`；
+        3. 批次不存在或已删除 404；不是批次当前责任组织（含已转出后的历史责任组织）403 `ORG_SCOPE_DENIED`；
+        4. 状态矩阵：`ACTIVE / NORMAL` → `ACTIVE / FROZEN`；`CLOSED / NORMAL` → `CLOSED / FROZEN`（从不重新打开）；
+           `DRAFT`、已 `FROZEN`、`RECALLED`（终态）：409 `INVALID_STATE_TRANSITION`。
+        成功时同一事务（READ COMMITTED）内：锁定批次行 → 追加一行风险转换台账（来源 `MANUAL`、操作人、转换时责任组织与流转状态快照、
+        服务端生成的 UTC 时间）→ 条件更新批次风险状态并版本 +1 → 审计 `RISK_FREEZE`。不改变数量、责任组织、流转状态与公开追溯码，
+        不生成任何 TraceEvent，不向祖先 / 后代 / 同源批次传播。冻结期间由既有守卫阻断交接创建 / 绑定 / 提交 / 接受、批次操作、
+        冷库仓储与更正、首次激活公开追溯码和终端销售；运输发运 / 到达、PENDING+DELIVERED 拒收、全部查询与公开投影保持可用。
+        同键并发冲突在极端情况下可能返回可重试的 409 `BATCH_CONCURRENT_CONFLICT`（用同一幂等键重试即得确定结果）。
+      operationId: freezeBatchRisk
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BatchRiskTransitionRequest'}
+      responses:
+        '201':
+          description: 已冻结（或幂等重放）的风险转换
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchRiskTransitionEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/risk/release:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    post:
+      tags: [Risk]
+      summary: 解除冻结 FROZEN → NORMAL（仅限批次当前责任组织的 QUALITY_MANAGER）
+      description: |
+        与风险冻结相同的权限、幂等与事务规则（审计 `RISK_RELEASE`）。状态矩阵：`ACTIVE / FROZEN` → `ACTIVE / NORMAL`；
+        `CLOSED / FROZEN` → `CLOSED / NORMAL`；`DRAFT`、未冻结、`RECALLED`：409 `INVALID_STATE_TRANSITION`。
+      operationId: releaseBatchRisk
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BatchRiskTransitionRequest'}
+      responses:
+        '201':
+          description: 已解除冻结（或幂等重放）的风险转换
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchRiskTransitionEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/risk-transitions:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    get:
+      tags: [Risk]
+      summary: 查询批次风险状态转换历史
+      description: |
+        按登记顺序返回。读取范围（与追溯事件 / 批次操作的历史参与判定一致，契约 §14）：
+        批次当前责任组织（任意角色）与 PLATFORM 只读角色：完整历史；历史参与组织（本组织曾作为当时的责任组织登记过该批次的转换）：
+        仅本组织登记的转换，看不到之后其他组织的转换、原因与操作人；其他组织 403 `ORG_SCOPE_DENIED`；匿名 401；批次不存在 404。
+        只读：历史参与组织不因此获得任何写权限。
+      operationId: listBatchRiskTransitions
+      responses:
+        '200':
+          description: 风险转换列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchRiskTransitionListEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
   /transfers:
     get:
       tags: [Transfers]
@@ -2176,6 +2268,43 @@ components:
             data:
               type: array
               items: {$ref: '#/components/schemas/Sale'}
+    BatchRiskTransitionRequest:
+      type: object
+      additionalProperties: false
+      description: 人工风险冻结 / 解除冻结请求。目标状态由路径决定，转换时间由服务端生成；夹带任何未声明字段返回 400。
+      required: [reason]
+      properties:
+        reason: {type: string, minLength: 1, maxLength: 500, description: 原因（去除首尾空白后 1..500 个字符）}
+    BatchRiskTransition:
+      type: object
+      additionalProperties: false
+      description: 风险状态转换白名单投影（不含幂等键、请求哈希与登记时间）。PB1 只有人工 NORMAL ⇄ FROZEN。
+      required: [id, batchId, orgId, flowStatus, fromStatus, toStatus, sourceType, reason, occurredAt]
+      properties:
+        id: {type: integer, format: int64}
+        batchId: {type: integer, format: int64}
+        orgId: {type: integer, format: int64, description: 转换时批次当前责任组织}
+        flowStatus: {type: string, enum: [ACTIVE, CLOSED], description: 转换时流转状态快照（转换不改变流转状态）}
+        fromStatus: {type: string, enum: [NORMAL, FROZEN]}
+        toStatus: {type: string, enum: [NORMAL, FROZEN]}
+        sourceType: {type: string, enum: [MANUAL], description: 来源类型；ALERT（PB3）/ RECALL（PB5）随对应迁移同时加入}
+        reason: {type: string}
+        actorUserId: {type: [integer, "null"], format: int64, description: 人工转换操作人}
+        occurredAt: {type: string, format: date-time, description: 'UTC，微秒精度，服务端生成'}
+    BatchRiskTransitionEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/BatchRiskTransition'}
+    BatchRiskTransitionListEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/BatchRiskTransition'}
     TransferStatus:
       type: string
       enum: [DRAFT, PENDING, ACCEPTED, REJECTED]

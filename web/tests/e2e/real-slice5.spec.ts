@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
  * 路径：加工企业为 B2 / B3 分别发起交接 T2 / T3 → 同一运输任务 S1 装载两张交接 → 提交 T2 / T3
  *       → 承运商发运、到达 S1 → 零售企业接受 T2 / T3
  *       → 零售企业在批次详情激活 B2 / B3 公开追溯码（契约 v1.1 §12 第 18 步：接受之后、终端销售之前）
+ *       → PB1-S：销售前零售企业质量管理员风险冻结 B3（ACTIVE / FROZEN）→ 销售入口消失、真实 API 终端销售 422 → 解除冻结
  *       → 零售企业在批次详情终端销售：B2 售 200（剩余 400，仍可流转，交接入口消失）→ B2 售 400（售罄关闭）→ B3 售 360（售罄关闭）。
  * B2 首次销售后、剩余 400 时，在零售企业同一会话内经真实 API 探测：交接 409 BATCH_SALE_STARTED、批次操作 403、
  * 非门店 / 停用门店 / 他组织门店、超卖与人工 SALE 事件均被拒绝；售罄后重放原销售得到同一 Sale，改载荷 409。
@@ -25,6 +26,7 @@ interface Slice5Expected {
   retailerOrgName: string
   processorSiteName: string
   retailerStoreName: string
+  retailerStoreSiteId: number
   retailerHubSiteId: number
   retailerInactiveStoreId: number
   processorStoreSiteId: number
@@ -34,7 +36,8 @@ const expected: Slice5Expected = JSON.parse(process.env.SLICE5_EXPECTED || '{}')
 const accounts = {
   processor: { username: process.env.SLICE5_PROCESSOR_USERNAME || '', password: process.env.SLICE5_PROCESSOR_PASSWORD || '' },
   carrier: { username: process.env.SLICE5_CARRIER_USERNAME || '', password: process.env.SLICE5_CARRIER_PASSWORD || '' },
-  retailer: { username: process.env.SLICE5_RETAILER_USERNAME || '', password: process.env.SLICE5_RETAILER_PASSWORD || '' }
+  retailer: { username: process.env.SLICE5_RETAILER_USERNAME || '', password: process.env.SLICE5_RETAILER_PASSWORD || '' },
+  retailerQm: { username: process.env.SLICE5_RETAILER_QM_USERNAME || '', password: process.env.SLICE5_RETAILER_QM_PASSWORD || '' }
 }
 
 interface WriteEvidence {
@@ -128,6 +131,21 @@ async function sellInBrowser(page: Page, quantity: string | 'ALL') {
   return { sale, request: response.request() }
 }
 
+/** PB1：质量管理员在批次详情“风险状态”面板填写原因、二次确认后提交；请求体只含原因。 */
+async function riskTransitionInBrowser(page: Page, action: 'freeze' | 'release', reason: string) {
+  await page.getByTestId(action === 'freeze' ? 'risk-freeze-open' : 'risk-release-open').click()
+  await page.getByTestId('field-risk-reason').fill(reason)
+  await page.getByTestId('risk-next').click()
+  await expect(page.getByTestId('risk-confirm-panel')).toBeVisible()
+  const post = waitForApi(page, 'POST', new RegExp(`^/api/v1/batches/\\d+/risk/${action}$`))
+  await page.getByTestId('risk-confirm').click()
+  const response = await post
+  expect(response.status()).toBe(201)
+  expect(JSON.parse(response.request().postData() || '{}')).toEqual({ reason })
+  await expect(page.getByTestId('risk-current')).toHaveAttribute('data-status', action === 'freeze' ? 'FROZEN' : 'NORMAL')
+  return (await response.json()).data
+}
+
 test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to zero at the retailer store', async ({ browser }) => {
   expect(process.env.REAL_SMOKE).toBe('true')
   expect(expected.b2Id).toBeGreaterThan(0)
@@ -211,6 +229,28 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
     publicCodes[batchId] = code.publicId
   }
   expect(publicCodes[expected.b2Id]).not.toBe(publicCodes[expected.b3Id])
+
+  // ---------------------------------------------------------------- PB1-S：销售前零售质量管理员风险冻结 B3 → 终端销售被既有守卫阻断 → 解除
+  const retailerQm = await loginAs(browser, accounts.retailerQm, 'RETAILER_QM', evidence)
+  await retailerQm.page.goto(`/app/batches/${expected.b3Id}`)
+  await expect(retailerQm.page.getByTestId('sale-panel')).toHaveCount(0)
+  const frozenB3 = await riskTransitionInBrowser(retailerQm.page, 'freeze', 'PB1 演示：门店到货抽检待定')
+  expect(frozenB3).toMatchObject({ batchId: expected.b3Id, fromStatus: 'NORMAL', toStatus: 'FROZEN', flowStatus: 'ACTIVE', sourceType: 'MANUAL' })
+  await retailer.page.goto(`/app/batches/${expected.b3Id}`)
+  await expect(retailer.page.getByTestId('risk-frozen-effects')).toBeVisible()
+  await expect(retailer.page.getByTestId('detail-risk-status')).toHaveText('冻结')
+  await expect(retailer.page.getByTestId('sale-panel')).toHaveCount(0)
+  await expect(retailer.page.getByTestId('risk-freeze-open')).toHaveCount(0)
+  await expect(retailer.page.getByTestId('risk-release-open')).toHaveCount(0)
+  const blockedSale = await probe(retailer.page, 'POST', `/api/v1/batches/${expected.b3Id}/sales`, {
+    siteId: expected.retailerStoreSiteId, quantity: 1, occurredAt: new Date(Date.now() - 60_000).toISOString()
+  })
+  expect(`${blockedSale.status} ${blockedSale.code}`).toBe('422 BATCH_FLOW_BLOCKED')
+  const releasedB3 = await riskTransitionInBrowser(retailerQm.page, 'release', 'PB1 演示：抽检合格，解除冻结')
+  expect(releasedB3).toMatchObject({ fromStatus: 'FROZEN', toStatus: 'NORMAL', flowStatus: 'ACTIVE' })
+  await retailer.page.reload()
+  await expect(retailer.page.getByTestId('risk-frozen-effects')).toHaveCount(0)
+  await expect(retailer.page.getByTestId('sale-panel')).toBeVisible()
 
   // ---------------------------------------------------------------- B2：部分销售 200
   await retailer.page.goto(`/app/batches/${expected.b2Id}`)
@@ -301,6 +341,8 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
     'RETAILER POST /api/v1/transfers/:id/accept',
     'RETAILER POST /api/v1/batches/:id/public-trace-code/activate',
     'RETAILER POST /api/v1/batches/:id/public-trace-code/activate',
+    'RETAILER_QM POST /api/v1/batches/:id/risk/freeze',
+    'RETAILER_QM POST /api/v1/batches/:id/risk/release',
     'RETAILER POST /api/v1/batches/:id/sales',
     'RETAILER POST /api/v1/batches/:id/sales',
     'RETAILER POST /api/v1/batches/:id/sales'
@@ -315,7 +357,8 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
   for (const e of businessWrites) console.log(`  ${e.actor} ${e.method} ${e.path} ${e.status} ${e.requestId}`)
   console.log('[slice5-smoke] 首次销售后 API 探测（name status code）:')
   for (const p of probes) console.log(`  ${p.name} ${p.status} ${p.code ?? ''}`)
-  console.log(`[slice5-smoke] SLICE5_RESULT ${JSON.stringify({ t2, t3, shipmentId, publicCodeActivated: Object.keys(publicCodes).length, sales: [first.sale.id, second.sale.id, third.sale.id] })}`)
+  console.log(`[slice5-smoke] PB1-S 冻结期间终端销售探测: ${blockedSale.status} ${blockedSale.code}`)
+  console.log(`[slice5-smoke] SLICE5_RESULT ${JSON.stringify({ t2, t3, shipmentId, publicCodeActivated: Object.keys(publicCodes).length, pb1s: [frozenB3.id, releasedB3.id], sales: [first.sale.id, second.sale.id, third.sale.id] })}`)
 
-  await Promise.all([processor.context.close(), carrier.context.close(), retailer.context.close()])
+  await Promise.all([processor.context.close(), carrier.context.close(), retailer.context.close(), retailerQm.context.close()])
 })

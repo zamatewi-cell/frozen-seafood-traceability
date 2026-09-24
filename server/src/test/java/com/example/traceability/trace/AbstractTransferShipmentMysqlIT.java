@@ -206,6 +206,13 @@ abstract class AbstractTransferShipmentMysqlIT {
      * </p>
      */
     protected void awaitRowLockWait(Thread worker, String table) throws Exception {
+        awaitRowLockWaits(worker, table, 1);
+    }
+
+    /**
+     * 等待本 schema 指定表上出现至少 {@code minWaits} 个 InnoDB 行锁等待（用于确认多个被测请求同时阻塞在同一张表上）。
+     */
+    protected void awaitRowLockWaits(Thread worker, String table, int minWaits) throws Exception {
         String baseUrl = ((com.zaxxer.hikari.HikariDataSource) dataSource).getJdbcUrl();
         String rootUser = System.getenv().getOrDefault("DB_ROOT_USERNAME", "root");
         if (rootUser.isBlank()) {
@@ -224,7 +231,7 @@ abstract class AbstractTransferShipmentMysqlIT {
             while (true) {
                 try (java.sql.ResultSet rs = ps.executeQuery()) {
                     rs.next();
-                    if (rs.getLong(1) > 0) {
+                    if (rs.getLong(1) >= minWaits) {
                         return;
                     }
                 }
@@ -237,6 +244,10 @@ abstract class AbstractTransferShipmentMysqlIT {
 
     @AfterEach
     void tearDownTransferShipmentFixture() {
+        // V12：batch_risk_transition → batch / organization（追加式台账），必须先于批次与组织清理
+        clean("DELETE FROM batch_risk_transition WHERE batch_id = ?", createdBatchIds);
+        clean("DELETE FROM batch_risk_transition WHERE org_id = ?", createdOrgIds);
+        clean("DELETE FROM batch_risk_transition WHERE batch_id IN (SELECT id FROM batch WHERE creation_org_id = ? OR org_id = ?)", createdOrgIds, 2);
         clean("DELETE FROM transfer_idempotency WHERE org_id = ?", createdOrgIds);
         clean("DELETE FROM shipment_idempotency WHERE org_id = ?", createdOrgIds);
         clean("DELETE FROM public_trace_code_idempotency WHERE org_id = ?", createdOrgIds);
@@ -292,6 +303,7 @@ abstract class AbstractTransferShipmentMysqlIT {
             assertThat(count("SELECT count(*) FROM transfer_idempotency WHERE org_id = ?", orgId)).isZero();
             assertThat(count("SELECT count(*) FROM audit_log WHERE actor_org_id = ?", orgId)).isZero();
             assertThat(count("SELECT count(*) FROM sale WHERE org_id = ?", orgId)).isZero();
+            assertThat(count("SELECT count(*) FROM batch_risk_transition WHERE org_id = ?", orgId)).isZero();
         }
         for (Long batchId : createdBatchIds) {
             assertThat(count("SELECT count(*) FROM batch WHERE id = ?", batchId)).isZero();
