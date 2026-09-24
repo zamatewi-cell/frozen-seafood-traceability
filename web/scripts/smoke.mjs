@@ -198,7 +198,7 @@ class ApiSession {
   }
 }
 
-function seedMasterData(suffix, passwordA, passwordB) {
+function seedMasterData(suffix, passwordA, passwordB, passwordQm) {
   mysql(`
     START TRANSACTION;
     INSERT INTO organization (org_no, name, org_type, credit_code, status)
@@ -209,12 +209,18 @@ function seedMasterData(suffix, passwordA, passwordB) {
     SET @orgB = LAST_INSERT_ID();
     INSERT INTO role (role_code, name, scope_type, status) VALUES ('OPERATOR', '企业操作员', 'ORG_ONLY', 'ACTIVE');
     SET @role = LAST_INSERT_ID();
+    -- PB1：质量管理员角色只存在于冒烟夹具（不进入 Flyway），负责风险冻结 / 解除冻结
+    INSERT INTO role (role_code, name, scope_type, status) VALUES ('QUALITY_MANAGER', '质量管理员', 'ORG_ONLY', 'ACTIVE');
+    SET @qm = LAST_INSERT_ID();
     INSERT INTO app_user (org_id, username, display_name, password_hash, status)
       VALUES (@orgA, 'p0_src_a_${suffix}', '冒烟来源操作员', ${sqlText(springPbkdf2(passwordA))}, 'ACTIVE');
     INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
     INSERT INTO app_user (org_id, username, display_name, password_hash, status)
       VALUES (@orgB, 'p0_src_b_${suffix}', '冒烟第二来源操作员', ${sqlText(springPbkdf2(passwordB))}, 'ACTIVE');
     INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@orgA, 'p0_src_a_qm_${suffix}', '冒烟来源质量管理员', ${sqlText(springPbkdf2(passwordQm))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @qm);
     INSERT INTO product (product_code, public_name, category, specification, source_type, base_unit_code, status)
       VALUES ('P0-YELLOW-${suffix}', 'Phase0冒烟冷冻大黄鱼', 'FISH', '500g/条', 'DOMESTIC_CAPTURE', 'kg', 'ACTIVE');
     INSERT INTO product (product_code, public_name, category, specification, source_type, base_unit_code, status)
@@ -235,7 +241,7 @@ async function createBatch(session, request, submit) {
   return session.write('POST', `/api/v1/batches/${created.id}/submit`, { version: created.version })
 }
 
-async function seedBusinessData(suffix, master, passwordA, passwordB) {
+async function seedBusinessData(suffix, master, passwordA, passwordB, passwordQm) {
   const sessionA = new ApiSession()
   await sessionA.login(`p0_src_a_${suffix}`, passwordA)
   // 来源批次创建请求不携带 batchType 等服务端字段（服务端固定 SOURCE / DRAFT / NORMAL）
@@ -254,9 +260,16 @@ async function seedBusinessData(suffix, master, passwordA, passwordB) {
   await sessionB.login(`p0_src_b_${suffix}`, passwordB)
   const foreign = await createBatch(sessionB, { ...base, productId: master.productFish, externalBatchNo: 'P0-EXT-001', quantity: 77 }, true)
 
-  // Phase 0 没有冻结 / 召回 / 关闭业务接口：仅在隔离 schema 中直接写入以验证展示与筛选
+  // PB1：风险冻结经真实接口由来源企业质量管理员执行（写入风险转换台账与审计）
+  const sessionQm = new ApiSession()
+  await sessionQm.login(`p0_src_a_qm_${suffix}`, passwordQm)
+  await sessionQm.write('POST', `/api/v1/batches/${frozen.id}/risk/freeze`, { reason: 'Phase 0 冒烟夹具：模拟风险冻结' }, { 'Idempotency-Key': randomUUID() })
+  const frozenLedger = mysql(`SELECT COUNT(*) FROM batch_risk_transition WHERE batch_id = ${frozen.id} AND from_status = 'NORMAL'
+      AND to_status = 'FROZEN' AND source_type = 'MANUAL' AND org_id = ${master.orgA};`, { database: schema })
+  if (frozenLedger !== '1') throw new Error(`Phase 0 冻结夹具未经 PB1 接口写入风险转换台账: ${frozenLedger}`)
+
+  // 召回（PB5）与“关闭”夹具仍无对应业务接口：仅在隔离 schema 中直接写入以验证展示与筛选
   mysql(`
-    UPDATE batch SET risk_status = 'FROZEN' WHERE id = ${frozen.id};
     UPDATE batch SET flow_status = 'CLOSED', risk_status = 'RECALLED' WHERE id = ${recalled.id};
     UPDATE batch SET flow_status = 'CLOSED' WHERE id = ${closed.id};
   `, { database: schema })
@@ -293,6 +306,7 @@ function seedSlice2MasterData(suffix, passwords) {
   mysql(`
     START TRANSACTION;
     SET @role = (SELECT id FROM role WHERE role_code = 'OPERATOR');
+    SET @qm = (SELECT id FROM role WHERE role_code = 'QUALITY_MANAGER');
     INSERT INTO organization (org_no, name, org_type, status) VALUES ('S2_SRC_${suffix}', 'Slice2来源捕捞企业_${suffix}', 'SOURCE', 'ACTIVE');
     SET @src = LAST_INSERT_ID();
     INSERT INTO organization (org_no, name, org_type, status) VALUES ('S2_CAR_${suffix}', 'Slice2冷链承运企业_${suffix}', 'CARRIER', 'ACTIVE');
@@ -308,6 +322,9 @@ function seedSlice2MasterData(suffix, passwords) {
     INSERT INTO app_user (org_id, username, display_name, password_hash, status)
       VALUES (@prc, 's2_prc_${suffix}', 'Slice2加工操作员', ${sqlText(springPbkdf2(passwords.processor))}, 'ACTIVE');
     INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@prc, 's2_prc_qm_${suffix}', 'Slice2加工质量管理员', ${sqlText(springPbkdf2(passwords.processorQm))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @qm);
     INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@src, 'S2-PORT', 'Slice2沈家门码头', 'PORT', 'ACTIVE');
     INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@prc, 'S2-FACTORY', 'Slice2舟山加工厂', 'FACTORY', 'ACTIVE');
     INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@prc, 'S2-COLD', 'Slice2舟山自有冷库', 'COLD_STORE', 'ACTIVE');
@@ -332,7 +349,7 @@ function seedSlice2MasterData(suffix, passwords) {
     coldStoreSiteId: ids[3],
     coldStoreName: 'Slice2舟山自有冷库',
     sourceColdStoreSiteId: ids[4],
-    usernames: { source: `s2_src_${suffix}`, carrier: `s2_car_${suffix}`, processor: `s2_prc_${suffix}` }
+    usernames: { source: `s2_src_${suffix}`, carrier: `s2_car_${suffix}`, processor: `s2_prc_${suffix}`, processorQm: `s2_prc_qm_${suffix}` }
   }
 }
 
@@ -538,15 +555,19 @@ function verifySlice4Database(master, ids, snapshot) {
  * Slice 5 基础资料：零售企业（RETAILER）与 OPERATOR 账号、启用门店 STORE（运输目的地与销售场所）、
  * 用于拒绝探测的停用门店与配送中心，以及加工企业自有门店（他组织门店探测）。只准备基础资料，不预造任何单据。
  */
-function seedSlice5MasterData(suffix, password, slice2) {
+function seedSlice5MasterData(suffix, password, slice2, qmPassword) {
   mysql(`
     START TRANSACTION;
     SET @role = (SELECT id FROM role WHERE role_code = 'OPERATOR');
+    SET @qm = (SELECT id FROM role WHERE role_code = 'QUALITY_MANAGER');
     INSERT INTO organization (org_no, name, org_type, status) VALUES ('S5_RET_${suffix}', 'Slice5海港生鲜零售_${suffix}', 'RETAILER', 'ACTIVE');
     SET @ret = LAST_INSERT_ID();
     INSERT INTO app_user (org_id, username, display_name, password_hash, status)
       VALUES (@ret, 's5_ret_${suffix}', 'Slice5零售操作员', ${sqlText(springPbkdf2(password))}, 'ACTIVE');
     INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@ret, 's5_ret_qm_${suffix}', 'Slice5零售质量管理员', ${sqlText(springPbkdf2(qmPassword))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @qm);
     INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@ret, 'S5-STORE', 'Slice5海港一号门店', 'STORE', 'ACTIVE');
     INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@ret, 'S5-STORE-OFF', 'Slice5已停用旧店', 'STORE', 'INACTIVE');
     INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@ret, 'S5-DC', 'Slice5配送中心', 'LOGISTICS_HUB', 'ACTIVE');
@@ -567,7 +588,8 @@ function seedSlice5MasterData(suffix, password, slice2) {
     inactiveStoreId: ids[2],
     hubSiteId: ids[3],
     processorStoreSiteId: ids[4],
-    username: `s5_ret_${suffix}`
+    username: `s5_ret_${suffix}`,
+    qmUsername: `s5_ret_qm_${suffix}`
   }
 }
 
@@ -753,6 +775,136 @@ function verifySlice5Chronology(retail, ids) {
   }
 }
 
+/** 打印一组数据库事实并在任一失败时中止。 */
+function assertFacts(title, facts, detail) {
+  for (const [fact, ok] of Object.entries(facts)) console.log(`[smoke] MySQL ${ok ? '✔' : '✘'} ${fact}`)
+  if (Object.values(facts).some((ok) => !ok)) throw new Error(`${title} 数据库事实不符合预期: ${detail}`)
+}
+
+function userIdOf(username) {
+  return mysql(`SELECT id FROM app_user WHERE username = ${sqlText(username)};`, { database: schema })
+}
+
+/** PB1-A 前快照：全部业务表行数、B2 / B3 批次行与 Phase A 批次上的风险台账行数。 */
+function pb1ProcessorSnapshot(ids) {
+  const q = (sql) => mysql(sql, { database: schema })
+  return {
+    counts: q(`SELECT (SELECT COUNT(*) FROM batch), (SELECT COUNT(*) FROM batch_relation), (SELECT COUNT(*) FROM transfer),
+        (SELECT COUNT(*) FROM transfer_idempotency), (SELECT COUNT(*) FROM shipment), (SELECT COUNT(*) FROM batch_operation),
+        (SELECT COUNT(*) FROM trace_event), (SELECT COUNT(*) FROM public_trace_code), (SELECT COUNT(*) FROM public_trace_code_idempotency),
+        (SELECT COUNT(*) FROM sale);`),
+    b2: q(`SELECT quantity, org_id, flow_status, risk_status, first_sale_id IS NULL, consumed_by_operation_id IS NULL, version FROM batch WHERE id = ${ids.b2Id};`),
+    b3: q(`SELECT quantity, org_id, flow_status, risk_status, version FROM batch WHERE id = ${ids.b3Id};`),
+    ledger: q(`SELECT COUNT(*) FROM batch_risk_transition WHERE batch_id IN (${ids.b0Id}, ${ids.b1Id}, ${ids.b2Id}, ${ids.b3Id});`)
+  }
+}
+
+/**
+ * PB1-A 数据库事实：B2 恰好两行 MANUAL 风险台账（NORMAL → FROZEN → NORMAL，加工企业、加工质量管理员、流转快照 ACTIVE）与两条审计；
+ * B2 数量 / 责任组织 / 双状态不变、版本只因冻结与解除 +2；B3 不受影响；冻结期间全部被阻断的写入零落库。
+ */
+function verifyPb1ProcessorDatabase(master, ids, before) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const qmId = userIdOf(master.usernames.processorQm)
+  const after = pb1ProcessorSnapshot(ids)
+  const rows = q(`SELECT from_status, to_status, flow_status, source_type, org_id = ${master.processorOrgId}, actor_user_id = ${qmId},
+      CHAR_LENGTH(request_hash) = 64, CHAR_LENGTH(TRIM(reason)) > 0
+    FROM batch_risk_transition WHERE batch_id = ${ids.b2Id} ORDER BY id;`).split('\n')
+  const [freezeAudits, releaseAudits] = q(`SELECT
+      (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id = ${ids.b2Id} AND action = 'RISK_FREEZE'
+         AND actor_org_id = ${master.processorOrgId} AND actor_user_id = ${qmId}),
+      (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id = ${ids.b2Id} AND action = 'RISK_RELEASE'
+         AND actor_org_id = ${master.processorOrgId} AND actor_user_id = ${qmId});`).split('\t')
+  const [quantity, orgId, flow, risk, unsold, unconsumed, version] = after.b2.split('\t')
+  const beforeVersion = Number(before.b2.split('\t')[6])
+  assertFacts('PB1-A', {
+    'B2 风险台账恰好 2 行：NORMAL → FROZEN → NORMAL，MANUAL，加工企业，加工质量管理员，流转快照 ACTIVE，原因与请求哈希完整': rows.length === 2
+      && rows[0] === 'NORMAL\tFROZEN\tACTIVE\tMANUAL\t1\t1\t1\t1' && rows[1] === 'FROZEN\tNORMAL\tACTIVE\tMANUAL\t1\t1\t1\t1',
+    'RISK_FREEZE / RISK_RELEASE 审计各 1 条（加工质量管理员、加工企业）': freezeAudits === '1' && releaseAudits === '1',
+    'B2 = 600kg，加工企业负责，ACTIVE + NORMAL，未销售、未消耗': Number(quantity) === 600 && orgId === String(master.processorOrgId)
+      && flow === 'ACTIVE' && risk === 'NORMAL' && unsold === '1' && unconsumed === '1',
+    'B2 版本只因冻结与解除 +2': Number(version) === beforeVersion + 2,
+    'B3 批次行完全不变（不向同源批次传播）': after.b3 === before.b3,
+    '冻结期间被阻断的交接 / 批次操作 / 仓储 / 首次激活公开码零落库（全部业务表行数不变）': after.counts === before.counts,
+    'Phase A 批次上只有 B2 的 2 行风险台账（B0 / B1 / B3 无）': before.ledger === '0' && after.ledger === '2'
+  }, `rows=${JSON.stringify(rows)} audits=${freezeAudits}/${releaseAudits} before=${JSON.stringify(before)} after=${JSON.stringify(after)}`)
+  console.log('[smoke] MySQL batch_risk_transition（B2，PB1-A）:')
+  console.log(q(`SELECT id, batch_id, org_id, flow_status, from_status, to_status, source_type, actor_user_id, occurred_at FROM batch_risk_transition
+      WHERE batch_id = ${ids.b2Id} ORDER BY id;`).split('\n').map((line) => `  ${line}`).join('\n'))
+}
+
+/**
+ * PB1-S 数据库事实：B3 在第一笔终端销售之前被零售质量管理员冻结并解除（两行 MANUAL 台账、两条审计，流转快照 ACTIVE）；
+ * 冻结期间没有任何销售落库，B3 最终只有 Slice 5 的那一笔 360。
+ */
+function verifyPb1SaleCheckpoint(retail, ids) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const qmId = userIdOf(retail.qmUsername)
+  const rows = q(`SELECT from_status, to_status, flow_status, source_type, org_id = ${retail.retailerOrgId}, actor_user_id = ${qmId}
+    FROM batch_risk_transition WHERE batch_id = ${ids.b3Id} ORDER BY id;`).split('\n')
+  const [freezeAudits, releaseAudits, releasedBeforeSale, salesDuringFreeze, b3Sales] = q(`SELECT
+      (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id = ${ids.b3Id} AND action = 'RISK_FREEZE' AND actor_user_id = ${qmId}),
+      (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id = ${ids.b3Id} AND action = 'RISK_RELEASE' AND actor_user_id = ${qmId}),
+      (SELECT MAX(created_at) FROM batch_risk_transition WHERE batch_id = ${ids.b3Id}) <= (SELECT MIN(created_at) FROM sale WHERE batch_id = ${ids.b3Id}),
+      (SELECT COUNT(*) FROM sale s WHERE s.batch_id = ${ids.b3Id}
+         AND s.created_at BETWEEN (SELECT MIN(created_at) FROM batch_risk_transition WHERE batch_id = ${ids.b3Id})
+                              AND (SELECT MAX(created_at) FROM batch_risk_transition WHERE batch_id = ${ids.b3Id})),
+      (SELECT COUNT(*) FROM sale WHERE batch_id = ${ids.b3Id});`).split('\t')
+  assertFacts('PB1-S', {
+    'B3 风险台账恰好 2 行：NORMAL → FROZEN → NORMAL，MANUAL，零售企业，零售质量管理员，流转快照 ACTIVE': rows.length === 2
+      && rows[0] === 'NORMAL\tFROZEN\tACTIVE\tMANUAL\t1\t1' && rows[1] === 'FROZEN\tNORMAL\tACTIVE\tMANUAL\t1\t1',
+    'RISK_FREEZE / RISK_RELEASE 审计各 1 条（零售质量管理员）': freezeAudits === '1' && releaseAudits === '1',
+    '冻结与解除都发生在 B3 第一笔终端销售之前': releasedBeforeSale === '1',
+    '冻结期间没有任何销售落库（真实 API 销售探测 422 零写入）': salesDuringFreeze === '0',
+    'B3 最终只有 Slice 5 的一笔销售（360，售罄）': b3Sales === '1'
+  }, `rows=${JSON.stringify(rows)} audits=${freezeAudits}/${releaseAudits} order=${releasedBeforeSale} during=${salesDuringFreeze} sales=${b3Sales}`)
+}
+
+/** PB1-B 前快照：B2 业务事实与版本、其他 Phase A 批次、B2 公开码、全局行数与 B2 风险台账行数。 */
+function pb1ClosedSnapshot(ids) {
+  return mysql(`SELECT
+      (SELECT CONCAT_WS(':', quantity, org_id, flow_status, risk_status, first_sale_id, IFNULL(consumed_by_operation_id, '-')) FROM batch WHERE id = ${ids.b2Id}),
+      (SELECT version FROM batch WHERE id = ${ids.b2Id}),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', id, version, flow_status, risk_status, org_id) ORDER BY id) FROM batch WHERE id IN (${ids.b0Id}, ${ids.b1Id}, ${ids.b3Id})),
+      (SELECT CONCAT_WS(':', id, status, version, org_id, public_id) FROM public_trace_code WHERE batch_id = ${ids.b2Id}),
+      (SELECT COUNT(*) FROM sale), (SELECT COUNT(*) FROM trace_event), (SELECT COUNT(*) FROM transfer), (SELECT COUNT(*) FROM batch),
+      (SELECT COUNT(*) FROM batch_risk_transition WHERE batch_id = ${ids.b2Id});`, { database: schema }).split('\t')
+}
+
+/**
+ * PB1-B 数据库事实：已售罄 B2 由零售质量管理员冻结并解除（两行 MANUAL 台账，流转快照 CLOSED）；B2 始终 CLOSED、数量 / 责任组织 /
+ * 首次销售不变、版本只 +2；公开追溯码、其他批次、销售与追溯事件完全不变（匿名消费者查询零写入）。
+ */
+function verifyPb1ClosedDatabase(retail, ids, before) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const qmId = userIdOf(retail.qmUsername)
+  const after = pb1ClosedSnapshot(ids)
+  const [b2Before, versionBefore, othersBefore, codeBefore, salesBefore, eventsBefore, transfersBefore, batchesBefore, ledgerBefore] = before
+  const [b2After, versionAfter, othersAfter, codeAfter, salesAfter, eventsAfter, transfersAfter, batchesAfter, ledgerAfter] = after
+  const lastTwo = q(`SELECT from_status, to_status, flow_status, source_type, org_id = ${retail.retailerOrgId}, actor_user_id = ${qmId}
+    FROM batch_risk_transition WHERE batch_id = ${ids.b2Id} ORDER BY id DESC LIMIT 2;`).split('\n').reverse()
+  const [freezeAudits, releaseAudits] = q(`SELECT
+      (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id = ${ids.b2Id} AND action = 'RISK_FREEZE' AND actor_user_id = ${qmId}),
+      (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id = ${ids.b2Id} AND action = 'RISK_RELEASE' AND actor_user_id = ${qmId});`).split('\t')
+  assertFacts('PB1-B', {
+    'B2 新增 2 行风险台账：NORMAL → FROZEN → NORMAL，流转快照 CLOSED，MANUAL，零售企业，零售质量管理员': Number(ledgerAfter) === Number(ledgerBefore) + 2
+      && lastTwo[0] === 'NORMAL\tFROZEN\tCLOSED\tMANUAL\t1\t1' && lastTwo[1] === 'FROZEN\tNORMAL\tCLOSED\tMANUAL\t1\t1',
+    'RISK_FREEZE / RISK_RELEASE 审计各 1 条（零售质量管理员）': freezeAudits === '1' && releaseAudits === '1',
+    'B2 始终 CLOSED（从不重新打开），最终 CLOSED + NORMAL，数量 / 责任组织 / 首次销售不变': b2After === b2Before && b2After.includes(':CLOSED:NORMAL:'),
+    'B2 版本只因冻结与解除 +2': Number(versionAfter) === Number(versionBefore) + 2,
+    'B0 / B1 / B3 批次行完全不变': othersAfter === othersBefore,
+    'B2 公开追溯码不变（ACTIVE，版本与持有组织不变）': codeAfter === codeBefore && codeAfter.includes(':ACTIVE:'),
+    '销售 / 追溯事件 / 交接 / 批次行数不变（冻结不产生业务事实，消费者查询零写入）': salesAfter === salesBefore && eventsAfter === eventsBefore
+      && transfersAfter === transfersBefore && batchesAfter === batchesBefore
+  }, `before=${JSON.stringify(before)} after=${JSON.stringify(after)} lastTwo=${JSON.stringify(lastTwo)} audits=${freezeAudits}/${releaseAudits}`)
+  console.log('[smoke] MySQL batch_risk_transition（Phase A 批次，PB1-A / PB1-S / PB1-B）:')
+  console.log(q(`SELECT id, batch_id, org_id, flow_status, from_status, to_status, source_type, actor_user_id, occurred_at FROM batch_risk_transition
+      WHERE batch_id IN (${ids.b0Id}, ${ids.b1Id}, ${ids.b2Id}, ${ids.b3Id}) ORDER BY id;`).split('\n').map((line) => `  ${line}`).join('\n'))
+  console.log('[smoke] MySQL batch（Phase A 最终状态）:')
+  console.log(q(`SELECT id, trace_batch_no, org_id, quantity, flow_status, risk_status, version FROM batch
+      WHERE id IN (${ids.b0Id}, ${ids.b1Id}, ${ids.b2Id}, ${ids.b3Id}) ORDER BY id;`).split('\n').map((line) => `  ${line}`).join('\n'))
+}
+
 /** Slice 6 前后快照：消费者匿名查询与零售企业只读查看不得产生任何业务写入。 */
 function slice6Snapshot(ids) {
   const all = [ids.b0Id, ids.b1Id, ids.b2Id, ids.b3Id].join(',')
@@ -761,7 +913,8 @@ function slice6Snapshot(ids) {
       (SELECT GROUP_CONCAT(CONCAT(id, ':', status, ':', version, ':', org_id) ORDER BY id) FROM public_trace_code WHERE batch_id IN (${all})),
       (SELECT COUNT(*) FROM trace_event), (SELECT COUNT(*) FROM audit_log), (SELECT COUNT(*) FROM batch),
       (SELECT COUNT(*) FROM batch_relation), (SELECT COUNT(*) FROM sale), (SELECT COUNT(*) FROM transfer),
-      (SELECT COUNT(*) FROM shipment), (SELECT COUNT(*) FROM public_trace_code), (SELECT COUNT(*) FROM public_trace_code_idempotency);`, { database: schema })
+      (SELECT COUNT(*) FROM shipment), (SELECT COUNT(*) FROM public_trace_code), (SELECT COUNT(*) FROM public_trace_code_idempotency),
+      (SELECT COUNT(*) FROM batch_risk_transition);`, { database: schema })
 }
 
 let backend
@@ -787,15 +940,18 @@ try {
   const suffix = randomBytes(3).toString('hex')
   const passwordA = `P0!${randomBytes(18).toString('base64url')}`
   const passwordB = `P0!${randomBytes(18).toString('base64url')}`
-  const master = seedMasterData(suffix, passwordA, passwordB)
+  const passwordQm = `P0!${randomBytes(18).toString('base64url')}`
+  const master = seedMasterData(suffix, passwordA, passwordB, passwordQm)
   const slice2Passwords = {
     source: `S2!${randomBytes(18).toString('base64url')}`,
     carrier: `S2!${randomBytes(18).toString('base64url')}`,
-    processor: `S2!${randomBytes(18).toString('base64url')}`
+    processor: `S2!${randomBytes(18).toString('base64url')}`,
+    processorQm: `PB1!${randomBytes(18).toString('base64url')}`
   }
   const slice2 = seedSlice2MasterData(suffix, slice2Passwords)
   const slice5Password = `S5!${randomBytes(18).toString('base64url')}`
-  const retail = seedSlice5MasterData(suffix, slice5Password, slice2)
+  const slice5QmPassword = `PB1!${randomBytes(18).toString('base64url')}`
+  const retail = seedSlice5MasterData(suffix, slice5Password, slice2, slice5QmPassword)
   const b0 = await seedSlice2SourceBatch(slice2, master.productFish, slice2Passwords.source)
   console.log(`[smoke] Slice 2 B0 已由来源账号经真实 API 创建并激活: ${b0.traceBatchNo} ${b0.flowStatus}/${b0.riskStatus} ${b0.quantity} ${b0.unitCode}`)
 
@@ -807,12 +963,15 @@ try {
     console.log(`[smoke] 承运企业 ${slice2.carrierOrgName}: ${slice2.usernames.carrier} / ${slice2Passwords.carrier}`)
     console.log(`[smoke] 加工企业 ${slice2.processorOrgName}: ${slice2.usernames.processor} / ${slice2Passwords.processor}`)
     console.log(`[smoke] 零售企业 ${retail.retailerOrgName}: ${retail.username} / ${slice5Password}`)
+    console.log(`[smoke] 加工企业质量管理员（PB1）: ${slice2.usernames.processorQm} / ${slice2Passwords.processorQm}`)
+    console.log(`[smoke] 零售企业质量管理员（PB1）: ${retail.qmUsername} / ${slice5QmPassword}`)
     console.log(`[smoke] B0: /app/batches/${b0.id}  (${b0.traceBatchNo}, 1000 kg ACTIVE/NORMAL)`)
     console.log('[smoke] Slice 3：加工企业接受 B0 后，在 B0 详情执行“加工”（产出 960，损耗 30，留样 10），再对 B1 执行“拆分”（600 + 360）。')
     console.log(`[smoke] Slice 4：加工企业在 B2、B3 详情“自有冷库仓储”中选择 ${slice2.coldStoreName}，各执行一次冷库入库与冷库出库。`)
     console.log(`[smoke] Slice 5：加工企业为 B2、B3 分别发起交接给 ${retail.retailerOrgName}，在同一运输任务装载两张交接（目的地 ${retail.storeName}）并提交；承运商发运、到达；`)
     console.log(`[smoke]          零售企业接受后先在 B2、B3 详情“公开追溯码”中激活公开追溯码，再在 B2 详情"终端销售"中于 ${retail.storeName} 先售 200、再售 400，在 B3 售出全部 360。`)
     console.log('[smoke] Slice 6：在零售企业 B2 / B3 详情复制消费者查询链接，用未登录的浏览器窗口打开，查看 B0 → B1 → B2（或 B3）谱系与公开事实。')
+    console.log('[smoke] PB1（可选）：质量管理员在批次详情“风险状态”中填写原因并二次确认风险冻结 / 解除冻结；冻结期间操作员的交接、加工、仓储、销售入口消失。')
     console.log('[smoke] 完成页面操作后按 Ctrl+C：脚本将先输出 Slice 2 ~ Slice 6 数据库事实，再停止服务并删除 schema。')
     await waitForInterrupt()
     try {
@@ -849,7 +1008,7 @@ try {
       }
     }
   } else {
-  const fixture = await seedBusinessData(suffix, master, passwordA, passwordB)
+  const fixture = await seedBusinessData(suffix, master, passwordA, passwordB, passwordQm)
   console.log('[smoke] MySQL batch 表（id, trace_batch_no, external_batch_no, flow, risk, 属于登录组织）:')
   console.log(databaseEvidence(master.orgA).split('\n').map((line) => `  ${line}`).join('\n'))
 
@@ -918,6 +1077,25 @@ try {
   console.log('[smoke] Slice 4 真实加工企业自有冷库入库 / 出库浏览器验收与 MySQL 事实校验通过')
 
   const traceNo = (id) => mysql(`SELECT trace_batch_no FROM batch WHERE id = ${id};`, { database: schema })
+
+  const pb1Before = pb1ProcessorSnapshot(slice3Ids)
+  await runBrowserSmoke({
+    PB1_PROCESSOR_USERNAME: slice2.usernames.processor,
+    PB1_PROCESSOR_PASSWORD: slice2Passwords.processor,
+    PB1_PROCESSOR_QM_USERNAME: slice2.usernames.processorQm,
+    PB1_PROCESSOR_QM_PASSWORD: slice2Passwords.processorQm,
+    PB1_EXPECTED: JSON.stringify({
+      b2Id: slice3Ids.b2Id,
+      b3Id: slice3Ids.b3Id,
+      b2TraceBatchNo: traceNo(slice3Ids.b2Id),
+      processorOrgName: slice2.processorOrgName,
+      sourceOrgId: slice2.sourceOrgId,
+      coldStoreSiteId: slice2.coldStoreSiteId
+    })
+  }, 'tests/e2e/real-pb1-freeze.spec.ts')
+  verifyPb1ProcessorDatabase(slice2, slice3Ids, pb1Before)
+  console.log('[smoke] PB1-A 真实加工企业质量管理员风险冻结 / 解除 B2、冻结期间 Phase A 守卫阻断与查询可用浏览器验收与 MySQL 事实校验通过')
+
   await runBrowserSmoke({
     SLICE5_PROCESSOR_USERNAME: slice2.usernames.processor,
     SLICE5_PROCESSOR_PASSWORD: slice2Passwords.processor,
@@ -925,6 +1103,8 @@ try {
     SLICE5_CARRIER_PASSWORD: slice2Passwords.carrier,
     SLICE5_RETAILER_USERNAME: retail.username,
     SLICE5_RETAILER_PASSWORD: slice5Password,
+    SLICE5_RETAILER_QM_USERNAME: retail.qmUsername,
+    SLICE5_RETAILER_QM_PASSWORD: slice5QmPassword,
     SLICE5_EXPECTED: JSON.stringify({
       b2Id: slice3Ids.b2Id,
       b3Id: slice3Ids.b3Id,
@@ -936,6 +1116,7 @@ try {
       retailerOrgName: retail.retailerOrgName,
       processorSiteName: slice2.processorSiteName,
       retailerStoreName: retail.storeName,
+      retailerStoreSiteId: retail.storeSiteId,
       retailerHubSiteId: retail.hubSiteId,
       retailerInactiveStoreId: retail.inactiveStoreId,
       processorStoreSiteId: retail.processorStoreSiteId
@@ -944,7 +1125,8 @@ try {
   verifySlice5Database(slice2, retail, slice3Ids)
   verifySlice5PublicCodes(retail, slice3Ids)
   verifySlice5Chronology(retail, slice3Ids)
-  console.log('[smoke] Slice 5 真实加工 → 零售交接、销售前激活公开追溯码与终端 Sale 浏览器验收与 MySQL 事实校验通过')
+  verifyPb1SaleCheckpoint(retail, slice3Ids)
+  console.log('[smoke] Slice 5 真实加工 → 零售交接、销售前激活公开追溯码、PB1-S 冻结阻断销售后解除与终端 Sale 浏览器验收与 MySQL 事实校验通过')
 
   const slice6Before = slice6Snapshot(slice3Ids)
   await runBrowserSmoke({
@@ -970,6 +1152,22 @@ try {
   console.log(`[smoke] MySQL ${slice6ReadOnly ? '✔' : '✘'} Slice 6 匿名消费者查询与零售企业只读查看零写入（批次 / 公开码版本与全部业务表行数不变）`)
   if (!slice6ReadOnly) throw new Error(`Slice 6 查询产生了写入: before=${slice6Before} after=${slice6After}`)
   console.log('[smoke] Slice 6 真实匿名消费者扫码 B2 / B3 公开全链浏览器验收与 MySQL 零写入校验通过')
+
+  const pb1bBefore = pb1ClosedSnapshot(slice3Ids)
+  await runBrowserSmoke({
+    PB1B_RETAILER_USERNAME: retail.username,
+    PB1B_RETAILER_PASSWORD: slice5Password,
+    PB1B_RETAILER_QM_USERNAME: retail.qmUsername,
+    PB1B_RETAILER_QM_PASSWORD: slice5QmPassword,
+    PB1B_EXPECTED: JSON.stringify({
+      b2Id: slice3Ids.b2Id,
+      b2TraceBatchNo: traceNo(slice3Ids.b2Id),
+      retailerOrgName: retail.retailerOrgName,
+      storeSiteId: retail.storeSiteId
+    })
+  }, 'tests/e2e/real-pb1-closed.spec.ts')
+  verifyPb1ClosedDatabase(retail, slice3Ids, pb1bBefore)
+  console.log('[smoke] PB1-B 真实零售质量管理员冻结 / 解除已售罄 CLOSED 的 B2 与匿名消费者模拟冻结投影浏览器验收与 MySQL 事实校验通过')
   }
 } catch (error) {
   primaryError = error
