@@ -48,6 +48,8 @@ async function installFakeAuthBackend(page: Page, currentUser: typeof user = use
     state.loggedIn = false
     return route.fulfill({ status: 204 })
   })
+  // PB1 风险状态面板：未单独声明时，批次详情的风险转换历史为空
+  await page.route('**/api/v1/batches/*/risk-transitions', (route) => json(route, 200, { data: [], meta }))
   return state
 }
 
@@ -309,5 +311,87 @@ test.describe('Enterprise shell', () => {
       { role: 'SAMPLE', quantity: 10, unitCode: 'kg' }
     ])
     expect(writes[1].body).toEqual({ version: 0 })
+  })
+
+  test('quality manager freezes a batch with a reason and a second confirmation, then releases it (PB1)', async ({ page }) => {
+    const qm = { ...user, userId: 8, username: 'processor_qm', displayName: '加工质量管理员', roles: ['QUALITY_MANAGER'] }
+    const backend = await installFakeAuthBackend(page, qm)
+    backend.loggedIn = true
+    let batch = {
+      id: 12, orgId: 30, productId: 5, traceBatchNo: 'TB-AAAAAAAAAAAAAAAAAAAAAAAAAA', externalBatchNo: 'SUP-2026-001',
+      batchType: 'PROCESSING', quantity: 600, remainingQuantity: 600, unitCode: 'kg', originType: 'DOMESTIC_CAPTURE', originText: '东海舟山渔场',
+      flowStatus: 'ACTIVE', riskStatus: 'NORMAL', version: 3
+    }
+    const history: Record<string, unknown>[] = []
+    const writes: { path: string; body: unknown; csrf?: string; idempotencyKey?: string }[] = []
+    const transition = (path: string, to: 'FROZEN' | 'NORMAL') => page.route(`**${path}`, (route) => {
+      const request = route.request()
+      const body = request.postDataJSON() as { reason: string }
+      writes.push({ path, body, csrf: request.headers()['x-csrf-token'], idempotencyKey: request.headers()['idempotency-key'] })
+      const row = {
+        id: history.length + 1, batchId: 12, orgId: 30, flowStatus: batch.flowStatus, fromStatus: batch.riskStatus, toStatus: to,
+        sourceType: 'MANUAL', reason: body.reason, actorUserId: 8, occurredAt: '2026-09-23T01:30:15.123456Z'
+      }
+      history.push(row)
+      batch = { ...batch, riskStatus: to, version: batch.version + 1 }
+      return json(route, 201, { data: row, meta })
+    })
+    await page.route('**/api/v1/batches/12', (route) => json(route, 200, { data: batch, meta }))
+    await page.route('**/api/v1/batches/12/events', (route) => json(route, 200, { data: [], meta }))
+    await page.route('**/api/v1/batches/12/sales', (route) => json(route, 200, { data: [], meta }))
+    await page.route('**/api/v1/batches/12/public-trace-code', (route) => json(route, 404, { status: 404, code: 'PUBLIC_TRACE_CODE_NOT_FOUND', title: '公开追溯码未激活', detail: '该批次尚未激活公开追溯码' }))
+    await page.route('**/api/v1/batches/12/risk-transitions', (route) => json(route, 200, { data: history, meta }))
+    await transition('/api/v1/batches/12/risk/freeze', 'FROZEN')
+    await transition('/api/v1/batches/12/risk/release', 'NORMAL')
+    await page.route('**/api/v1/transfers?*', (route) => json(route, 200, { data: [], meta: emptyPage }))
+    await page.route('**/api/v1/batch-operations?*', (route) => json(route, 200, { data: [], meta: emptyPage }))
+    await page.route('**/api/v1/products/5', (route) => json(route, 200, {
+      data: { id: 5, productCode: 'P-YELLOW', publicName: '冷冻大黄鱼', category: 'FISH', specification: '500g/条', sourceType: 'DOMESTIC_CAPTURE', baseUnitCode: 'kg', status: 'ACTIVE', version: 0 },
+      meta
+    }))
+    await page.route('**/api/v1/organizations/30', (route) => json(route, 200, {
+      data: { id: 30, orgNo: 'ORG_PROC_01', name: '东海水产加工有限公司', orgType: 'PROCESSOR', status: 'ACTIVE' },
+      meta
+    }))
+
+    await page.goto('/app/batches/12')
+    await expect(page.getByTestId('risk-current')).toHaveAttribute('data-status', 'NORMAL')
+    await expect(page.getByTestId('risk-history-empty')).toBeVisible()
+    // 质量管理员不是操作员：不显示加工 / 交接 / 仓储 / 销售入口，只有风险冻结
+    await expect(page.getByTestId('start-process')).toHaveCount(0)
+    await expect(page.getByTestId('warehouse-in')).toHaveCount(0)
+
+    await page.getByTestId('risk-freeze-open').click()
+    await page.getByTestId('risk-next').click()
+    await expect(page.getByTestId('error-risk-reason')).toHaveText('请填写原因')
+    await page.getByTestId('field-risk-reason').fill('  来料抽检异常，等待复检  ')
+    await page.getByTestId('risk-next').click()
+    await expect(page.getByTestId('risk-confirm-panel')).toContainText('数量、当前责任组织与流转状态保持不变')
+    expect(writes).toHaveLength(0)
+    await page.getByTestId('risk-confirm').click()
+
+    await expect(page.getByTestId('batch-flash')).toContainText('已风险冻结（模拟质量处置）')
+    await expect(page.getByTestId('detail-risk-status')).toHaveText('冻结')
+    await expect(page.getByTestId('detail-flow-status')).toHaveText('可流转')
+    await expect(page.getByTestId('risk-frozen-effects')).toContainText('终端销售')
+    await expect(page.getByTestId('risk-transition-row')).toHaveCount(1)
+    await expect(page.getByTestId('risk-transition-reason')).toContainText('来料抽检异常，等待复检')
+
+    await page.getByTestId('risk-release-open').click()
+    await page.getByTestId('field-risk-reason').fill('复检合格')
+    await page.getByTestId('risk-next').click()
+    await page.getByTestId('risk-confirm').click()
+    await expect(page.getByTestId('batch-flash')).toContainText('已解除冻结')
+    await expect(page.getByTestId('detail-risk-status')).toHaveText('正常')
+    await expect(page.getByTestId('risk-transition-row')).toHaveCount(2)
+    await expect(page.getByTestId('risk-freeze-open')).toBeVisible()
+
+    expect(writes.map((w) => w.path)).toEqual(['/api/v1/batches/12/risk/freeze', '/api/v1/batches/12/risk/release'])
+    expect(writes.map((w) => w.body)).toEqual([{ reason: '来料抽检异常，等待复检' }, { reason: '复检合格' }])
+    for (const w of writes) {
+      expect(w.csrf).toBe('e2e-csrf')
+      expect(w.idempotencyKey?.length).toBeGreaterThanOrEqual(16)
+    }
+    expect(writes[0].idempotencyKey).not.toBe(writes[1].idempotencyKey)
   })
 })
