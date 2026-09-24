@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { mockSuccessTrace, mockRecalledTrace, mockEmptyTimelineTrace, mockClosedRecalledTrace } from './fixtures'
+import { mockSuccessTrace, mockRecalledTrace, mockEmptyTimelineTrace, mockClosedRecalledTrace, mockClosedFrozenTrace } from './fixtures'
 
 test.describe('Consumer Trace Flow', () => {
   test('manual entry flow on /trace with keyboard and click submission', async ({ page }) => {
@@ -90,6 +90,28 @@ test.describe('Consumer Trace Flow', () => {
     await expect(page.locator('.temp-summary-card')).toContainText('暂无实时时序采集')
     await expect(page.locator('.trace-disclosure-card')).toContainText(mockClosedRecalledTrace.disclosure)
     await expect(page.getByTestId('lineage-node')).toHaveCount(3)
+  })
+
+  test('CLOSED + FROZEN shows the simulation-only risk freeze wording, both statuses and no recall notice (PB1)', async ({ page }) => {
+    await page.route('**/api/public/v1/public/traces/CLSFRZ2C4P4Q6T7XZ2M7K3B2AC', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: mockClosedFrozenTrace, meta: { requestId: 'req-e2e-06', timestamp: '2026-09-10T08:00:00Z' } })
+      })
+    })
+
+    await page.goto('/trace/CLSFRZ2C4P4Q6T7XZ2M7K3B2AC')
+    await expect(page.getByTestId('public-status-badge')).toContainText('模拟风险冻结')
+    await expect(page.getByTestId('public-status-note')).toContainText('本教学实训系统中')
+    await expect(page.getByTestId('public-status-note')).toContainText('已结束正常流转')
+    await expect(page.getByTestId('public-status-note')).toContainText('不代表真实的产品安全判定、监管措施或产品扣留')
+    await expect(page.getByTestId('public-flow-status')).toHaveText('已关闭')
+    await expect(page.getByTestId('public-risk-status')).toHaveText('模拟冻结')
+    await expect(page.locator('.recall-alert-card')).toHaveCount(0)
+    await expect(page.locator('body')).not.toContainText('业务冻结状态')
+    await expect(page.locator('body')).not.toContainText('质量管理部门已暂停')
+    await expect(page.locator('.temp-summary-card')).toContainText('暂无实时时序采集')
   })
 
   test('recalled state renders prominent simulated recall drill banner', async ({ page }) => {

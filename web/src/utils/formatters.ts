@@ -82,10 +82,13 @@ export function formatPublicTraceStatus(
     }
   }
   if (riskStatus === 'FROZEN') {
+    // 教学演练系统：模拟风险冻结只是实训中的状态演示，不是任何真实主体作出的产品处置
     return {
-      label: '业务冻结状态',
+      label: '模拟风险冻结',
       tone: 'warning',
-      description: '质量管理部门已暂停该批次的正常流转，等待调查结论'
+      description: flowStatus === 'CLOSED'
+        ? '本教学实训系统中，该批次已结束正常流转，当前处于模拟风险冻结（历史风险模拟调查中）。此提示不代表真实的产品安全判定、监管措施或产品扣留。'
+        : '本教学实训系统中，该批次处于模拟风险冻结状态：正常流转已暂停，等待模拟调查结论。此提示不代表真实的产品安全判定、监管措施或产品扣留。'
     }
   }
   switch (flowStatus) {
@@ -140,6 +143,16 @@ export function formatRiskStatus(status: string | null | undefined): StatusBadge
     default:
       return { label: status || '未知', tone: 'neutral', description: '未识别的风险状态' }
   }
+}
+
+/**
+ * 消费者页面的风险状态标签：FROZEN 明确为“模拟冻结”（教学实训中的模拟状态）；其余沿用企业端标签。
+ */
+export function formatPublicRiskStatus(status: string | null | undefined): StatusBadgeInfo {
+  if (status === 'FROZEN') {
+    return { label: '模拟冻结', tone: 'warning', description: '教学实训中的模拟风险冻结，不代表真实的产品扣留或监管措施' }
+  }
+  return formatRiskStatus(status)
 }
 
 /**

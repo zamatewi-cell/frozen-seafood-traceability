@@ -6,6 +6,7 @@ import { createAppRouter } from '@/router'
 import { clearCsrfToken, setUnauthorizedHandler } from '@/api/client'
 import { resetSessionForTests } from '@/stores/session'
 import { canFreezeBatch, canManageBatchRisk, canReleaseBatch } from '@/utils/permissions'
+import { formatPublicRiskStatus, formatPublicTraceStatus, formatRiskStatus } from '@/utils/formatters'
 import type { Batch, CurrentUser } from '@/types/enterprise'
 import { CSRF_ROUTE, envelope, installFakeFetch, problem, sampleUser, type FakeResponse, type RecordedCall } from './helpers/fakeFetch'
 
@@ -270,5 +271,21 @@ describe('batch risk permissions', () => {
     expect(canReleaseBatch(qm, { ...batch, riskStatus: 'FROZEN' })).toBe(true)
     expect(canFreezeBatch(qm, { ...batch, riskStatus: 'RECALLED' })).toBe(false)
     expect(canReleaseBatch(qm, { ...batch, riskStatus: 'RECALLED' })).toBe(false)
+  })
+})
+
+describe('consumer FROZEN wording', () => {
+  it('is simulation / training only on the consumer page while the enterprise label stays unchanged', () => {
+    for (const flow of ['ACTIVE', 'CLOSED']) {
+      const info = formatPublicTraceStatus(flow, 'FROZEN')
+      expect(info.label).toBe('模拟风险冻结')
+      expect(info.description).toContain('本教学实训系统中')
+      expect(info.description).toContain('不代表真实的产品安全判定、监管措施或产品扣留')
+      expect(`${info.label}${info.description}`).not.toContain('质量管理部门')
+    }
+    expect(formatPublicTraceStatus('CLOSED', 'FROZEN').description).toContain('已结束正常流转')
+    expect(formatPublicRiskStatus('FROZEN').label).toBe('模拟冻结')
+    expect(formatPublicRiskStatus('NORMAL').label).toBe('正常')
+    expect(formatRiskStatus('FROZEN').label).toBe('冻结')
   })
 })

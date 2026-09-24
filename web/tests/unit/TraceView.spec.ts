@@ -139,9 +139,13 @@ describe('ConsumerTraceView Component States', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('业务冻结状态')
+    expect(wrapper.text()).toContain('模拟风险冻结')
+    expect(wrapper.find('[data-testid="public-status-note"]').text()).toContain('本教学实训系统中')
+    expect(wrapper.find('[data-testid="public-status-note"]').text()).toContain('不代表真实的产品安全判定、监管措施或产品扣留')
+    expect(wrapper.text()).not.toContain('业务冻结状态')
+    expect(wrapper.text()).not.toContain('质量管理部门已暂停')
     expect(wrapper.find('[data-testid="public-flow-status"]').text()).toBe('可流转')
-    expect(wrapper.find('[data-testid="public-risk-status"]').text()).toBe('冻结')
+    expect(wrapper.find('[data-testid="public-risk-status"]').text()).toBe('模拟冻结')
     expect(wrapper.find('.recall-alert-card').exists()).toBe(false)
   })
 

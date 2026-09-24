@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import AppIcons from '@/components/icons/AppIcons.vue'
 import type { PublicTrace } from '@/types/trace'
-import { formatFlowStatus, formatPublicTraceStatus, formatRiskStatus } from '@/utils/formatters'
+import { formatFlowStatus, formatPublicRiskStatus, formatPublicTraceStatus } from '@/utils/formatters'
 
 const props = defineProps<{
   trace: PublicTrace
@@ -10,7 +10,7 @@ const props = defineProps<{
 
 const statusInfo = computed(() => formatPublicTraceStatus(props.trace.flowStatus, props.trace.riskStatus))
 const flowInfo = computed(() => formatFlowStatus(props.trace.flowStatus))
-const riskInfo = computed(() => formatRiskStatus(props.trace.riskStatus))
+const riskInfo = computed(() => formatPublicRiskStatus(props.trace.riskStatus))
 </script>
 
 <template>
