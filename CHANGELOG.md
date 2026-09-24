@@ -6,6 +6,15 @@
 
 ### Added
 
+- Phase B PB1 批次风险状态核心（人工 FROZEN ⇄ NORMAL）：
+  - Flyway V12：只新建追加式风险状态转换台账 `batch_risk_transition`（转换时责任组织、流转状态快照 ACTIVE / CLOSED、NORMAL ⇄ FROZEN 转换对、来源仅 `MANUAL` 且必须有操作人、原因去空白后非空、组织内幂等键唯一 + 请求语义哈希、批次与组织外键）；不修改 `batch`、不回填、不引用占位表 alert / recall，也不预留多态 `source_ref_id`（ALERT / RECALL 来源随 PB3 / PB5 的类型化外键与代码同时扩展）。
+  - `BatchRiskService` 是 `batch.risk_status` 唯一运行期写入者：`POST /api/v1/batches/{batchId}/risk/freeze` 与 `/risk/release` 仅限批次当前责任组织的 QUALITY_MANAGER，READ COMMITTED 下幂等预读 → 批次行锁 → 锁后复读 → 状态校验 → 台账 → 批次条件更新（版本 +1）→ `RISK_FREEZE` / `RISK_RELEASE` 审计，同一事务；ACTIVE 与 CLOSED 批次均可冻结 / 解除（从不重新打开），DRAFT 不参与，RECALLED 为终态；不改变数量 / 责任组织 / 流转状态 / 公开追溯码，不生成 TraceEvent，不向谱系传播；原因必填、时间由服务端生成、`SYS:` 幂等键前缀保留。
+  - 写入收敛：`Batch.riskStatus` 的 MyBatis-Plus 更新策略为 NEVER（通用实体更新无法覆盖风险状态），风险 mapper 不继承 `BaseMapper` 且只允许 `BatchRiskService` 注入，源码扫描测试覆盖 `src/main/java` 与 `src/main/resources` 的全部生产 SQL。
+  - `GET /api/v1/batches/{batchId}/risk-transitions`：当前责任组织与平台只读读取完整历史；历史参与组织沿用追溯事件 / 批次操作的判定方式，只读取本组织登记的转换；其他组织 403。
+  - 冻结期间完全复用 Phase A 既有守卫（交接创建 / 绑定 / 提交 / 接受、批次操作、冷库仓储与更正、首次激活公开码、终端销售）；运输发运 / 到达、PENDING+DELIVERED 拒收、查询与公开投影保持可用。
+  - 生产 Vue：批次详情“风险状态”面板（质量管理员填写原因并二次确认冻结 / 解除、冻结影响说明、风险转换历史、幂等重试）；消费者 FROZEN 状态改为“模拟风险冻结 / 模拟冻结”，并声明仅用于教学实训、不代表真实的产品安全判定、监管措施或产品扣留。
+  - 冒烟夹具新增 QUALITY_MANAGER 角色与加工 / 零售 / 来源质量管理员账号（仅夹具，不进入 Flyway）；真实浏览器验收 PB1-A（加工企业冻结 / 解除）、PB1-S（零售企业冻结阻断销售后解除）、PB1-B（CLOSED 冻结 / 解除 + 匿名消费者投影），并证明 Phase A 主链随后照常完成。
+
 - Phase A Slice 6 PublicTraceCode 与消费者全链（无 Flyway 迁移）：
   - 消费者公开投影 `GET /api/public/v1/public/traces/{publicTraceId}` 聚合祖先谱系：一次 recursive CTE 只沿 `batch_relation` 向上遍历（兄弟批次永不进入、DAG 共同祖先去重、环安全），新增 `lineage`（响应内局部键 `N1…Nk`、世代、角色、产品公开名，谱系边来自已提交批次操作而非追溯事件）；时间线聚合目标与祖先批次的有效（SUBMITTED）事件，新增 `eventType` / `nodeKey`，按业务时间 → 世代 → 固定公开事件权重 → 内部稳定次序排序。
   - 显式公开事件白名单（SOURCE、PROCESS、FREEZE、PACK、WAREHOUSE_IN、WAREHOUSE_OUT、TRANSPORT、ARRIVAL、SALE），SQL 只读取白名单列与白名单类型；PURCHASE 与未知类型不再出现在匿名投影中，未知数据来源不回显原值。
