@@ -80,3 +80,7 @@
 - 真实冒烟脚本改为异步运行 Playwright，避免阻塞事件循环导致后端日志管道写满、请求挂起。
 
 - 更新根 `README.md`：当前阶段推进至 `Phase 2 / 迭代开发（服务端最小骨架启动）`，标明 Phase 1 评审与 Phase 2 后端工程骨架建设已达成。
+
+### Fixed
+
+- 终端销售（Slice 5 潜在缺陷，PB1 并发测试发现）：同组织同幂等键的并发请求在等待批次行锁后复读幂等键时，MyBatis 会话级一级缓存会返回预读时缓存的空结果；先到者售罄关闭批次后，后到者因此得到 422 `BATCH_FLOW_BLOCKED` 而不是重放原 Sale。`SaleMapper.selectByOrgIdAndIdempotencyKey` 改为执行前清空会话缓存（非锁定读，锁顺序仍为 batch → sale 幂等索引），后到者现在重放同一 Sale（201），同键不同载荷仍 409 `IDEMPOTENCY_CONFLICT`；新增确定性 MySQL 竞态回归。

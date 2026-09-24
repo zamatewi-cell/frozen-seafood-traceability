@@ -124,7 +124,8 @@ public class SaleApplicationService {
             return replayOrConflict(existing, requestHash);
         }
 
-        // 2. 锁定批次行（唯一串行化点），锁后复读幂等键（同键并发的后到者在此识别先到者结果）
+        // 2. 锁定批次行（唯一串行化点），锁后复读幂等键（同键并发的后到者在此识别先到者结果）；
+        //    该查询清空会话缓存后真正读库，READ COMMITTED 下能看到等待批次行锁期间已提交的同键 Sale
         Batch batch = batchMapper.selectByIdIgnoreTenantForUpdate(batchId);
         Sale afterLock = saleMapper.selectByOrgIdAndIdempotencyKey(orgId, cleanKey);
         if (afterLock != null) {

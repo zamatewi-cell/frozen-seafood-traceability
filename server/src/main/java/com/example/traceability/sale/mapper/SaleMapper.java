@@ -3,6 +3,7 @@ package com.example.traceability.sale.mapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.example.traceability.sale.domain.Sale;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Options;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
@@ -23,7 +24,16 @@ import java.util.Map;
 @Mapper
 public interface SaleMapper extends BaseMapper<Sale> {
 
+    /**
+     * 组织内幂等键查询（预读与取得批次行锁后的复读）。
+     * <p>
+     * 必须每次真正查询数据库：同一事务内 MyBatis 会话级一级缓存会让持锁后复读直接返回预读时缓存的 null，
+     * 看不到等待批次行锁期间已提交的同键 Sale（例如先到者已售罄关闭批次，后到者本应重放却得到 422），
+     * 因此执行前清空本地缓存。只是非锁定读，不增加任何锁。
+     * </p>
+     */
     @Select("SELECT * FROM sale WHERE org_id = #{orgId} AND idempotency_key = #{idempotencyKey}")
+    @Options(flushCache = Options.FlushCachePolicy.TRUE)
     Sale selectByOrgIdAndIdempotencyKey(@Param("orgId") Long orgId, @Param("idempotencyKey") String idempotencyKey);
 
     /**

@@ -472,4 +472,14 @@ class SaleApplicationServiceTest {
             assertThat(service.listSales(BATCH_ID, principal(1L, "PLATFORM", List.of("SYSTEM_ADMIN"), List.of("PLATFORM")))).hasSize(1);
         }
     }
+
+    @Test
+    @DisplayName("持锁后幂等复读每次真正读库：幂等键查询清空会话缓存，不能返回预读时缓存的 null（确定性竞态见 SaleMysqlIntegrationTest）")
+    void idempotencyReReadBypassesSessionCache() throws NoSuchMethodException {
+        org.apache.ibatis.annotations.Options options = SaleMapper.class
+                .getDeclaredMethod("selectByOrgIdAndIdempotencyKey", Long.class, String.class)
+                .getAnnotation(org.apache.ibatis.annotations.Options.class);
+        assertThat(options).isNotNull();
+        assertThat(options.flushCache()).isEqualTo(org.apache.ibatis.annotations.Options.FlushCachePolicy.TRUE);
+    }
 }
