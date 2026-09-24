@@ -305,7 +305,12 @@ class BatchRiskMysqlIntegrationTest extends AbstractBatchRiskMysqlIT {
             assertThat(row.get("orgId").asLong()).isEqualTo(senderOrg.getId());
             assertThat(row.get("reason").asString()).startsWith("A 组织");
         }
-        assertThat(aView.toString()).doesNotContain("B 组织入库抽检").doesNotContain(String.valueOf(userId("rcv_qm")));
+        assertThat(aView.toString()).doesNotContain("B 组织入库抽检");
+        // 按字段比较操作人：整段 JSON 的数字子串匹配会误命中时间戳等无关数字（例如用户 76 与 "…12.767652Z"）
+        Long bQmUserId = userId("rcv_qm");
+        for (JsonNode row : aView) {
+            assertThat(row.get("actorUserId").asLong()).as("no later-org actor").isNotEqualTo(bQmUserId);
+        }
         assertThat(history(senderSession, b)).as("any role of the historical org sees its own rows").hasSize(2);
 
         JsonNode bView = history(receiverSession, b);

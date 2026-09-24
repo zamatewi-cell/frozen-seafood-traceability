@@ -228,6 +228,9 @@ public class SaleApplicationService {
      * Sale 不改变责任组织且首次销售后禁止交接，因此销售组织始终是批次当前责任组织。
      * </p>
      */
+    // 授权所依据的可变责任组织事实与构造响应的全部数据必须来自同一 InnoDB 一致性快照：只读 REPEATABLE READ 事务
+    // 让首个一致性读建立读视图，后续非锁定读复用它，看不到交接接受后新责任组织才提交的行（不加任何锁）
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public List<SaleResponse> listSales(Long batchId, TraceSecurityPrincipal principal) {
         if (principal == null || principal.getRoles() == null) {
             throw new BusinessException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "未认证", "请先登录");

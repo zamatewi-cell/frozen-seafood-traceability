@@ -154,6 +154,9 @@ public class BatchRiskService {
      * </ul>
      * 只读：历史参与组织不因此获得任何批次写权限。
      */
+    // 授权所依据的可变责任组织事实与构造响应的全部数据必须来自同一 InnoDB 一致性快照：只读 REPEATABLE READ 事务
+    // 让首个一致性读建立读视图，后续非锁定读复用它，看不到交接接受后新责任组织才提交的行（不加任何锁）
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public List<BatchRiskTransitionResponse> listTransitions(Long batchId, TraceSecurityPrincipal principal) {
         requireAuthenticated(principal);
         Batch batch = batchMapper.selectByIdIgnoreTenant(batchId);
