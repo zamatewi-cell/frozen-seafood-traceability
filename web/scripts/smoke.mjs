@@ -223,6 +223,12 @@ function seedMasterData(suffix, passwordA, passwordB, passwordQm) {
     INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @qm);
     INSERT INTO product (product_code, public_name, category, specification, source_type, base_unit_code, status)
       VALUES ('P0-YELLOW-${suffix}', 'Phase0冒烟冷冻大黄鱼', 'FISH', '500g/条', 'DOMESTIC_CAPTURE', 'kg', 'ACTIVE');
+    SET @fish = LAST_INSERT_ID();
+    -- PB2：已发布（ACTIVE）运输温控规则只存在于冒烟夹具（基础资料，不进入 Flyway），作为在途温度单点判定依据
+    INSERT INTO temperature_rule (product_id, version_no, name, effective_from, effective_to, status, basis_note)
+      VALUES (@fish, 1, 'PB2冒烟冷冻大黄鱼运输规则', '2020-01-01 00:00:00', NULL, 'ACTIVE', '冒烟夹具：教学演示用运输温控基线');
+    INSERT INTO temperature_rule_stage (rule_id, stage_code, lower_limit, upper_limit, unit_code, allowed_duration_seconds, sequence_no)
+      VALUES (LAST_INSERT_ID(), 'TRANSPORT', -25.00, -15.00, 'CELSIUS', 1800, 1);
     INSERT INTO product (product_code, public_name, category, specification, source_type, base_unit_code, status)
       VALUES ('P0-SHRIMP-${suffix}', 'Phase0冒烟冷冻南美白虾', 'CRUSTACEAN', '1kg/袋', 'IMPORT', 'kg', 'ACTIVE');
     COMMIT;
@@ -667,6 +673,52 @@ function verifySlice5Database(slice2, retail, ids) {
     .split('\n').map((line) => `  ${line}`).join('\n'))
 }
 
+/**
+ * PB2-T 数据库事实：S1 在途期间承运商恰好登记 3 条温度（-18.20 / -12.50 / -19.00，MANUAL / SIMULATED / MANUAL），
+ * 全部绑定 S1 而非批次、登记组织 / 操作人为承运商、固定匹配到夹具运输规则环节与上下限快照、单点判定 NORMAL / HIGH / NORMAL，
+ * 测量时间都在装载发运与到达之间，3 条 TEMPERATURE_RECORD 审计；单点越界未产生 Alert、风险转换或额外追溯事件。
+ */
+function verifyPb2TransitDatabase(slice2, ids) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const shipmentId = q(`SELECT shipment_id FROM transfer WHERE batch_id = ${ids.b2Id} AND shipment_id IS NOT NULL AND is_deleted = 0 ORDER BY id DESC LIMIT 1;`)
+  const carrierUserId = userIdOf(slice2.usernames.carrier)
+  const [rows, readings, shape, stageOk, inWindow, audits, alerts, riskDuringTransit, transport, arrival, otherShipments] = q(`SELECT
+      (SELECT COUNT(*) FROM temperature_record WHERE shipment_id = ${shipmentId}),
+      (SELECT GROUP_CONCAT(CONCAT(temperature, ':', data_source, ':', evaluation, ':', IFNULL(device_no, '-')) ORDER BY measured_at, id SEPARATOR ',')
+         FROM temperature_record WHERE shipment_id = ${shipmentId}),
+      (SELECT COUNT(*) FROM temperature_record WHERE shipment_id = ${shipmentId} AND batch_id IS NULL AND stage_code = 'TRANSPORT'
+         AND unit_code = 'CELSIUS' AND org_id = ${slice2.carrierOrgId} AND actor_user_id = ${carrierUserId} AND is_deleted = 0),
+      (SELECT COUNT(*) FROM temperature_record r JOIN temperature_rule_stage st ON st.id = r.rule_stage_id
+         JOIN temperature_rule ru ON ru.id = st.rule_id
+         WHERE r.shipment_id = ${shipmentId} AND st.stage_code = 'TRANSPORT' AND ru.name = 'PB2冒烟冷冻大黄鱼运输规则' AND ru.version_no = 1
+           AND r.rule_lower_limit = -25.00 AND r.rule_upper_limit = -15.00 AND r.rule_allowed_duration_seconds = 1800),
+      (SELECT COUNT(*) FROM temperature_record r JOIN shipment s ON s.id = r.shipment_id
+         WHERE r.shipment_id = ${shipmentId} AND r.measured_at >= s.loaded_at AND r.measured_at <= s.unloaded_at),
+      (SELECT COUNT(*) FROM audit_log WHERE action = 'TEMPERATURE_RECORD' AND object_type = 'SHIPMENT' AND object_id = ${shipmentId}),
+      (SELECT COUNT(*) FROM alert),
+      (SELECT COUNT(*) FROM batch_risk_transition t JOIN shipment s ON s.id = ${shipmentId}
+         WHERE t.batch_id IN (${ids.b2Id}, ${ids.b3Id}) AND t.occurred_at BETWEEN s.dispatched_recorded_at AND s.delivered_recorded_at),
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id IN (${ids.b2Id}, ${ids.b3Id}) AND event_type = 'TRANSPORT'
+         AND idempotency_key IN (CONCAT('SYS:TRANSPORT:SHIPMENT:', ${shipmentId}, ':BATCH:', ${ids.b2Id}), CONCAT('SYS:TRANSPORT:SHIPMENT:', ${shipmentId}, ':BATCH:', ${ids.b3Id}))),
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id IN (${ids.b2Id}, ${ids.b3Id}) AND event_type = 'ARRIVAL'
+         AND idempotency_key IN (CONCAT('SYS:ARRIVAL:SHIPMENT:', ${shipmentId}, ':BATCH:', ${ids.b2Id}), CONCAT('SYS:ARRIVAL:SHIPMENT:', ${shipmentId}, ':BATCH:', ${ids.b3Id}))),
+      (SELECT COUNT(*) FROM temperature_record WHERE shipment_id <> ${shipmentId});`).split('\t')
+  assertFacts('PB2-T', {
+    'S1 恰好 3 条在途温度记录，按 (测量时间, 主键) 依次为 -18.20 MANUAL NORMAL / -12.50 SIMULATED HIGH（设备编号）/ -19.00 MANUAL NORMAL':
+      rows === '3' && readings === '-18.20:MANUAL:NORMAL:-,-12.50:SIMULATED:HIGH:SMOKE-PROBE-01,-19.00:MANUAL:NORMAL:-',
+    '记录绑定 S1 而非批次（batch_id 为空），环节 TRANSPORT、温标 CELSIUS，登记组织 / 操作人为承运商': shape === '3',
+    '判定依据：夹具运输规则 v1 的 TRANSPORT 环节与上下限 [-25.00, -15.00]、允许越界时长 1800 秒快照': stageOk === '3',
+    '全部测量时间位于装载发运与到达之间（到达不早于最新测量时间）': inWindow === '3',
+    '3 条 TEMPERATURE_RECORD 审计': audits === '3',
+    '单点越界未产生 Alert，在途期间 B2 / B3 无风险转换': alerts === '0' && riskDuringTransit === '0',
+    'S1 仍为每批恰好一条 TRANSPORT / ARRIVAL（温度登记不生成追溯事件）': transport === '2' && arrival === '2',
+    '其他运输任务无温度记录（S0 未登记）': otherShipments === '0'
+  }, `shipment=${shipmentId} rows=${rows} readings=${readings} shape=${shape} stage=${stageOk} window=${inWindow} audits=${audits} alerts=${alerts} risk=${riskDuringTransit} events=${transport}/${arrival}`)
+  console.log('[smoke] MySQL temperature_record（S1，PB2-T）:')
+  console.log(q(`SELECT id, shipment_id, org_id, stage_code, measured_at, temperature, data_source, IFNULL(device_no, '-'), evaluation, rule_stage_id, rule_lower_limit, rule_upper_limit, rule_allowed_duration_seconds
+      FROM temperature_record WHERE shipment_id = ${shipmentId} ORDER BY measured_at, id;`).split('\n').map((line) => `  ${line}`).join('\n'))
+}
+
 function startViteDevServer() {
   const npmCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm'
   const npmArgs = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm.cmd run dev'] : ['run', 'dev']
@@ -914,7 +966,7 @@ function slice6Snapshot(ids) {
       (SELECT COUNT(*) FROM trace_event), (SELECT COUNT(*) FROM audit_log), (SELECT COUNT(*) FROM batch),
       (SELECT COUNT(*) FROM batch_relation), (SELECT COUNT(*) FROM sale), (SELECT COUNT(*) FROM transfer),
       (SELECT COUNT(*) FROM shipment), (SELECT COUNT(*) FROM public_trace_code), (SELECT COUNT(*) FROM public_trace_code_idempotency),
-      (SELECT COUNT(*) FROM batch_risk_transition);`, { database: schema })
+      (SELECT COUNT(*) FROM batch_risk_transition), (SELECT COUNT(*) FROM temperature_record), (SELECT COUNT(*) FROM alert);`, { database: schema })
 }
 
 let backend
@@ -969,6 +1021,7 @@ try {
     console.log('[smoke] Slice 3：加工企业接受 B0 后，在 B0 详情执行“加工”（产出 960，损耗 30，留样 10），再对 B1 执行“拆分”（600 + 360）。')
     console.log(`[smoke] Slice 4：加工企业在 B2、B3 详情“自有冷库仓储”中选择 ${slice2.coldStoreName}，各执行一次冷库入库与冷库出库。`)
     console.log(`[smoke] Slice 5：加工企业为 B2、B3 分别发起交接给 ${retail.retailerOrgName}，在同一运输任务装载两张交接（目的地 ${retail.storeName}）并提交；承运商发运、到达；`)
+    console.log('[smoke]          PB2（可选）：承运商发运后、到达前在运输任务详情“在途温度记录”中登记温度（夹具运输规则 -25.00 ~ -15.00 ℃；单点判定，不产生告警、不冻结批次）。')
     console.log(`[smoke]          零售企业接受后先在 B2、B3 详情“公开追溯码”中激活公开追溯码，再在 B2 详情"终端销售"中于 ${retail.storeName} 先售 200、再售 400，在 B3 售出全部 360。`)
     console.log('[smoke] Slice 6：在零售企业 B2 / B3 详情复制消费者查询链接，用未登录的浏览器窗口打开，查看 B0 → B1 → B2（或 B3）谱系与公开事实。')
     console.log('[smoke] PB1（可选）：质量管理员在批次详情“风险状态”中填写原因并二次确认风险冻结 / 解除冻结；冻结期间操作员的交接、加工、仓储、销售入口消失。')
@@ -1126,7 +1179,8 @@ try {
   verifySlice5PublicCodes(retail, slice3Ids)
   verifySlice5Chronology(retail, slice3Ids)
   verifyPb1SaleCheckpoint(retail, slice3Ids)
-  console.log('[smoke] Slice 5 真实加工 → 零售交接、销售前激活公开追溯码、PB1-S 冻结阻断销售后解除与终端 Sale 浏览器验收与 MySQL 事实校验通过')
+  verifyPb2TransitDatabase(slice2, slice3Ids)
+  console.log('[smoke] Slice 5 真实加工 → 零售交接、PB2-T 承运商在途温度单点登记、销售前激活公开追溯码、PB1-S 冻结阻断销售后解除与终端 Sale 浏览器验收与 MySQL 事实校验通过')
 
   const slice6Before = slice6Snapshot(slice3Ids)
   await runBrowserSmoke({
@@ -1143,7 +1197,9 @@ try {
         slice2.sourceOrgName, slice2.carrierOrgName, slice2.processorOrgName, retail.retailerOrgName,
         slice2.sourceSiteName, slice2.processorSiteName, slice2.coldStoreName, retail.storeName,
         slice2.usernames.source, slice2.usernames.carrier, slice2.usernames.processor, retail.username,
-        '浙L·冷S2001', '浙L·冷S5001', '东海舟山渔场（Slice 2 验收）', 'S2-B0', 'SYS:', 'detailsJson', 'summary'
+        '浙L·冷S2001', '浙L·冷S5001', '东海舟山渔场（Slice 2 验收）', 'S2-B0', 'SYS:', 'detailsJson', 'summary',
+        // PB2：企业端在途温度记录从不进入匿名公开投影
+        'SMOKE-PROBE-01', 'PB2冒烟冷冻大黄鱼运输规则', '-12.50', '-18.20', '单点', 'MISSING_CONTEXT'
       ]
     })
   }, 'tests/e2e/real-slice6.spec.ts')
