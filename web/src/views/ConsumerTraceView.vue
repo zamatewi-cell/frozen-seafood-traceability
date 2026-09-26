@@ -133,6 +133,7 @@ watch(
       <TraceRecallAlert
         v-if="traceData.riskStatus === 'RECALLED'"
         :notice="traceData.recallNotice ?? null"
+        :disposition="traceData.recallDisposition ?? null"
       />
 
       <div class="desktop-layout-row">
