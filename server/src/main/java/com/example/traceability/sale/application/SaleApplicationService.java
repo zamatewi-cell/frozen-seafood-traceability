@@ -161,7 +161,7 @@ public class SaleApplicationService {
         // 7. 未结束交接（DRAFT / PENDING）存在时禁止销售
         if (transferMapper.countActiveTransfersByBatchId(batch.getId()) > 0) {
             throw new BusinessException(HttpStatus.CONFLICT, "BATCH_TRANSFER_OPEN", "批次存在未结束交接",
-                    "批次 " + batch.getTraceBatchNo() + " 存在草稿(DRAFT)或待接收(PENDING)交接，请先删除草稿或等待交接结束");
+                    "批次 " + batch.getTraceBatchNo() + " 存在草稿(DRAFT)、待接收(PENDING)或隔离中(QUARANTINED)的交接，请先删除草稿或等待交接结束");
         }
 
         // 8. 派生剩余量与超卖

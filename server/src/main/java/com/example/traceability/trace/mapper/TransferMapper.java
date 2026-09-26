@@ -55,13 +55,13 @@ public interface TransferMapper extends BaseMapper<Transfer> {
     int existsByIdIgnoreTenant(@Param("id") Long id);
 
     /**
-     * 统计指定批次下未结束（DRAFT 或 PENDING）的交接数量。
+     * 统计指定批次下未结束（DRAFT、PENDING 或 PB4 的 QUARANTINED）的交接数量。
      *
      * @param batchId 批次 ID
      * @return 未结束交接记录数
      */
     @Select("SELECT COUNT(*) FROM `transfer` WHERE batch_id = #{batchId} " +
-            "AND status IN ('DRAFT', 'PENDING') AND is_deleted = 0")
+            "AND status IN ('DRAFT', 'PENDING', 'QUARANTINED') AND is_deleted = 0")
     int countActiveTransfersByBatchId(@Param("batchId") Long batchId);
 
     /**
@@ -205,6 +205,50 @@ public interface TransferMapper extends BaseMapper<Transfer> {
      */
     @Select("SELECT * FROM `transfer` WHERE shipment_id = #{shipmentId} AND is_deleted = 0 ORDER BY id ASC FOR UPDATE")
     List<Transfer> selectByShipmentIdForUpdate(@Param("shipmentId") Long shipmentId);
+
+    /**
+     * PENDING → QUARANTINED（Phase B PB4 隔离收货）：只写实收 / 隔离事实与状态，强约束组织、状态与版本谓词。
+     *
+     * @return 影响行数 (1: 成功, 0: 状态 / 版本已被并发修改)
+     */
+    @Update("""
+            UPDATE `transfer`
+            SET status = 'QUARANTINED',
+                received_at = #{receivedAt},
+                received_quantity = #{receivedQuantity},
+                difference_reason = #{differenceReason},
+                quarantine_site_id = #{quarantineSiteId},
+                quarantine_reason = #{quarantineReason},
+                quarantined_recorded_at = #{nowUtc},
+                quarantined_by = #{userId},
+                version = version + 1,
+                updated_at = #{nowUtc},
+                updated_by = #{userId}
+            WHERE id = #{id}
+              AND receiver_org_id = #{receiverOrgId}
+              AND status = 'PENDING'
+              AND version = #{expectedVersion}
+              AND is_deleted = 0
+            """)
+    int quarantineByIdAndVersion(
+            @Param("id") Long id,
+            @Param("receiverOrgId") Long receiverOrgId,
+            @Param("expectedVersion") Long expectedVersion,
+            @Param("receivedAt") LocalDateTime receivedAt,
+            @Param("receivedQuantity") java.math.BigDecimal receivedQuantity,
+            @Param("differenceReason") String differenceReason,
+            @Param("quarantineSiteId") Long quarantineSiteId,
+            @Param("quarantineReason") String quarantineReason,
+            @Param("nowUtc") LocalDateTime nowUtc,
+            @Param("userId") Long userId
+    );
+
+    /**
+     * 某批次上指定接收方的隔离中（QUARANTINED）交接（普通读；检验证据提交身份判定）。
+     */
+    @Select("SELECT * FROM `transfer` WHERE batch_id = #{batchId} AND receiver_org_id = #{receiverOrgId} " +
+            "AND status = 'QUARANTINED' AND is_deleted = 0 ORDER BY id DESC LIMIT 1")
+    Transfer selectQuarantinedByBatchIdAndReceiver(@Param("batchId") Long batchId, @Param("receiverOrgId") Long receiverOrgId);
 
     /**
      * 查询运输任务装载清单中的全部交接（普通读，按主键排序）。

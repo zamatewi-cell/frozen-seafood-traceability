@@ -8,6 +8,7 @@ import com.example.traceability.trace.application.TransferApplicationService;
 import com.example.traceability.trace.dto.TransferAcceptRequest;
 import com.example.traceability.trace.dto.TransferCreateRequest;
 import com.example.traceability.trace.dto.TransferPatchRequest;
+import com.example.traceability.trace.dto.TransferQuarantineRequest;
 import com.example.traceability.trace.dto.TransferRejectRequest;
 import com.example.traceability.trace.dto.TransferResponse;
 import com.example.traceability.trace.dto.TransferSubmitRequest;
@@ -97,12 +98,12 @@ public class TransferController {
         String normalizedStatus = null;
         if (status != null && !status.isBlank()) {
             String st = status.trim().toUpperCase();
-            if (!java.util.Set.of("DRAFT", "PENDING", "ACCEPTED", "REJECTED").contains(st)) {
+            if (!java.util.Set.of("DRAFT", "PENDING", "QUARANTINED", "ACCEPTED", "REJECTED").contains(st)) {
                 throw new BusinessException(
                         HttpStatus.BAD_REQUEST,
                         "INVALID_REQUEST",
                         "参数校验失败",
-                        "status 必须为 DRAFT、PENDING、ACCEPTED 或 REJECTED"
+                        "status 必须为 DRAFT、PENDING、QUARANTINED、ACCEPTED 或 REJECTED"
                 );
             }
             normalizedStatus = st;
@@ -181,7 +182,22 @@ public class TransferController {
     }
 
     /**
-     * 接收方拒收交接 (POST /api/v1/transfers/{transferId}/reject)，前提为运输任务已 DELIVERED。
+     * 接收方隔离收货 (POST /api/v1/transfers/{transferId}/quarantine)，PENDING → QUARANTINED（Phase B PB4）：
+     * 前提为运输任务已 DELIVERED；登记实收数量与隔离场所，批次当前责任组织仍为发送方。
+     */
+    @PostMapping("/{transferId}/quarantine")
+    public SuccessEnvelope<TransferResponse> quarantineTransfer(
+            @PathVariable Long transferId,
+            @Valid @RequestBody TransferQuarantineRequest req,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal
+    ) {
+        TransferResponse response = transferService.quarantineTransfer(transferId, req, idempotencyKey, principal);
+        return SuccessEnvelope.of(response);
+    }
+
+    /**
+     * 接收方拒收交接 (POST /api/v1/transfers/{transferId}/reject)，前提为运输任务已 DELIVERED；PENDING 或 QUARANTINED 均可拒收。
      */
     @PostMapping("/{transferId}/reject")
     public SuccessEnvelope<TransferResponse> rejectTransfer(
