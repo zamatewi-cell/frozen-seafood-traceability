@@ -244,6 +244,10 @@ abstract class AbstractTransferShipmentMysqlIT {
 
     @AfterEach
     void tearDownTransferShipmentFixture() {
+        // V16：recall_batch → recall / batch / transfer / batch_risk_transition，必须先于风险台账清理；recall 在风险台账之后清理
+        clean("DELETE FROM recall_batch WHERE recall_id IN (SELECT id FROM recall WHERE owner_org_id = ?)", createdOrgIds);
+        clean("DELETE FROM recall_batch WHERE batch_id = ?", createdBatchIds);
+        clean("DELETE FROM recall_batch WHERE holder_org_id = ?", createdOrgIds);
         // V14：alert_action / alert_batch → alert；alert_batch → batch / transfer / batch_risk_transition，必须先于风险台账清理
         clean("DELETE FROM alert_action WHERE alert_id IN (SELECT id FROM alert WHERE org_id = ?)", createdOrgIds);
         clean("DELETE FROM alert_action WHERE org_id = ?", createdOrgIds);
@@ -287,6 +291,8 @@ abstract class AbstractTransferShipmentMysqlIT {
         clean("DELETE FROM batch_operation_item WHERE operation_id IN (SELECT id FROM batch_operation WHERE org_id = ?)", createdOrgIds);
         clean("DELETE FROM batch_operation WHERE org_id = ?", createdOrgIds);
 
+        // V16：recall → alert / organization（风险台账的 source_recall_id 已先行清理）
+        clean("DELETE FROM recall WHERE owner_org_id = ?", createdOrgIds);
         // V14：alert → shipment / temperature_record / temperature_rule_stage（风险台账的 source_alert_id 已先行清理）
         clean("DELETE FROM alert WHERE org_id = ?", createdOrgIds);
         clean("DELETE FROM alert WHERE shipment_id = ?", createdShipmentIds);
@@ -326,6 +332,7 @@ abstract class AbstractTransferShipmentMysqlIT {
             assertThat(count("SELECT count(*) FROM temperature_record WHERE org_id = ?", orgId)).isZero();
             assertThat(count("SELECT count(*) FROM alert WHERE org_id = ?", orgId)).isZero();
             assertThat(count("SELECT count(*) FROM alert_action WHERE org_id = ?", orgId)).isZero();
+            assertThat(count("SELECT count(*) FROM recall WHERE owner_org_id = ?", orgId)).isZero();
         }
         for (Long batchId : createdBatchIds) {
             assertThat(count("SELECT count(*) FROM batch WHERE id = ?", batchId)).isZero();

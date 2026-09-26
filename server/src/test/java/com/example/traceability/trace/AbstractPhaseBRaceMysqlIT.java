@@ -45,7 +45,9 @@ abstract class AbstractPhaseBRaceMysqlIT extends AbstractPhaseBMysqlIT {
     static final List<Class<?>> GATED_MAPPERS = new ArrayList<>(List.of(
             TemperatureRecordMapper.class, ShipmentMapper.class, TransferMapper.class, AuditLogMapper.class,
             AlertMapper.class, AlertBatchMapper.class, AlertActionMapper.class, BatchRiskTransitionMapper.class,
-            com.example.traceability.quality.mapper.InspectionReportMapper.class));
+            com.example.traceability.quality.mapper.InspectionReportMapper.class,
+            com.example.traceability.quality.mapper.RecallMapper.class, com.example.traceability.quality.mapper.RecallBatchMapper.class,
+            com.example.traceability.sale.mapper.SaleMapper.class, com.example.traceability.batch.mapper.BatchMapper.class));
 
     interface AfterRelease {
         void run() throws Exception;
