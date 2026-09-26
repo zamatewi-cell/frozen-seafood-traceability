@@ -6,6 +6,13 @@
 
 ### Added
 
+- Phase B PB2 Shipment 在途温度记录（单点登记与单点判定，契约 v1.1 §2.9 / §10.1 / §10.2 步骤 1 / §13 步骤 1 / §14）：
+  - Flyway V13：前置条件要求 `temperature_record` 为空（V1 以来无任何写入代码，fail-fast，在任何 DDL 之前失败）；把该表收敛为 Shipment 在途形状（绑定 `shipment_id`、`batch_id` 为空、`stage_code` 固定 `TRANSPORT`、温标 `CELSIUS`、来源仅 `MANUAL` / `SIMULATED`、温度 [-80.00, 60.00]、测量时间不晚于登记时间 5 分钟、不可软删除）；新增登记组织 / 操作人、判定依据快照（上下限与允许越界时长，历史判定不随规则环节后续改动漂移）与组织内幂等键 + 请求哈希；删除伪造合规结论的 `evaluation DEFAULT 'NORMAL'`；`MISSING_CONTEXT` 时规则环节、上下限与允许越界时长快照均为空，`NORMAL` / `HIGH` / `LOW` 时四者均非空且必须与快照上下限一致；复合外键保证登记组织是运输任务承运组织、匹配环节确为 TRANSPORT。不建立测量时间唯一约束（同一时间点可有多条测量），不修改 V1–V12。
+  - `POST /api/v1/shipments/{shipmentId}/temperature-records`：运输任务指定承运组织的 OPERATOR 在 IN_TRANSIT 期间登记；`measuredAt` 只规范化一次（UTC、截断到 `DATETIME(6)` 微秒），同一值用于请求哈希、时间窗口校验、规则匹配、持久化、审计与响应；按装载批次产品、TRANSPORT 环节与测量业务时间匹配已发布规则版本（左闭右开），单点判定 `NORMAL`（含上下限）/ `HIGH` / `LOW`，无适用规则为 `MISSING_CONTEXT`，规则区间重叠失败关闭；READ COMMITTED 下幂等预读 → 运输任务行锁 → 锁后复读 → 插入 → `TEMPERATURE_RECORD` 审计，锁顺序 shipment → temperature_record。登记不修改运输任务 / 交接 / 批次，不生成 TraceEvent，不判定持续超温，不创建 Alert，不调用风险核心、不写批次风险状态，判定结果登记后不追溯改写。
+  - `GET /api/v1/shipments/{shipmentId}/temperature-records`：发送方、承运方、接收方（任意角色）与平台只读，按 (测量时间, 主键) 稳定排序，只读 REPEATABLE READ 快照；温度记录从不进入匿名公开投影。
+  - 生产 Vue：运输任务详情“在途温度记录”面板（承运商在途登记、发送方 / 接收方只读、单点判定与判定依据、结果未知时同键重试、409 刷新并保留原因）；全部文案只表述单点判定，声明不等于持续超温、不产生告警、不对消费者公开、未接入真实温度设备。
+  - 冒烟夹具新增 Phase 0 冷冻大黄鱼的已发布运输温控规则（仅夹具，不进入 Flyway）；真实浏览器验收 PB2-T：承运商在 S1 在途登记 3 条温度（NORMAL / HIGH / NORMAL），发货方登记 403、到达后登记 409、接收方只读，MySQL 事实校验无 Alert、无风险转换、无额外追溯事件，匿名消费者页面与响应不含任何温度记录数据。
+
 - Phase B PB1 批次风险状态核心（人工 FROZEN ⇄ NORMAL）：
   - Flyway V12：只新建追加式风险状态转换台账 `batch_risk_transition`（转换时责任组织、流转状态快照 ACTIVE / CLOSED、NORMAL ⇄ FROZEN 转换对、来源仅 `MANUAL` 且必须有操作人、原因去空白后非空、组织内幂等键唯一 + 请求语义哈希、批次与组织外键）；不修改 `batch`、不回填、不引用占位表 alert / recall，也不预留多态 `source_ref_id`（ALERT / RECALL 来源随 PB3 / PB5 的类型化外键与代码同时扩展）。
   - `BatchRiskService` 是 `batch.risk_status` 唯一运行期写入者：`POST /api/v1/batches/{batchId}/risk/freeze` 与 `/risk/release` 仅限批次当前责任组织的 QUALITY_MANAGER，READ COMMITTED 下幂等预读 → 批次行锁 → 锁后复读 → 状态校验 → 台账 → 批次条件更新（版本 +1）→ `RISK_FREEZE` / `RISK_RELEASE` 审计，同一事务；ACTIVE 与 CLOSED 批次均可冻结 / 解除（从不重新打开），DRAFT 不参与，RECALLED 为终态；不改变数量 / 责任组织 / 流转状态 / 公开追溯码，不生成 TraceEvent，不向谱系传播；原因必填、时间由服务端生成、`SYS:` 幂等键前缀保留。
@@ -70,6 +77,10 @@
 - Phase 1 可交互原型、测试计划和三条版本化演示数据方案。
 
 ### Changed
+
+- 运输任务装载（Demo MVP / PB2 应用层限制）：同一运输任务只装载同一产品的批次，不同产品 422 `SHIPMENT_PRODUCT_MISMATCH`。这是契约 §7.1“兼容的运输温控规则”在多温区混装不在 MVP 范围内时的无歧义解释，不写入数据库永久约束；此前已存在的混装清单登记温度时记为 `MISSING_CONTEXT`，从不猜测规则。
+- 运输任务确认到达（PB2）：到达时间不得早于已登记的最新在途温度测量时间（相等允许，422 `INVALID_BUSINESS_TIME`）；最新测量时间在持有运输任务行锁后以当前读（FOR SHARE）读取，不受取锁前幂等预读建立的 REPEATABLE READ 读视图影响，确定性竞态测试覆盖两种加锁先后与红转绿证明。
+- 消费者公开投影温度说明：`temperatureSummary.result` 仍为 `INSUFFICIENT_DATA`，说明文字改为“公开页面不展示冷链温度测量明细；本项目未接入实时温控采集，不构成本项目温控合规依据。”（企业端已可登记在途温度后，原“暂无有效温控监测记录”不再准确）。
 
 - 首次销售锁定（Slice 5）：批次 `firstSaleId` 非空后，交接创建 / 提交 / 接受、运输任务装载与批次操作创建 / 提交一律 409 `BATCH_SALE_STARTED`（剩余量大于 0 时同样适用）；守卫读取已持有行锁的批次行，REPEATABLE READ 事务中也能看到并发已提交的首次销售。
 - `remainingQuantity` 改为 `声明数量 - 已提交 INPUT 消耗量 - 已提交终端销售数量`，批次列表 / 详情、批次操作全量投入校验与终端销售超卖校验共用同一派生服务；批次响应新增 `firstSaleId`。
