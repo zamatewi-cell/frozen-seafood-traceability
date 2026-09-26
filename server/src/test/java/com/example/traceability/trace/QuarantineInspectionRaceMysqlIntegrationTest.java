@@ -23,7 +23,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 并在批次行锁之后读取最新检验结论。因此：
  * <ul>
  *   <li>隔离与接受同一交接：交接行锁串行化，任一顺序都只有一个决定生效（后到者 409），不会出现"既隔离又接受"；</li>
- *   <li>检验报告与放行：批次行锁串行化——先提交的不合格报告必然阻止之后的放行；先完成的放行不受之后报告影响（之后的报告仍被登记为证据）。</li>
+ *   <li>检验报告与放行：批次行锁串行化——先提交的不合格报告必然阻止之后的放行；先完成的放行不受之后报告影响（之后的报告仍被登记为证据）；</li>
+ *   <li>隔离接收方的检验报告与接受同一隔离交接：报告持有批次行锁、接受持有 shipment → transfer 后等待批次；报告对隔离交接的外键检查
+ *       只锁交接的复合唯一索引记录（接受不修改这些列），因此不形成 batch → transfer 反向等待，不死锁。</li>
  * </ul>
  * </p>
  */
@@ -128,5 +130,33 @@ class QuarantineInspectionRaceMysqlIntegrationTest extends AbstractPhaseBRaceMys
         assertThat(riskStatus(m.batch(0))).isEqualTo("NORMAL");
         assertThat(jdbcTemplate.queryForObject("SELECT inspection_report_id FROM alert_action WHERE alert_id = ? AND action = 'RELEASE_BATCH'",
                 Long.class, alertId)).isEqualTo(passId);
+    }
+
+    @Test
+    @DisplayName("隔离接收方的检验报告先持有批次行锁、从隔离接受等待（已持有 shipment → transfer）：无死锁，报告以 QUARANTINE_RECEIVER 登记后接受生效")
+    void receiverReportFirst_thenAcceptFromQuarantine() throws Exception {
+        Manifest m = deliveredAlertManifest("RACE-IA", "500");
+        Long alertId = onlyAlertId(m.shipmentId());
+        Long transferId = m.transferIds().get(0);
+        quarantine(transferId, "500");
+        acknowledge(alertId);
+        inspect(receiverQm(), m.batch(0), "RCV-PASS", "PASS", alertId);
+        expect(releaseReq(senderQm(), alertId, m.batch(0), null, key("idem-rel")), 200);
+
+        AtomicReference<Running> accept = new AtomicReference<>();
+        MvcResult reported = gated(InspectionReportMapper.class, "insert",
+                () -> perform(inspectionReq(receiverQm(), m.batch(0), "RCV-RECHECK", "PASS", alertId, key("idem-insp-2"))),
+                () -> {
+                    accept.set(background("pb4-accept-B", () -> perform(acceptRequest(receiverSession, transferId, new BigDecimal("500"),
+                            key("idem-acc")))));
+                    awaitRowLockWait(accept.get().thread, "batch");
+                });
+        MvcResult accepted = accept.get().join();
+
+        assertThat(status(reported)).isEqualTo(201);
+        assertThat(data(reported).get("submitterRole").asString()).isEqualTo("QUARANTINE_RECEIVER");
+        assertThat(status(accepted)).isEqualTo(200);
+        assertThat(transferStatus(transferId)).isEqualTo("ACCEPTED");
+        assertThat(batchOrgId(m.batch(0))).isEqualTo(receiverOrg.getId());
     }
 }
