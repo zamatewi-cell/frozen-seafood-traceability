@@ -27,10 +27,10 @@ public interface BatchRiskTransitionMapper {
      */
     @Insert("""
             INSERT INTO batch_risk_transition
-                (batch_id, org_id, flow_status, from_status, to_status, source_type, actor_user_id, reason,
+                (batch_id, org_id, flow_status, from_status, to_status, source_type, source_alert_id, actor_user_id, reason,
                  idempotency_key, request_hash, occurred_at, created_at)
             VALUES
-                (#{batchId}, #{orgId}, #{flowStatus}, #{fromStatus}, #{toStatus}, #{sourceType}, #{actorUserId}, #{reason},
+                (#{batchId}, #{orgId}, #{flowStatus}, #{fromStatus}, #{toStatus}, #{sourceType}, #{sourceAlertId}, #{actorUserId}, #{reason},
                  #{idempotencyKey}, #{requestHash}, #{occurredAt}, #{createdAt})
             """)
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")

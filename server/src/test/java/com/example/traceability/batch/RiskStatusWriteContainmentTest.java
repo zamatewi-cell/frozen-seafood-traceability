@@ -251,15 +251,32 @@ class RiskStatusWriteContainmentTest {
     }
 
     @Test
-    @DisplayName("Java 来源类型与 V12 chk_brt_source_type 严格一致：PB1 只有 MANUAL")
-    void sourceTypesAlignedWithV12() throws IOException {
-        String v12 = Files.readString(MIGRATIONS.resolve("V12__batch_risk_transition.sql"), StandardCharsets.UTF_8);
-        Matcher m = Pattern.compile("chk_brt_source_type`\\s+CHECK\\s*\\(\\s*`source_type`\\s+IN\\s*\\(([^)]*)\\)").matcher(v12);
-        assertThat(m.find()).as("chk_brt_source_type located in V12").isTrue();
-        List<String> dbValues = Arrays.stream(m.group(1).split(","))
+    @DisplayName("Java 来源类型与最新迁移中的 chk_brt_source_type 严格一致（V12 MANUAL → V14 加入 ALERT）")
+    void sourceTypesAlignedWithLatestMigration() throws IOException {
+        Pattern check = Pattern.compile("chk_brt_source_type`\\s+CHECK\\s*\\(\\s*`source_type`\\s+IN\\s*\\(([^)]*)\\)");
+        Map<Integer, String> definitions = new java.util.TreeMap<>();
+        try (Stream<Path> files = Files.list(MIGRATIONS)) {
+            for (Path p : files.toList()) {
+                Matcher version = Pattern.compile("^V(\\d+)__.*\\.sql$").matcher(p.getFileName().toString());
+                if (!version.matches()) {
+                    continue;
+                }
+                Matcher m = check.matcher(Files.readString(p, StandardCharsets.UTF_8));
+                String last = null;
+                while (m.find()) {
+                    last = m.group(1);
+                }
+                if (last != null) {
+                    definitions.put(Integer.parseInt(version.group(1)), last);
+                }
+            }
+        }
+        assertThat(definitions).as("chk_brt_source_type defined in V12 and redefined in V14").containsKeys(12, 14);
+        String latest = definitions.values().stream().reduce((first, second) -> second).orElseThrow();
+        List<String> dbValues = Arrays.stream(latest.split(","))
                 .map(s -> s.trim().replace("'", ""))
                 .toList();
         List<String> javaValues = Arrays.stream(BatchRiskSourceType.values()).map(Enum::name).toList();
-        assertThat(javaValues).containsExactlyElementsOf(dbValues).containsExactly("MANUAL");
+        assertThat(javaValues).containsExactlyElementsOf(dbValues).containsExactly("MANUAL", "ALERT");
     }
 }

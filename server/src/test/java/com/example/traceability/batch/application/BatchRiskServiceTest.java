@@ -1,7 +1,7 @@
 package com.example.traceability.batch.application;
 
 import com.example.traceability.audit.application.AuditApplicationService;
-import com.example.traceability.batch.application.BatchRiskService.ManualAction;
+import com.example.traceability.batch.application.BatchRiskService.RiskAction;
 import com.example.traceability.batch.domain.Batch;
 import com.example.traceability.batch.domain.BatchRiskTransition;
 import com.example.traceability.batch.dto.BatchRiskTransitionRequest;
@@ -121,14 +121,14 @@ class BatchRiskServiceTest {
         verifyNoInteractions(auditService);
     }
 
-    private static BatchRiskTransition stored(ManualAction action, long batchId, String reason, long orgId) {
+    private static BatchRiskTransition stored(RiskAction action, long batchId, String reason, long orgId) {
         BatchRiskTransition t = new BatchRiskTransition();
         t.setId(6001L);
         t.setBatchId(batchId);
         t.setOrgId(orgId);
         t.setFlowStatus("ACTIVE");
-        t.setFromStatus(action == ManualAction.FREEZE ? "NORMAL" : "FROZEN");
-        t.setToStatus(action == ManualAction.FREEZE ? "FROZEN" : "NORMAL");
+        t.setFromStatus(action == RiskAction.FREEZE ? "NORMAL" : "FROZEN");
+        t.setToStatus(action == RiskAction.FREEZE ? "FROZEN" : "NORMAL");
         t.setSourceType("MANUAL");
         t.setActorUserId(QM_USER);
         t.setReason(reason);
@@ -225,7 +225,7 @@ class BatchRiskServiceTest {
                 "CLOSED, RECALLED, FREEZE,  409",
                 "CLOSED, RECALLED, RELEASE, 409"
         })
-        void matrix(String flow, String risk, ManualAction action, String expected) {
+        void matrix(String flow, String risk, RiskAction action, String expected) {
             batch = batch(flow, risk);
             if ("409".equals(expected)) {
                 assertThatThrownBy(() -> run(action))
@@ -240,8 +240,8 @@ class BatchRiskServiceTest {
             verify(riskStateMapper).transitionRiskStatus(eq(BATCH_ID), eq(PROCESSOR_ORG), eq(risk), eq(expected), eq(flow), any(), eq(QM_USER));
         }
 
-        private BatchRiskTransitionResponse run(ManualAction action) {
-            return action == ManualAction.FREEZE
+        private BatchRiskTransitionResponse run(RiskAction action) {
+            return action == RiskAction.FREEZE
                     ? service.freeze(BATCH_ID, req("抽检"), KEY, qm)
                     : service.release(BATCH_ID, req("复检合格"), KEY, qm);
         }
@@ -269,7 +269,7 @@ class BatchRiskServiceTest {
             assertThat(t.getActorUserId()).isEqualTo(QM_USER);
             assertThat(t.getReason()).isEqualTo("来料抽检异常，等待复检");
             assertThat(t.getIdempotencyKey()).isEqualTo(KEY);
-            assertThat(t.getRequestHash()).isEqualTo(BatchRiskService.computeRequestHash(ManualAction.FREEZE, BATCH_ID, "来料抽检异常，等待复检"));
+            assertThat(t.getRequestHash()).isEqualTo(BatchRiskService.computeRequestHash(RiskAction.FREEZE, BATCH_ID, "来料抽检异常，等待复检"));
             assertThat(t.getOccurredAt()).isAfter(before).isBeforeOrEqualTo(LocalDateTime.now(ZoneOffset.UTC));
             assertThat(t.getOccurredAt().getNano() % 1000).as("microsecond precision").isZero();
 
@@ -319,7 +319,7 @@ class BatchRiskServiceTest {
             batch = batch("ACTIVE", "NORMAL");
             batch.setOrgId(RETAILER_ORG);
             when(transitionMapper.selectByOrgIdAndIdempotencyKey(PROCESSOR_ORG, KEY))
-                    .thenReturn(stored(ManualAction.FREEZE, BATCH_ID, "抽检", PROCESSOR_ORG));
+                    .thenReturn(stored(RiskAction.FREEZE, BATCH_ID, "抽检", PROCESSOR_ORG));
             BatchRiskTransitionResponse r = service.freeze(BATCH_ID, req(" 抽检 "), KEY, qm);
             assertThat(r.id()).isEqualTo(6001L);
             assertThat(r.toStatus()).isEqualTo("FROZEN");
@@ -331,7 +331,7 @@ class BatchRiskServiceTest {
         @DisplayName("同键不同语义（原因不同 / 冻结键用于解除 / 同键不同批次）→ 409 IDEMPOTENCY_CONFLICT")
         void conflicts() {
             when(transitionMapper.selectByOrgIdAndIdempotencyKey(PROCESSOR_ORG, KEY))
-                    .thenReturn(stored(ManualAction.FREEZE, BATCH_ID, "抽检", PROCESSOR_ORG));
+                    .thenReturn(stored(RiskAction.FREEZE, BATCH_ID, "抽检", PROCESSOR_ORG));
             assertThatThrownBy(() -> service.freeze(BATCH_ID, req("另一个原因"), KEY, qm))
                     .satisfies(ex -> assertBusiness(ex, HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT"));
             assertThatThrownBy(() -> service.release(BATCH_ID, req("抽检"), KEY, qm))
@@ -346,7 +346,7 @@ class BatchRiskServiceTest {
         void lockedReRead() {
             when(transitionMapper.selectByOrgIdAndIdempotencyKey(PROCESSOR_ORG, KEY))
                     .thenReturn(null)
-                    .thenReturn(stored(ManualAction.FREEZE, BATCH_ID, "抽检", PROCESSOR_ORG));
+                    .thenReturn(stored(RiskAction.FREEZE, BATCH_ID, "抽检", PROCESSOR_ORG));
             BatchRiskTransitionResponse r = service.freeze(BATCH_ID, req("抽检"), KEY, qm);
             assertThat(r.id()).isEqualTo(6001L);
             verify(batchMapper).selectByIdIgnoreTenantForUpdate(BATCH_ID);
@@ -358,12 +358,12 @@ class BatchRiskServiceTest {
         void duplicateKeyOnInsert() {
             when(transitionMapper.insert(any(BatchRiskTransition.class))).thenThrow(new DuplicateKeyException("uk_brt_org_idempotency"));
             when(transitionMapper.selectByOrgIdAndIdempotencyKeyForUpdate(PROCESSOR_ORG, KEY))
-                    .thenReturn(stored(ManualAction.FREEZE, 3001L, "抽检", PROCESSOR_ORG));
+                    .thenReturn(stored(RiskAction.FREEZE, 3001L, "抽检", PROCESSOR_ORG));
             assertThatThrownBy(() -> service.freeze(BATCH_ID, req("抽检"), KEY, qm))
                     .satisfies(ex -> assertBusiness(ex, HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT"));
 
             when(transitionMapper.selectByOrgIdAndIdempotencyKeyForUpdate(PROCESSOR_ORG, KEY))
-                    .thenReturn(stored(ManualAction.FREEZE, BATCH_ID, "抽检", PROCESSOR_ORG));
+                    .thenReturn(stored(RiskAction.FREEZE, BATCH_ID, "抽检", PROCESSOR_ORG));
             BatchRiskTransitionResponse r = service.freeze(BATCH_ID, req("抽检"), KEY, qm);
             assertThat(r.id()).isEqualTo(6001L);
             verify(riskStateMapper, never()).transitionRiskStatus(anyLong(), anyLong(), anyString(), anyString(), anyString(), any(), any());
@@ -384,11 +384,11 @@ class BatchRiskServiceTest {
         @Test
         @DisplayName("请求哈希：区分动作、批次与原因；原因去除首尾空白后参与哈希")
         void hash() {
-            String h = BatchRiskService.computeRequestHash(ManualAction.FREEZE, BATCH_ID, "抽检");
+            String h = BatchRiskService.computeRequestHash(RiskAction.FREEZE, BATCH_ID, "抽检");
             assertThat(h).hasSize(64).matches("[0-9a-f]{64}");
-            assertThat(BatchRiskService.computeRequestHash(ManualAction.RELEASE, BATCH_ID, "抽检")).isNotEqualTo(h);
-            assertThat(BatchRiskService.computeRequestHash(ManualAction.FREEZE, 3001L, "抽检")).isNotEqualTo(h);
-            assertThat(BatchRiskService.computeRequestHash(ManualAction.FREEZE, BATCH_ID, "抽检2")).isNotEqualTo(h);
+            assertThat(BatchRiskService.computeRequestHash(RiskAction.RELEASE, BATCH_ID, "抽检")).isNotEqualTo(h);
+            assertThat(BatchRiskService.computeRequestHash(RiskAction.FREEZE, 3001L, "抽检")).isNotEqualTo(h);
+            assertThat(BatchRiskService.computeRequestHash(RiskAction.FREEZE, BATCH_ID, "抽检2")).isNotEqualTo(h);
             service.freeze(BATCH_ID, req("\t抽检  "), KEY, qm);
             ArgumentCaptor<BatchRiskTransition> row = ArgumentCaptor.forClass(BatchRiskTransition.class);
             verify(transitionMapper).insert(row.capture());
@@ -402,10 +402,10 @@ class BatchRiskServiceTest {
 
         @BeforeEach
         void rows() {
-            BatchRiskTransition a = stored(ManualAction.FREEZE, BATCH_ID, "加工企业冻结", PROCESSOR_ORG);
-            BatchRiskTransition b = stored(ManualAction.RELEASE, BATCH_ID, "加工企业解除", PROCESSOR_ORG);
+            BatchRiskTransition a = stored(RiskAction.FREEZE, BATCH_ID, "加工企业冻结", PROCESSOR_ORG);
+            BatchRiskTransition b = stored(RiskAction.RELEASE, BATCH_ID, "加工企业解除", PROCESSOR_ORG);
             b.setId(6002L);
-            BatchRiskTransition c = stored(ManualAction.FREEZE, BATCH_ID, "零售企业冻结", RETAILER_ORG);
+            BatchRiskTransition c = stored(RiskAction.FREEZE, BATCH_ID, "零售企业冻结", RETAILER_ORG);
             c.setId(6003L);
             when(transitionMapper.selectByBatchId(BATCH_ID)).thenReturn(List.of(a, b, c));
             when(transitionMapper.selectByBatchIdAndOrgId(BATCH_ID, PROCESSOR_ORG)).thenReturn(List.of(a, b));
