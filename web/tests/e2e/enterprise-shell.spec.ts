@@ -50,6 +50,8 @@ async function installFakeAuthBackend(page: Page, currentUser: typeof user = use
   })
   // PB1 风险状态面板：未单独声明时，批次详情的风险转换历史为空
   await page.route('**/api/v1/batches/*/risk-transitions', (route) => json(route, 200, { data: [], meta }))
+  // PB4：批次详情的检验报告面板（当前责任组织可见）
+  await page.route('**/api/v1/batches/*/inspection-reports', (route) => json(route, 200, { data: [], meta }))
   return state
 }
 

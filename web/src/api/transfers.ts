@@ -61,6 +61,25 @@ export function acceptTransfer(transferId: number, payload: AcceptTransferPayloa
   })
 }
 
+/** 隔离收货（PB4）：实收数量、差异原因（数量不一致时必填）、隔离场所（本组织启用场所）与原因。 */
+export interface QuarantineTransferPayload {
+  receivedQuantity: number
+  unitCode: string
+  occurredAt: string
+  differenceReason?: string
+  quarantineSiteId: number
+  reason: string
+  expectedVersion: number
+}
+
+export function quarantineTransfer(transferId: number, payload: QuarantineTransferPayload, idempotencyKey: string): Promise<Transfer> {
+  return apiRequest<Transfer>(path(transferId, '/quarantine'), {
+    method: 'POST',
+    body: payload,
+    headers: { 'Idempotency-Key': idempotencyKey }
+  })
+}
+
 export interface RejectTransferPayload {
   reason: string
   occurredAt: string

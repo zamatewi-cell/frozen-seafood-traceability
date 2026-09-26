@@ -53,6 +53,8 @@ async function installBackend(page: Page, user: typeof qm) {
   await page.route('**/api/v1/alerts?*', (route) => json(route, 200, { data: [{ ...current, batches: undefined, actions: undefined }], meta }))
   await page.route('**/api/v1/alerts', (route) => json(route, 200, { data: [{ ...current, batches: undefined, actions: undefined }], meta }))
   await page.route('**/api/v1/alerts/5001', (route) => json(route, 200, { data: current, meta }))
+  // PB4：确认后告警详情按批次展示检验证据
+  await page.route('**/api/v1/batches/21/inspection-reports', (route) => json(route, 200, { data: [], meta }))
   await page.route('**/api/v1/alerts/5001/acknowledge', (route) => {
     const body = route.request().postDataJSON() as Record<string, unknown>
     posts.push({ headers: route.request().headers(), body })

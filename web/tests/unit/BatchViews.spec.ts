@@ -46,6 +46,7 @@ function backend(overrides: Overrides = {}) {
     'GET /api/v1/batch-operations': () => ({ status: 200, body: envelope([], { number: 1, size: 20, totalElements: 0, totalPages: 0 }) }),
     'GET /api/v1/batches/12/public-trace-code': () => problem(404, 'PUBLIC_TRACE_CODE_NOT_FOUND', '该批次尚未激活公开追溯码'),
     'GET /api/v1/batches/12/risk-transitions': () => ({ status: 200, body: envelope([]) }),
+    'GET /api/v1/batches/12/inspection-reports': () => ({ status: 200, body: envelope([]) }),
     ...overrides
   })
 }

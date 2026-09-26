@@ -32,3 +32,21 @@ export function acknowledgeAlert(alertId: number, note: string | undefined, idem
     headers: { 'Idempotency-Key': idempotencyKey }
   })
 }
+
+/** PB4：依据关联本告警的最新检验结论（PASS）放行受影响批次（FROZEN → NORMAL）。 */
+export function releaseAlertBatch(alertId: number, batchId: number, note: string | undefined, idempotencyKey: string): Promise<Alert> {
+  return apiRequest<Alert>(`${one(alertId)}/batches/${encodeURIComponent(String(batchId))}/release`, {
+    method: 'POST',
+    body: note ? { note } : {},
+    headers: { 'Idempotency-Key': idempotencyKey }
+  })
+}
+
+/** PB4：全部受影响批次已放行或已进入召回后形成处置结论（ACKNOWLEDGED → RESOLVED）。 */
+export function resolveAlert(alertId: number, resolution: string, idempotencyKey: string): Promise<Alert> {
+  return apiRequest<Alert>(`${one(alertId)}/resolve`, {
+    method: 'POST',
+    body: { resolution },
+    headers: { 'Idempotency-Key': idempotencyKey }
+  })
+}

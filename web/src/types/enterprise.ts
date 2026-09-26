@@ -214,7 +214,8 @@ export interface SiteSummary {
   status: string
 }
 
-export type TransferStatus = 'DRAFT' | 'PENDING' | 'ACCEPTED' | 'REJECTED'
+/** QUARANTINED（PB4）：货物已到达并隔离，责任组织仍为发送方，依据质量结论接受或拒收。 */
+export type TransferStatus = 'DRAFT' | 'PENDING' | 'QUARANTINED' | 'ACCEPTED' | 'REJECTED'
 export type ShipmentStatus = 'PLANNED' | 'IN_TRANSIT' | 'DELIVERED' | 'CANCELLED'
 
 export const SHIPMENT_STATUSES: readonly ShipmentStatus[] = ['PLANNED', 'IN_TRANSIT', 'DELIVERED', 'CANCELLED']
@@ -244,6 +245,14 @@ export interface Transfer {
   receivedQuantity?: number
   differenceReason?: string
   rejectionReason?: string
+  /** 隔离收货事实（PB4：QUARANTINED 及其后续决定保留）。 */
+  quarantineSiteId?: number
+  quarantineReason?: string
+  quarantinedRecordedAt?: string
+  quarantinedBy?: number
+  /** 批次当前流转 / 风险状态（接收方据此判断冻结批次不能直接接受）。 */
+  batchFlowStatus?: BatchFlowStatus
+  batchRiskStatus?: BatchRiskStatus
   version: number
   createdAt: string
   updatedAt: string
@@ -437,13 +446,21 @@ export interface AlertAffectedBatch {
   currentRiskStatus: BatchRiskStatus
   quantity: number
   unitCode: string
+  /** PB4：是否已依据检验结论放行、关联本告警的最新检验结论与报告数。 */
+  released: boolean
+  releaseTransitionId?: number
+  latestInspectionConclusion?: InspectionConclusion
+  inspectionCount: number
 }
 
 /** 告警处置动作（追加式历史）。 */
 export interface AlertActionItem {
   id: number
-  action: 'ACKNOWLEDGE' | string
+  action: 'ACKNOWLEDGE' | 'RELEASE_BATCH' | 'RESOLVE' | string
   orgId: number
+  batchId?: number
+  riskTransitionId?: number
+  inspectionReportId?: number
   actorUserId: number
   note?: string
   occurredAt: string
@@ -482,4 +499,26 @@ export interface Alert {
   version: number
   batches?: AlertAffectedBatch[]
   actions?: AlertActionItem[]
+}
+
+/** 检验结论（PB4）：报告只是证据，不自动放行、冻结或召回。 */
+export type InspectionConclusion = 'PASS' | 'FAIL'
+/** 提交身份：批次当前责任组织，或该批次隔离交接的接收方（隔离期间只有证据提交权限）。 */
+export type InspectionSubmitterRole = 'CURRENT_ORG' | 'QUARANTINE_RECEIVER'
+
+export interface InspectionReport {
+  id: number
+  batchId: number
+  orgId: number
+  submitterRole: InspectionSubmitterRole
+  transferId?: number
+  alertId?: number
+  reportNo: string
+  institutionName: string
+  inspectedAt: string
+  itemsSummary: string
+  conclusion: InspectionConclusion
+  dataSource: 'MANUAL' | 'SIMULATED'
+  actorUserId: number
+  recordedAt: string
 }

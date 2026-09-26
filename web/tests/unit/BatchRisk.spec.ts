@@ -58,6 +58,7 @@ function backend(options: { user?: Json; batch?: Json; history?: Json[]; overrid
     'GET /api/v1/batches/21/sales': () => ({ status: 200, body: envelope([]) }),
     'GET /api/v1/batches/21/public-trace-code': () => problem(404, 'PUBLIC_TRACE_CODE_NOT_FOUND', '该批次尚未激活公开追溯码'),
     'GET /api/v1/batches/21/risk-transitions': () => ({ status: 200, body: envelope(state.history) }),
+    'GET /api/v1/batches/21/inspection-reports': () => ({ status: 200, body: envelope([]) }),
     'GET /api/v1/products/5': () => ({ status: 200, body: envelope({ id: 5, productCode: 'P', publicName: '冷冻大黄鱼', category: 'FISH', specification: '500g', sourceType: 'DOMESTIC_CAPTURE', baseUnitCode: 'kg', status: 'ACTIVE', version: 0 }) }),
     'GET /api/v1/organizations/30': () => ({ status: 200, body: envelope({ id: 30, orgNo: 'ORG_PROC_01', name: '东海水产加工有限公司', orgType: 'PROCESSOR', status: 'ACTIVE' }) }),
     'GET /api/v1/transfers': () => ({ status: 200, body: envelope([], { number: 1, size: 20, totalElements: 0, totalPages: 0 }) }),

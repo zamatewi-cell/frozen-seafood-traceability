@@ -2,12 +2,13 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
-import { acknowledgeAlert, getAlert } from '@/api/alerts'
+import InspectionReportPanel from '@/components/enterprise/InspectionReportPanel.vue'
+import { acknowledgeAlert, getAlert, releaseAlertBatch, resolveAlert } from '@/api/alerts'
 import { ApiError } from '@/api/client'
 import { useIdempotentWrite } from '@/composables/useIdempotentWrite'
 import { useDirectoryLabels } from '@/composables/useDirectoryLabels'
 import { useSession } from '@/stores/session'
-import type { Alert } from '@/types/enterprise'
+import type { Alert, AlertAffectedBatch } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import {
   formatAlertAction,
@@ -15,17 +16,20 @@ import {
   formatAlertType,
   formatDurationSeconds,
   formatFlowStatus,
+  formatInspectionConclusion,
   formatIsoDateTime,
   formatQuantity,
   formatRiskStatus,
   formatTemperature,
   formatTransferStatus
 } from '@/utils/formatters'
-import { canAcknowledgeAlert, canHandleAlert } from '@/utils/permissions'
+import { canAcknowledgeAlert, canHandleAlert, canReleaseAlertBatch, canResolveAlert, canSubmitInspection } from '@/utils/permissions'
 
 /**
- * 告警详情（Phase B PB3 起；统一业务契约 v1.1 §2.11 / §10.2 / §13）：持续超温片段与判定依据快照、受影响批次（自动冻结结果与当前状态）、
- * 处置历史；告警归属组织的质量管理员确认异常。告警与冻结是教学实训中的模拟质量处置，不代表真实监管措施。服务端是最终权限边界。
+ * 告警详情（Phase B PB3 / PB4；统一业务契约 v1.1 §2.11 / §10.2 / §10.3 / §13）：持续超温片段与判定依据快照、受影响批次
+ * （自动冻结结果与当前状态）、处置历史；告警归属组织的质量管理员确认异常、依据关联本告警的最新检验结论放行受影响批次、
+ * 全部批次处置后形成处置结论；当前责任组织与隔离收货方的质量管理员按批次提交检验证据。
+ * 告警、冻结与放行是教学实训中的模拟质量处置，不代表真实监管措施。服务端是最终权限边界。
  */
 const props = defineProps<{ id: string }>()
 
@@ -48,6 +52,35 @@ const NOTE_MAX = 500
 
 const handler = computed(() => canHandleAlert(user.value, alert.value))
 const canAck = computed(() => canAcknowledgeAlert(user.value, alert.value))
+const canResolve = computed(() => canResolveAlert(user.value, alert.value))
+
+/** 放行（按批次）与处置结论的二次确认表单。 */
+const releasing = ref<number | null>(null)
+const releaseConfirming = ref(false)
+const releaseNote = ref('')
+const resolveOpen = ref(false)
+const resolveConfirming = ref(false)
+const resolution = ref('')
+
+function canRelease(b: AlertAffectedBatch): boolean {
+  return canReleaseAlertBatch(user.value, alert.value, b)
+}
+
+/** 批次的质量处置进展（由服务端返回的事实推导）。 */
+function dispositionOf(b: AlertAffectedBatch): string {
+  if (b.currentRiskStatus === 'RECALLED') return '已进入模拟召回'
+  if (b.released) return '已依据检验结论放行'
+  if (b.latestInspectionConclusion === 'FAIL') return '最新检验不合格：可拒收或发起模拟召回'
+  if (b.latestInspectionConclusion === 'PASS') return '最新检验合格：可放行'
+  return '待提交检验证据'
+}
+
+/** 当前账号能否为该批次提交检验证据（当前责任组织，或隔离收货方）。 */
+function canInspect(b: AlertAffectedBatch): boolean {
+  const a = alert.value
+  if (!a || a.status === 'RESOLVED') return false
+  return canSubmitInspection(user.value, b.currentOrgId, b.transferStatus === 'QUARANTINED' ? a.receiverOrgId : null)
+}
 const isOwner = computed(() => Boolean(alert.value && user.value && alert.value.orgId === user.value.orgId))
 
 /** 下一步提示（完全由服务端返回的状态推导）。 */
@@ -60,9 +93,10 @@ const nextStep = computed<string | null>(() => {
         ? '请核对持续超温依据与受影响批次后“确认异常”，确认人即处置负责人。'
         : '等待发货方质量管理员确认异常；受影响批次已冻结，接收方不能接受冻结批次。'
     case 'ACKNOWLEDGED':
+      if (canResolve.value) return '全部受影响批次已放行或已进入召回：请填写处置结论。'
       return isOwner.value
-        ? '异常已确认：请组织检验调查，依据质量结论处置受影响批次。'
-        : '发货方质量管理员已确认异常并负责调查处置。'
+        ? '异常已确认：请为受影响批次提交检验证据；最新检验合格的批次可放行，不合格的可由接收方拒收或发起模拟召回。'
+        : '发货方质量管理员已确认异常并负责调查处置；隔离收货方可以为隔离批次提交检验证据。'
     case 'RESOLVED':
       return '告警已形成处置结论。'
     default:
@@ -147,10 +181,95 @@ async function submitAck() {
   }
 }
 
+function openRelease(b: AlertAffectedBatch) {
+  releasing.value = b.batchId
+  releaseConfirming.value = false
+  releaseNote.value = ''
+  actionError.value = ''
+}
+
+function closeRelease() {
+  releasing.value = null
+  releaseConfirming.value = false
+}
+
+async function submitRelease(b: AlertAffectedBatch) {
+  const a = alert.value
+  if (!a || busy.value) return
+  const note = releaseNote.value.trim()
+  if (note.length > NOTE_MAX) {
+    actionError.value = `说明不能超过 ${NOTE_MAX} 个字符`
+    return
+  }
+  busy.value = true
+  actionError.value = ''
+  flash.value = null
+  try {
+    alert.value = await writer.run(
+      `alert-release:${a.id}:${b.batchId}:${note}`,
+      () => note || undefined,
+      (payload, key) => releaseAlertBatch(a.id, b.batchId, payload, key)
+    )
+    closeRelease()
+    flash.value = { tone: 'success', message: `批次 ${b.traceBatchNo} 已依据检验结论放行，风险状态恢复正常；接收方可以接受隔离中的交接。` }
+  } catch (err: unknown) {
+    if (err instanceof ApiError && err.status === 401) return
+    const message = describeWriteError(err, '放行批次')
+    closeRelease()
+    if (err instanceof ApiError && err.status === 409) {
+      flash.value = { tone: 'warning', message }
+      await load()
+    } else {
+      actionError.value = message
+    }
+  } finally {
+    busy.value = false
+  }
+}
+
+async function submitResolve() {
+  const a = alert.value
+  if (!a || busy.value) return
+  const text = resolution.value.trim()
+  if (!text || text.length > NOTE_MAX) {
+    actionError.value = !text ? '请填写处置结论' : `处置结论不能超过 ${NOTE_MAX} 个字符`
+    resolveConfirming.value = false
+    return
+  }
+  busy.value = true
+  actionError.value = ''
+  flash.value = null
+  try {
+    alert.value = await writer.run(
+      `alert-resolve:${a.id}:${a.version}:${text}`,
+      () => text,
+      (payload, key) => resolveAlert(a.id, payload, key)
+    )
+    resolveOpen.value = false
+    resolveConfirming.value = false
+    flash.value = { tone: 'success', message: '已形成处置结论，告警处置完毕。' }
+  } catch (err: unknown) {
+    if (err instanceof ApiError && err.status === 401) return
+    const message = describeWriteError(err, '形成处置结论')
+    resolveConfirming.value = false
+    if (err instanceof ApiError && err.status === 409) {
+      resolveOpen.value = false
+      flash.value = { tone: 'warning', message }
+      await load()
+    } else {
+      actionError.value = message
+    }
+  } finally {
+    busy.value = false
+  }
+}
+
 watch(() => props.id, () => {
   flash.value = null
   actionError.value = ''
   closeAck()
+  closeRelease()
+  resolveOpen.value = false
   load()
 }, { immediate: true })
 onBeforeUnmount(() => controller?.abort())
@@ -218,7 +337,7 @@ onBeforeUnmount(() => controller?.abort())
         <div class="ent-table-scroll">
           <table class="ent-table">
             <thead>
-              <tr><th>追溯批次号</th><th>交接</th><th>数量</th><th>告警时风险状态</th><th>自动冻结</th><th>当前状态</th></tr>
+              <tr><th>追溯批次号</th><th>交接</th><th>数量</th><th>告警时风险状态</th><th>自动冻结</th><th>当前状态</th><th>质量处置</th></tr>
             </thead>
             <tbody>
               <tr
@@ -243,10 +362,86 @@ onBeforeUnmount(() => controller?.abort())
                   <StatusBadge :info="formatRiskStatus(b.currentRiskStatus)" dimension="风险" data-testid="alert-batch-risk" />
                   <StatusBadge :info="formatFlowStatus(b.currentFlowStatus)" dimension="流转" />
                 </td>
+                <td data-testid="alert-batch-disposition">{{ dispositionOf(b) }}</td>
               </tr>
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section v-if="alert.status !== 'OPEN'" class="ent-card" aria-labelledby="alert-quality-title" data-testid="alert-quality">
+        <h2 id="alert-quality-title" class="ent-card-title">检验证据与质量结论（按批次）</h2>
+        <div
+          v-for="b in alert.batches ?? []"
+          :key="b.batchId"
+          class="quality-block"
+          data-testid="alert-quality-batch"
+          :data-batch-id="b.batchId"
+        >
+          <div class="quality-head">
+            <strong class="mono">{{ b.traceBatchNo }}</strong>
+            <StatusBadge :info="formatInspectionConclusion(b.latestInspectionConclusion)" dimension="检验" data-testid="alert-batch-inspection" />
+            <span class="ent-muted">{{ dispositionOf(b) }}</span>
+          </div>
+          <InspectionReportPanel
+            :batch-id="b.batchId"
+            :alert-id="alert.id"
+            :can-submit="canInspect(b)"
+            only-alert
+            @submitted="load"
+          />
+          <div v-if="canRelease(b) && releasing !== b.batchId" class="ent-actions">
+            <button type="button" class="ent-button ent-primary" :data-testid="`alert-release-open-${b.batchId}`" @click="openRelease(b)">
+              依据检验结论放行
+            </button>
+          </div>
+          <div v-if="releasing === b.batchId" class="release-form" :data-testid="`alert-release-form-${b.batchId}`">
+            <label class="ent-field">
+              <span>放行说明（可选）</span>
+              <input v-model="releaseNote" :maxlength="NOTE_MAX" :disabled="releaseConfirming" data-testid="field-alert-release-note" />
+            </label>
+            <div v-if="!releaseConfirming" class="ent-actions">
+              <button type="button" class="ent-button ent-primary" data-testid="alert-release-next" @click="releaseConfirming = true">下一步：确认</button>
+              <button type="button" class="ent-button" data-testid="alert-release-cancel" @click="closeRelease">取消</button>
+            </div>
+            <div v-else class="ent-flash warning" role="alert" data-testid="alert-release-confirm-panel">
+              确认依据关联本告警的最新合格检验结论放行批次 {{ b.traceBatchNo }}？批次风险状态恢复为正常，数量、责任组织与流转状态不变；
+              交接保持原状态，由接收方随后决定接受。
+              <div class="ent-actions">
+                <button type="button" class="ent-button ent-primary" :disabled="busy" data-testid="alert-release-confirm" @click="submitRelease(b)">
+                  {{ busy ? '提交中…' : '确认放行' }}
+                </button>
+                <button type="button" class="ent-button" :disabled="busy" data-testid="alert-release-back" @click="releaseConfirming = false">返回修改</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="canResolve" class="resolve-block" data-testid="alert-resolve">
+          <div v-if="!resolveOpen" class="ent-actions">
+            <button type="button" class="ent-button ent-primary" data-testid="alert-resolve-open" @click="resolveOpen = true">形成处置结论</button>
+          </div>
+          <form v-else novalidate data-testid="alert-resolve-form" @submit.prevent="resolveConfirming = true">
+            <label class="ent-field">
+              <span>处置结论 <em>*</em></span>
+              <textarea v-model="resolution" rows="2" :maxlength="NOTE_MAX" :disabled="resolveConfirming" data-testid="field-alert-resolution" />
+            </label>
+            <div v-if="!resolveConfirming" class="ent-actions">
+              <button type="submit" class="ent-button ent-primary" data-testid="alert-resolve-next">下一步：确认</button>
+              <button type="button" class="ent-button" data-testid="alert-resolve-cancel" @click="resolveOpen = false">取消</button>
+            </div>
+            <div v-else class="ent-flash warning" role="alert" data-testid="alert-resolve-confirm-panel">
+              确认形成处置结论？告警将标记为已处置，之后不能再关联新的检验证据；批次状态不因此改变。
+              <div class="ent-actions">
+                <button type="button" class="ent-button ent-primary" :disabled="busy" data-testid="alert-resolve-confirm" @click="submitResolve">
+                  {{ busy ? '提交中…' : '确认处置结论' }}
+                </button>
+                <button type="button" class="ent-button" :disabled="busy" data-testid="alert-resolve-back" @click="resolveConfirming = false">返回修改</button>
+              </div>
+            </div>
+          </form>
+        </div>
+        <p v-if="alert.resolution" data-testid="alert-resolution"><strong>处置结论：</strong>{{ alert.resolution }}</p>
       </section>
 
       <section v-if="canAck" class="ent-card" aria-labelledby="alert-actions-title" data-testid="alert-actions">
@@ -311,5 +506,24 @@ onBeforeUnmount(() => controller?.abort())
 }
 .alert-history li strong {
   margin-right: 8px;
+}
+.quality-block {
+  border-top: 1px solid var(--color-border, #e2e8f0);
+  padding: 12px 0;
+}
+.quality-block:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.quality-head {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.release-form,
+.resolve-block {
+  margin-top: 8px;
 }
 </style>

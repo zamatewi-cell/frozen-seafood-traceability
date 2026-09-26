@@ -229,6 +229,8 @@ export function formatTransferStatus(status: string | null | undefined): StatusB
       return { label: '草稿', tone: 'neutral', description: '尚未提交；提交前必须绑定计划中的运输任务' }
     case 'PENDING':
       return { label: '待接收', tone: 'warning', description: '已提交，等待运输任务到达后由接收方接受或拒收；责任组织仍为发送方' }
+    case 'QUARANTINED':
+      return { label: '隔离收货', tone: 'danger', description: '货物已到达并隔离，责任组织仍为发送方；依据质量结论接受或拒收' }
     case 'ACCEPTED':
       return { label: '已接受', tone: 'success', description: '接收方已接受，批次当前责任组织已转为接收方' }
     case 'REJECTED':
@@ -431,7 +433,9 @@ export function formatAlertStatus(status: string | null | undefined): StatusBadg
 /** 告警处置动作。 */
 export function formatAlertAction(action: string | null | undefined): string {
   const map: Record<string, string> = {
-    ACKNOWLEDGE: '确认异常'
+    ACKNOWLEDGE: '确认异常',
+    RELEASE_BATCH: '依据检验结论放行批次',
+    RESOLVE: '形成处置结论'
   }
   return (action && map[action]) || '处置动作'
 }
@@ -446,4 +450,21 @@ export function formatDurationSeconds(seconds: number | null | undefined): strin
   const s = total % 60
   if (h === 0 && s === 0) return `${m} 分钟`
   return [h ? `${h} 小时` : '', m ? `${m} 分` : '', s ? `${s} 秒` : ''].filter(Boolean).join(' ')
+}
+
+/** 检验结论（PB4）：合格 / 不合格只是证据，不代表真实检测机构或监管结论。 */
+export function formatInspectionConclusion(conclusion: string | null | undefined): StatusBadgeInfo {
+  switch (conclusion) {
+    case 'PASS':
+      return { label: '检验合格', tone: 'success', description: '检验报告结论为合格（教学演示证据）' }
+    case 'FAIL':
+      return { label: '检验不合格', tone: 'danger', description: '检验报告结论为不合格（教学演示证据）' }
+    default:
+      return { label: '暂无检验结论', tone: 'neutral', description: '尚无关联的检验报告' }
+  }
+}
+
+/** 检验报告提交身份。 */
+export function formatInspectionSubmitter(role: string | null | undefined): string {
+  return role === 'QUARANTINE_RECEIVER' ? '隔离收货方提交' : role === 'CURRENT_ORG' ? '当前责任组织提交' : '提交方'
 }

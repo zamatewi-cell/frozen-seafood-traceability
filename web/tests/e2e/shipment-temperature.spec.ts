@@ -44,6 +44,8 @@ async function installBackend(page: Page, user: typeof carrier, records: unknown
     return json(route, 200, { data: user, meta })
   })
   await page.route('**/api/v1/shipments/601', (route) => json(route, 200, { data: shipment(), meta }))
+  // PB3：运输任务页同时查询该运输任务的持续超温告警（本用例的单点不形成告警）
+  await page.route('**/api/v1/alerts?*', (route) => json(route, 200, { data: [], meta }))
   await page.route('**/api/v1/shipments/601/temperature-records', (route) => {
     if (route.request().method() === 'GET') return json(route, 200, { data: records, meta })
     const body = route.request().postDataJSON() as Record<string, unknown>
