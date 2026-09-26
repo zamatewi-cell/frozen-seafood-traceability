@@ -37,6 +37,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -250,6 +251,54 @@ class ShipmentApplicationServiceTest {
     }
 
     @Test
+    @DisplayName("绑定（PB2 Demo MVP 限制）：批次产品与装载清单已有批次不同时 422 SHIPMENT_PRODUCT_MISMATCH，不绑定、不递增版本")
+    void bind_rejectsDifferentProductOnManifest() {
+        when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.PLANNED));
+        when(transferMapper.selectByIdForUpdate(5021L)).thenReturn(transfer(5021L, 1021L, TransferStatus.DRAFT));
+        Transfer loaded = transfer(5020L, 1020L, TransferStatus.DRAFT);
+        loaded.setShipmentId(SHIPMENT_ID);
+        when(transferMapper.selectByShipmentId(SHIPMENT_ID)).thenReturn(List.of(loaded));
+        Batch onManifest = batch(1020L);
+        onManifest.setProductId(7L);
+        Batch incoming = batch(1021L);
+        incoming.setProductId(8L);
+        when(batchMapper.selectByIdForUpdate(1021L)).thenReturn(incoming);
+        when(batchMapper.selectByIdsIgnoreTenant(any())).thenReturn(List.of(onManifest));
+
+        assertThatThrownBy(() -> service.bindTransfer(SHIPMENT_ID, new ShipmentBindTransferRequest(5021L, 0L), "idem-bind-000000021", sender))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(e -> {
+                    BusinessException be = (BusinessException) e;
+                    assertThat(be.getCode()).isEqualTo("SHIPMENT_PRODUCT_MISMATCH");
+                    assertThat(be.getStatus().value()).isEqualTo(422);
+                });
+        verify(transferMapper, never()).bindShipment(anyLong(), anyLong(), anyLong(), anyLong());
+        verify(shipmentMapper, never()).bumpManifestVersion(anyLong(), anyLong());
+    }
+
+    @Test
+    @DisplayName("绑定（PB2 Demo MVP 限制）：同一产品的第二个批次可以装载同一运输任务")
+    void bind_allowsSameProductOnManifest() {
+        when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.PLANNED));
+        when(transferMapper.selectByIdForUpdate(5023L)).thenReturn(transfer(5023L, 1023L, TransferStatus.DRAFT));
+        Transfer loaded = transfer(5022L, 1022L, TransferStatus.DRAFT);
+        loaded.setShipmentId(SHIPMENT_ID);
+        when(transferMapper.selectByShipmentId(SHIPMENT_ID)).thenReturn(List.of(loaded));
+        Batch onManifest = batch(1022L);
+        onManifest.setProductId(7L);
+        Batch incoming = batch(1023L);
+        incoming.setProductId(7L);
+        when(batchMapper.selectByIdForUpdate(1023L)).thenReturn(incoming);
+        when(batchMapper.selectByIdsIgnoreTenant(any())).thenReturn(List.of(onManifest));
+        when(transferMapper.bindShipment(5023L, SHIPMENT_ID, 0L, 101L)).thenReturn(1);
+        when(shipmentMapper.bumpManifestVersion(SHIPMENT_ID, 101L)).thenReturn(1);
+
+        service.bindTransfer(SHIPMENT_ID, new ShipmentBindTransferRequest(5023L, 0L), "idem-bind-000000023", sender);
+
+        verify(transferMapper).bindShipment(5023L, SHIPMENT_ID, 0L, 101L);
+    }
+
+    @Test
     @DisplayName("绑定：非 PLANNED 运输任务禁止变更装载清单，且不会锁交接")
     void bind_afterDispatch_rejected() {
         when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.IN_TRANSIT));
@@ -320,6 +369,45 @@ class ShipmentApplicationServiceTest {
         verify(traceEventService).appendShipmentArrivalEvent(any(), eq(1009L), eq("TB-1009"), eq(5009L), eq(301L), any());
         verify(transferMapper, never()).updateByIdAndVersion(any(), any(), any(), any(), any());
         verify(batchMapper, never()).updateOrgIdByIdAndVersion(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("到达（PB2）：到达时间早于最新在途温度测量时间时 422 INVALID_BUSINESS_TIME；先锁运输任务再当前读，不更新、不生成事件")
+    void arrive_rejectsUnloadedBeforeLatestTemperatureMeasurement() {
+        LocalDateTime latest = LocalDateTime.now(ZoneOffset.UTC).minusMinutes(10).truncatedTo(ChronoUnit.SECONDS);
+        when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.IN_TRANSIT));
+        when(shipmentMapper.selectLatestTemperatureMeasuredAtForShare(SHIPMENT_ID)).thenReturn(latest);
+
+        assertThatThrownBy(() -> service.arriveShipment(SHIPMENT_ID,
+                new ShipmentArriveRequest(latest.minusNanos(1_000_000).atOffset(ZoneOffset.UTC), 3L), "idem-arrive-00000010", carrier))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(e -> {
+                    BusinessException be = (BusinessException) e;
+                    assertThat(be.getCode()).isEqualTo("INVALID_BUSINESS_TIME");
+                    assertThat(be.getStatus().value()).isEqualTo(422);
+                });
+
+        InOrder order = inOrder(shipmentMapper);
+        order.verify(shipmentMapper).selectByIdForUpdate(SHIPMENT_ID);
+        order.verify(shipmentMapper).selectLatestTemperatureMeasuredAtForShare(SHIPMENT_ID);
+        verify(shipmentMapper, never()).updateLifecycleByIdAndVersion(any(), any(), any());
+        verify(traceEventService, never()).appendShipmentArrivalEvent(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("到达（PB2）：到达时间等于最新在途温度测量时间时允许确认到达")
+    void arrive_allowsUnloadedEqualToLatestTemperatureMeasurement() {
+        LocalDateTime latest = LocalDateTime.now(ZoneOffset.UTC).minusMinutes(10).truncatedTo(ChronoUnit.SECONDS);
+        when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.IN_TRANSIT));
+        when(shipmentMapper.selectLatestTemperatureMeasuredAtForShare(SHIPMENT_ID)).thenReturn(latest);
+        when(transferMapper.selectByShipmentId(SHIPMENT_ID)).thenReturn(List.of(transfer(5012L, 1012L, TransferStatus.PENDING)));
+        when(batchMapper.selectByIdsIgnoreTenant(any())).thenReturn(List.of(batch(1012L)));
+        when(shipmentMapper.updateLifecycleByIdAndVersion(any(Shipment.class), eq("IN_TRANSIT"), eq(3L))).thenReturn(1);
+
+        service.arriveShipment(SHIPMENT_ID, new ShipmentArriveRequest(latest.atOffset(ZoneOffset.UTC), 3L), "idem-arrive-00000011", carrier);
+
+        verify(shipmentMapper).updateLifecycleByIdAndVersion(any(Shipment.class), eq("IN_TRANSIT"), eq(3L));
+        verify(traceEventService).appendShipmentArrivalEvent(any(), eq(1012L), eq("TB-1012"), eq(5012L), eq(301L), any());
     }
 
     @Test

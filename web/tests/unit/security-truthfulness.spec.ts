@@ -101,7 +101,7 @@ describe('Security & Truthfulness Audits', () => {
       props: {
         temperatureSummary: {
           result: 'INSUFFICIENT_DATA',
-          ruleNote: '当前切片尚未接入冷链实时温控时序采集流，暂无有效温控监测记录，不构成本项目温控合规依据。'
+          ruleNote: '公开页面不展示冷链温度测量明细；本项目未接入实时温控采集，不构成本项目温控合规依据。'
         }
       }
     })
@@ -130,6 +130,21 @@ describe('Security & Truthfulness Audits', () => {
       for (const forbidden of ['证书', '全程温控正常', '正品保证', '官方认证', '防伪认证', '已通过认证']) {
         expect(content, `${file} contains ${forbidden}`).not.toContain(forbidden)
       }
+    }
+  })
+  it('TRUTHFULNESS: in-transit temperature readings are single-point evaluations only and never reach the consumer page (PB2)', () => {
+    const panel = fs.readFileSync(path.join(srcDir, 'components/enterprise/ShipmentTemperaturePanel.vue'), 'utf8')
+    for (const required of ['不等于持续超温', '不产生告警', '不对消费者公开', '未接入真实温度设备']) {
+      expect(panel).toContain(required)
+    }
+    for (const forbidden of ['全程温控正常', '持续超温告警', '已触发告警', '温控合格', '冷链合规', '超温事件']) {
+      expect(panel, `panel contains ${forbidden}`).not.toContain(forbidden)
+    }
+    const consumerFiles = ['views/ConsumerTraceView.vue', 'components/TraceTemperatureCard.vue', 'api/trace.ts', 'types/trace.ts']
+    for (const file of consumerFiles) {
+      const content = fs.readFileSync(path.join(srcDir, file), 'utf8')
+      expect(content, `${file} must not read enterprise temperature records`).not.toContain('temperature-records')
+      expect(content).not.toContain('shipmentTemperatures')
     }
   })
   it('TRUTHFULNESS: the consumer FROZEN conclusion is a training simulation, never a real authority action or product hold (PB1)', () => {

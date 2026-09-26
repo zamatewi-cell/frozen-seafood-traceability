@@ -55,7 +55,7 @@ const sampleTrace: PublicTrace = {
   ],
   temperatureSummary: {
     result: 'INSUFFICIENT_DATA',
-    ruleNote: '当前切片尚未接入冷链实时温控时序采集流，暂无有效温控监测记录，不构成本项目温控合规依据。'
+    ruleNote: '公开页面不展示冷链温度测量明细；本项目未接入实时温控采集，不构成本项目温控合规依据。'
   },
   flowStatus: 'ACTIVE',
   riskStatus: 'NORMAL',

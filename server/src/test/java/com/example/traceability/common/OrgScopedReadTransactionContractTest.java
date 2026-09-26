@@ -4,6 +4,7 @@ import com.example.traceability.batch.application.BatchApplicationService;
 import com.example.traceability.batch.application.BatchRiskService;
 import com.example.traceability.batch.dto.BatchQueryCriteria;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
+import com.example.traceability.quality.application.ShipmentTemperatureService;
 import com.example.traceability.sale.application.SaleApplicationService;
 import com.example.traceability.trace.application.TraceEventApplicationService;
 import org.junit.jupiter.api.DisplayName;
@@ -37,7 +38,8 @@ class OrgScopedReadTransactionContractTest {
                 Arguments.of(TraceEventApplicationService.class.getMethod("listEvents", Long.class, TraceSecurityPrincipal.class)),
                 Arguments.of(SaleApplicationService.class.getMethod("listSales", Long.class, TraceSecurityPrincipal.class)),
                 Arguments.of(BatchApplicationService.class.getMethod("getBatchById", Long.class, TraceSecurityPrincipal.class)),
-                Arguments.of(BatchApplicationService.class.getMethod("listBatches", BatchQueryCriteria.class, TraceSecurityPrincipal.class))
+                Arguments.of(BatchApplicationService.class.getMethod("listBatches", BatchQueryCriteria.class, TraceSecurityPrincipal.class)),
+                Arguments.of(ShipmentTemperatureService.class.getMethod("listRecords", Long.class, TraceSecurityPrincipal.class))
         );
     }
 

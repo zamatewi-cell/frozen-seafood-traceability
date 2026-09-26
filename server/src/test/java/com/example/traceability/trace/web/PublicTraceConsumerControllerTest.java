@@ -121,7 +121,7 @@ class PublicTraceConsumerControllerTest {
                         new PublicTraceProjectionResponse.TimelineItem("SOURCE", "原料采收/出塘", "2026-09-01T08:00:00Z", "企业人工填报", "N1"),
                         new PublicTraceProjectionResponse.TimelineItem("FREEZE", "速冻冷冻", "2026-09-01T12:00:00Z", "教学演练与仿真模拟数据（SIMULATED）", "N2")
                 ),
-                new PublicTraceProjectionResponse.TemperatureSummaryProjection("INSUFFICIENT_DATA", "当前切片尚未接入冷链实时温控采集流"),
+                new PublicTraceProjectionResponse.TemperatureSummaryProjection("INSUFFICIENT_DATA", "公开页面不展示冷链温度测量明细；本项目未接入实时温控采集，不构成本项目温控合规依据。"),
                 "ACTIVE",
                 "NORMAL",
                 null,

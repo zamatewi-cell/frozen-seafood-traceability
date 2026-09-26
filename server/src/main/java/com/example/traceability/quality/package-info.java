@@ -1,15 +1,21 @@
 /**
- * 质量安全与温控告警业务包 (Quality Control & Temperature Monitoring Domain)。
+ * 质量安全与温控业务包 (Quality Control &amp; Temperature Monitoring Domain)。
  * <p>
- * 本业务域负责冷链温控监控、超温告警与质量安全召回管控：
+ * 当前已实现（Phase B PB2）：
  * <ul>
- *   <li>多源温控数据接入：支持人工补录 (MANUAL)、批量导入 (IMPORT)、仿真生成 (SIMULATED) 与 IoT 设备实采 (DEVICE)</li>
- *   <li>超温判定与告警管理：按阶段规则对温控时序数据进行阈值核验，自动触发超温预警</li>
- *   <li>批次冻结与模拟召回：支持根据批次质量异常执行冻结闭环，并支持教学与应急场景下的模拟召回 (simulated=true)</li>
+ *   <li>Shipment 在途温度记录：运输任务指定承运组织的操作员在运输途中逐条登记温度测量，数据来源只接受人工登记 (MANUAL)
+ *       与教学模拟数据 (SIMULATED)；记录绑定运输任务，不复制到各个批次；</li>
+ *   <li>单点判定：按装载批次的产品、TRANSPORT 环节与测量业务时间匹配当时生效的已发布规则版本，得出 NORMAL / HIGH / LOW，
+ *       或在没有唯一适用规则时记为 MISSING_CONTEXT，并固定规则环节、上下限与允许越界时长快照，之后不追溯改写。</li>
  * </ul>
  * </p>
  * <p>
- * <b>分层架构定位</b>：质量风控与物联网集成域。严禁将模拟仿真数据标为设备实采，真实不合格检测记录不可篡改删除。
+ * 尚未实现（不得在文档或演示中宣称已完成）：持续超温判定、Alert、自动风险冻结、隔离收货、检验报告、模拟召回、
+ * 仓储 (Batch + Site) 温度记录、批量导入 (IMPORT) 与设备接入 (DEVICE)。单点越界不等于持续超温；批次风险状态只由
+ * {@code BatchRiskService} 写入，本包不写入。
+ * </p>
+ * <p>
+ * <b>分层架构定位</b>：质量风控域。严禁将模拟数据标为设备实采；温度记录追加式不可修改或删除。
  * </p>
  *
  * @author Seafood Traceability Team

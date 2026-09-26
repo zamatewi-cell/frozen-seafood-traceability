@@ -297,6 +297,42 @@ export interface Shipment {
 
 export type ShipmentRole = 'SENDER' | 'CARRIER' | 'RECEIVER'
 
+/**
+ * Shipment 在途温度记录的单点判定（Phase B PB2）：只说明这一次测量是否落在测量时适用的运输温控规则范围内，
+ * 不等于持续超温，也不产生告警。MISSING_CONTEXT 表示测量时没有唯一适用的规则，未判定。
+ */
+export type TemperatureEvaluation = 'NORMAL' | 'HIGH' | 'LOW' | 'MISSING_CONTEXT'
+/** PB2 开放的温度数据来源：人工登记与教学模拟数据（本系统未接入真实温度设备）。 */
+export type TemperatureDataSource = 'MANUAL' | 'SIMULATED'
+
+/** 判定依据：登记时匹配的规则版本与上下限快照（登记后不追溯改写）。 */
+export interface TemperatureRuleBasis {
+  ruleId: number
+  name: string
+  versionNo: number
+  ruleStageId: number
+  lowerLimit: number
+  upperLimit: number
+  allowedDurationSeconds: number
+}
+
+export interface ShipmentTemperatureRecord {
+  id: number
+  shipmentId: number
+  stageCode: 'TRANSPORT'
+  measuredAt: string
+  recordedAt: string
+  temperature: number
+  unitCode: 'CELSIUS'
+  dataSource: TemperatureDataSource
+  deviceNo?: string
+  evaluation: TemperatureEvaluation
+  /** MISSING_CONTEXT 时不存在。 */
+  rule?: TemperatureRuleBasis
+  orgId: number
+  actorUserId: number
+}
+
 export interface ShipmentListQuery {
   role?: ShipmentRole
   status?: ShipmentStatus

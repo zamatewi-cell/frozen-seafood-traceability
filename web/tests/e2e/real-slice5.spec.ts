@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto'
  *
  * 三个相互隔离的浏览器上下文分别代表加工企业、承运企业与零售企业（真实 Session + CSRF），禁止 page.route 或任何接口替身。
  * 路径：加工企业为 B2 / B3 分别发起交接 T2 / T3 → 同一运输任务 S1 装载两张交接 → 提交 T2 / T3
- *       → 承运商发运、到达 S1 → 零售企业接受 T2 / T3
+ *       → 承运商发运 S1 → PB2-T：承运商在途逐条登记 3 条温度（单点判定 NORMAL / HIGH / NORMAL；发货方只读、真实 API 登记 403）
+ *       → 承运商确认到达 S1（到达后真实 API 登记 409）→ 零售企业接受 T2 / T3（接收方只读查看在途温度）
  *       → 零售企业在批次详情激活 B2 / B3 公开追溯码（契约 v1.1 §12 第 18 步：接受之后、终端销售之前）
  *       → PB1-S：销售前零售企业质量管理员风险冻结 B3（ACTIVE / FROZEN）→ 销售入口消失、真实 API 终端销售 422 → 解除冻结
  *       → 零售企业在批次详情终端销售：B2 售 200（剩余 400，仍可流转，交接入口消失）→ B2 售 400（售罄关闭）→ B3 售 360（售罄关闭）。
@@ -146,7 +147,31 @@ async function riskTransitionInBrowser(page: Page, action: 'freeze' | 'release',
   return (await response.json()).data
 }
 
+/** PB2：承运商在运输任务详情“在途温度记录”面板登记一条温度；测量时间使用表单默认的当前时间（精确到秒）。 */
+async function recordTemperatureInBrowser(page: Page, shipmentId: number, temperature: string, source: 'MANUAL' | 'SIMULATED', deviceNo?: string) {
+  await page.getByTestId('temperature-open').click()
+  const measuredInput = page.getByTestId('field-temperature-measured-at')
+  await expect(measuredInput).toHaveAttribute('step', '1')
+  const uiValue = await measuredInput.inputValue()
+  await page.getByTestId('field-temperature-value').fill(temperature)
+  await page.getByTestId('field-temperature-source').selectOption(source)
+  if (deviceNo) await page.getByTestId('field-temperature-device').fill(deviceNo)
+  const post = waitForApi(page, 'POST', new RegExp(`^/api/v1/shipments/${shipmentId}/temperature-records$`))
+  await page.getByTestId('temperature-submit').click()
+  const response = await post
+  expect(response.status()).toBe(201)
+  const body = JSON.parse(response.request().postData() || '{}')
+  expect(Object.keys(body).sort()).toEqual(deviceNo ? ['dataSource', 'deviceNo', 'measuredAt', 'temperature'] : ['dataSource', 'measuredAt', 'temperature'])
+  expect(body.measuredAt).toBe(new Date(uiValue).toISOString())
+  expect(body.measuredAt).toMatch(/:\d{2}\.000Z$/)
+  const record = (await response.json()).data
+  expect(Date.parse(record.measuredAt)).toBe(Date.parse(body.measuredAt))
+  return record
+}
+
 test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to zero at the retailer store', async ({ browser }) => {
+  // 一个测试串联四个真实账号的交接、PB2-T 在途温度、PB1-S 与三笔销售：整体预算高于默认 30 秒，单步断言仍各自快速超时
+  test.setTimeout(120_000)
   expect(process.env.REAL_SMOKE).toBe('true')
   expect(expected.b2Id).toBeGreaterThan(0)
   expect(expected.b3Id).toBeGreaterThan(0)
@@ -192,12 +217,54 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
   await carrier.page.goto(`/app/shipments/${shipmentId}`)
   const dispatch = waitForApi(carrier.page, 'POST', new RegExp(`^/api/v1/shipments/${shipmentId}/dispatch$`))
   await carrier.page.getByTestId('dispatch-shipment').click()
-  expect((await dispatch).status()).toBe(200)
+  const dispatched = await dispatch
+  expect(dispatched.status()).toBe(200)
+  const loadedAt = Date.parse((await dispatched.json()).data.loadedAt)
   await expect(carrier.page.getByTestId('shipment-status')).toHaveAttribute('data-status', 'IN_TRANSIT')
+
+  // ---------------------------------------------------------------- PB2-T：承运商在途登记温度（单点判定；不告警、不冻结、不对消费者公开）
+  await expect(carrier.page.getByTestId('temperature-panel')).toBeVisible()
+  await expect(carrier.page.getByTestId('temperature-disclaimer')).toContainText('不等于持续超温')
+  await expect(carrier.page.getByTestId('temperature-empty')).toBeVisible()
+  // 表单默认测量时间精确到秒：等本地时钟越过装载发运时间所在的秒，默认值才不会早于装载发运时间（同机时钟轮询，非 sleep）
+  await expect.poll(() => Date.now() - loadedAt, { timeout: 5_000 }).toBeGreaterThanOrEqual(1_000)
+  const readings = [
+    await recordTemperatureInBrowser(carrier.page, shipmentId, '-18.20', 'MANUAL'),
+    await recordTemperatureInBrowser(carrier.page, shipmentId, '-12.50', 'SIMULATED', 'SMOKE-PROBE-01'),
+    await recordTemperatureInBrowser(carrier.page, shipmentId, '-19.00', 'MANUAL')
+  ]
+  expect(readings.map((r) => r.evaluation)).toEqual(['NORMAL', 'HIGH', 'NORMAL'])
+  for (const r of readings) {
+    expect(r).toMatchObject({ shipmentId, stageCode: 'TRANSPORT', unitCode: 'CELSIUS', rule: { lowerLimit: -25, upperLimit: -15, allowedDurationSeconds: 1800 } })
+    expect(Date.parse(r.measuredAt)).toBeGreaterThanOrEqual(loadedAt)
+  }
+  await expect(carrier.page.getByTestId('temperature-row')).toHaveCount(3)
+  const highRow = carrier.page.locator('[data-testid="temperature-row"][data-evaluation="HIGH"]')
+  await expect(highRow).toHaveCount(1)
+  await expect(highRow.getByTestId('temperature-evaluation')).toHaveText('单点高于上限')
+  await expect(carrier.page.getByTestId('temperature-summary')).toContainText('单点越界 1 条（单点判定，不等于持续超温）')
+  await expect(carrier.page.getByTestId('temperature-rule-band')).toContainText('-25.00 ℃ ~ -15.00 ℃')
+  // 发货方（加工企业）只读：面板可见、无登记入口；真实 API 登记 403
+  await processor.page.goto(`/app/shipments/${shipmentId}`)
+  await expect(processor.page.getByTestId('temperature-row')).toHaveCount(3)
+  await expect(processor.page.getByTestId('temperature-open')).toHaveCount(0)
+  const senderRecord = await probe(processor.page, 'POST', `/api/v1/shipments/${shipmentId}/temperature-records`, {
+    measuredAt: new Date(Date.now() - 1_000).toISOString(), temperature: -18, dataSource: 'MANUAL'
+  })
+  expect(`${senderRecord.status} ${senderRecord.code}`).toBe('403 ORG_SCOPE_DENIED')
+  // 单点越界不冻结批次：发货方批次详情仍为正常
+  await processor.page.goto(`/app/batches/${expected.b2Id}`)
+  await expect(processor.page.getByTestId('detail-risk-status')).toHaveText('正常')
+
   const arrive = waitForApi(carrier.page, 'POST', new RegExp(`^/api/v1/shipments/${shipmentId}/arrive$`))
   await carrier.page.getByTestId('arrive-shipment').click()
   expect((await arrive).status()).toBe(200)
   await expect(carrier.page.getByTestId('shipment-status')).toHaveAttribute('data-status', 'DELIVERED')
+  await expect(carrier.page.getByTestId('temperature-open')).toHaveCount(0)
+  const lateRecord = await probe(carrier.page, 'POST', `/api/v1/shipments/${shipmentId}/temperature-records`, {
+    measuredAt: new Date(Date.now() - 1_000).toISOString(), temperature: -18, dataSource: 'MANUAL'
+  })
+  expect(`${lateRecord.status} ${lateRecord.code}`).toBe('409 SHIPMENT_NOT_IN_TRANSIT')
 
   // ---------------------------------------------------------------- 零售企业：接受 T2 / T3
   const retailer = await loginAs(browser, accounts.retailer, 'RETAILER', evidence)
@@ -209,6 +276,11 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
     await expect(retailer.page).toHaveURL(new RegExp(`/app/batches/${batchId}$`))
     await expect(retailer.page.getByTestId('detail-org-name')).toHaveText(expected.retailerOrgName)
   }
+
+  // PB2-T：接收方只读查看在途温度（无登记入口）
+  await retailer.page.goto(`/app/shipments/${shipmentId}`)
+  await expect(retailer.page.getByTestId('temperature-row')).toHaveCount(3)
+  await expect(retailer.page.getByTestId('temperature-open')).toHaveCount(0)
 
   // ---------------------------------------------------------------- 零售企业：接受后、销售前激活公开追溯码（批次状态与数量不变）
   const publicCodes: Record<number, string> = {}
@@ -336,6 +408,9 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
     'PROCESSOR POST /api/v1/transfers/:id/submit',
     'PROCESSOR POST /api/v1/transfers/:id/submit',
     'CARRIER POST /api/v1/shipments/:id/dispatch',
+    'CARRIER POST /api/v1/shipments/:id/temperature-records',
+    'CARRIER POST /api/v1/shipments/:id/temperature-records',
+    'CARRIER POST /api/v1/shipments/:id/temperature-records',
     'CARRIER POST /api/v1/shipments/:id/arrive',
     'RETAILER POST /api/v1/transfers/:id/accept',
     'RETAILER POST /api/v1/transfers/:id/accept',
@@ -358,6 +433,7 @@ test('Slice 5: B2 / B3 are handed over to RETAILER on one shipment and sold to z
   console.log('[slice5-smoke] 首次销售后 API 探测（name status code）:')
   for (const p of probes) console.log(`  ${p.name} ${p.status} ${p.code ?? ''}`)
   console.log(`[slice5-smoke] PB1-S 冻结期间终端销售探测: ${blockedSale.status} ${blockedSale.code}`)
+  console.log(`[slice5-smoke] PB2-T 在途温度单点判定: ${readings.map((r) => `${r.temperature}℃=${r.evaluation}`).join(', ')}；发货方登记 ${senderRecord.status} ${senderRecord.code}；到达后登记 ${lateRecord.status} ${lateRecord.code}`)
   console.log(`[slice5-smoke] SLICE5_RESULT ${JSON.stringify({ t2, t3, shipmentId, publicCodeActivated: Object.keys(publicCodes).length, pb1s: [frozenB3.id, releasedB3.id], sales: [first.sale.id, second.sale.id, third.sale.id] })}`)
 
   await Promise.all([processor.context.close(), carrier.context.close(), retailer.context.close(), retailerQm.context.close()])

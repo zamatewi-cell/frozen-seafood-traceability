@@ -67,8 +67,12 @@ public class PublicTraceApplicationService {
     private static final String PUBLIC_DISCLOSURE_STATEMENT =
             "本溯源信息仅反映供应链各节点企业申报登记的电子履历，不作为货物物理真实性或防伪验证凭证；系统相关模拟标识仅用于教学实训推演。";
 
+    /**
+     * 温度摘要说明：无论企业端是否已登记在途温度记录（Phase B PB2，人工或教学模拟单点登记）都保持真实——
+     * 公开页面不展示温度测量明细，也不据此给出任何温控合规结论（公开温度语义由后续切片单独定义）。
+     */
     private static final String TEMPERATURE_INSUFFICIENT_NOTE =
-            "当前切片尚未接入冷链实时温控时序采集流，暂无有效温控监测记录，不构成本项目温控合规依据。";
+            "公开页面不展示冷链温度测量明细；本项目未接入实时温控采集，不构成本项目温控合规依据。";
 
     private final BatchMapper batchMapper;
     private final BatchRelationMapper batchRelationMapper;

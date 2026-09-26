@@ -159,6 +159,8 @@ function backend(world: ReturnType<typeof createWorld>, user: typeof sourceOpera
       return { status: 200, body: page(mine ? [s] : []) }
     },
     'GET /api/v1/shipments/601': () => ([40, 30, 50].includes(user.orgId) ? ok(shipmentView(world)) : problem(403, 'ORG_SCOPE_DENIED')),
+    // PB2：运输中 / 已到达的运输任务详情会读取在途温度记录（本链路不登记温度）
+    'GET /api/v1/shipments/601/temperature-records': () => ([40, 30, 50].includes(user.orgId) ? ok([]) : problem(403, 'ORG_SCOPE_DENIED')),
     'POST /api/v1/shipments/601/transfers': (call) => {
       const body = call.body as Json
       if (world.shipment!.status !== 'PLANNED') return problem(409, 'SHIPMENT_NOT_PLANNED', '仅 PLANNED 运输任务允许增删交接')

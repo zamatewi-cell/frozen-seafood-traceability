@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
+import ShipmentTemperaturePanel from '@/components/enterprise/ShipmentTemperaturePanel.vue'
 import { ApiError } from '@/api/client'
 import { arriveShipment, bindTransfer, cancelShipment, dispatchShipment, getShipment, unbindTransfer } from '@/api/shipments'
 import { listTransfers, submitTransfer } from '@/api/transfers'
@@ -196,6 +197,12 @@ function cancel() {
   ), '运输任务已取消，装载的交接草稿已解绑。')
 }
 
+/** 在途温度登记 409（例如运输任务已被确认到达）：刷新运输任务，并以提示条保留原因。 */
+function onTemperatureConflict(message: string) {
+  flash.value = { tone: 'warning', message }
+  load()
+}
+
 watch(() => props.id, (id) => {
   flash.value = takePageFlash(`shipment:${id}`)
   actionError.value = ''
@@ -297,6 +304,13 @@ onBeforeUnmount(() => controller?.abort())
           </dl>
         </section>
       </div>
+
+      <ShipmentTemperaturePanel
+        v-if="shipment.status === 'IN_TRANSIT' || shipment.status === 'DELIVERED'"
+        :shipment="shipment"
+        :user="user"
+        @conflict="onTemperatureConflict"
+      />
 
       <section class="ent-card" aria-labelledby="manifest-title" data-testid="shipment-manifest">
         <h2 id="manifest-title" class="ent-card-title">装载清单（{{ shipment.transfers.length }} 张交接）</h2>

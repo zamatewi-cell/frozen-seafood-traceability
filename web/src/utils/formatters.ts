@@ -330,6 +330,33 @@ export function formatQuantity(quantity: number | string | null | undefined, uni
 }
 
 /**
+ * Shipment 在途温度单点判定（Phase B PB2）：只描述单次测量，从不表述为持续超温、告警或温控合规结论。
+ */
+export function formatTemperatureEvaluation(evaluation: string | null | undefined): StatusBadgeInfo {
+  switch (evaluation) {
+    case 'NORMAL':
+      return { label: '单点在范围内', tone: 'success', description: '本次测量落在测量时适用的运输温控规则范围内（含上下限）' }
+    case 'HIGH':
+      return { label: '单点高于上限', tone: 'warning', description: '本次测量高于规则上限；单点越界不等于持续超温，不产生告警' }
+    case 'LOW':
+      return { label: '单点低于下限', tone: 'warning', description: '本次测量低于规则下限；单点越界不等于持续超温，不产生告警' }
+    case 'MISSING_CONTEXT':
+      return { label: '缺少适用规则', tone: 'neutral', description: '测量时没有唯一适用的运输温控规则，未作判定' }
+    default:
+      return { label: evaluation || '未知', tone: 'neutral', description: '未识别的单点判定' }
+  }
+}
+
+/**
+ * 摄氏温度（两位小数）。
+ */
+export function formatTemperature(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '未标明'
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? `${numeric.toFixed(2)} ℃` : String(value)
+}
+
+/**
  * 温度摘要判定样式与文本。
  */
 export function formatTemperatureResult(result: string | null | undefined): {

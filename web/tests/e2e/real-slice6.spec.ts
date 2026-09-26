@@ -190,6 +190,9 @@ test('Slice 6: anonymous consumer scans the B2 / B3 public trace codes after sel
   expect(b2Timeline.slice(-4)).toEqual(['N3:TRANSPORT', 'N3:ARRIVAL', 'N3:SALE', 'N3:SALE'])
 
   await expect(consumer.locator('.temp-summary-card')).toContainText('暂无实时时序采集')
+  // PB2：S1 在途已登记温度，公开页面仍不展示任何测量明细，说明文字不再宣称“暂无记录”
+  await expect(consumer.locator('.temp-summary-card')).toContainText('公开页面不展示冷链温度测量明细')
+  await expect(consumer.locator('.temp-summary-card')).not.toContainText('暂无有效温控监测记录')
   await expect(consumer.locator('.trace-disclosure-card')).toContainText('不作为货物物理真实性或防伪验证凭证')
   await expect(consumer.locator('.footer-disclosure')).toContainText('教学实训推演')
   const b2Text = await consumer.locator('body').innerText()
