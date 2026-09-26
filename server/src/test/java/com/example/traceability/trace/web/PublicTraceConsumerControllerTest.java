@@ -125,6 +125,7 @@ class PublicTraceConsumerControllerTest {
                 "ACTIVE",
                 "NORMAL",
                 null,
+                null,
                 "2026-09-10T10:00:00Z",
                 "本溯源信息仅反映供应链各节点企业申报登记的电子履历，不作为货物物理真实性或防伪验证凭证；系统相关模拟标识仅用于教学实训推演。"
         );

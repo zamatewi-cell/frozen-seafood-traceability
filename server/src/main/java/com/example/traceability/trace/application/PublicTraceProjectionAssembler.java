@@ -5,7 +5,9 @@ import com.example.traceability.batch.domain.BatchFlowStatus;
 import com.example.traceability.batch.domain.BatchLineageEdge;
 import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.masterdata.domain.Product;
+import com.example.traceability.quality.domain.Recall;
 import com.example.traceability.trace.domain.TraceEvent;
+import com.example.traceability.trace.dto.PublicTraceProjectionResponse;
 import com.example.traceability.trace.dto.PublicTraceProjectionResponse.LineageEdge;
 import com.example.traceability.trace.dto.PublicTraceProjectionResponse.LineageNode;
 import com.example.traceability.trace.dto.PublicTraceProjectionResponse.LineageProjection;
@@ -38,6 +40,13 @@ import java.util.TreeSet;
  * @since 0.1.0
  */
 public final class PublicTraceProjectionAssembler {
+
+    /** 模拟召回处置进行中（PB6 公开固定文案）。 */
+    static final String RECALL_DISPOSITION_IN_PROGRESS = "模拟召回处置进行中：本批次正在按教学演练流程处置（系统教学演练模拟信息，非真实召回结论）。";
+    /** 模拟召回处置已完成：按演练流程销毁（PB6 公开固定文案）。 */
+    static final String RECALL_DISPOSITION_DESTROYED = "模拟召回处置已完成：涉及产品已按教学演练流程完成销毁处置（系统教学演练模拟信息，非真实召回结论）。";
+    /** 模拟召回处置已完成：按演练流程退回（PB6 公开固定文案）。 */
+    static final String RECALL_DISPOSITION_RETURNED = "模拟召回处置已完成：涉及产品已按教学演练流程完成退回处置（系统教学演练模拟信息，非真实召回结论）。";
 
     /** 节点角色：最上游批次。 */
     public static final String ROLE_ORIGIN = "ORIGIN";
@@ -296,6 +305,22 @@ public final class PublicTraceProjectionAssembler {
             return null;
         }
         return BatchFlowStatus.CLOSED.name().equals(flowStatus) ? SIMULATED_RECALL_NOTICE_CLOSED : SIMULATED_RECALL_NOTICE_ACTIVE;
+    }
+
+    /**
+     * 模拟召回处置进展的公开投影（PB6）：只输出受控状态、按受控公开处置结论选择的固定文案与关闭日期；
+     * 召回编号、原因、发起组织、内部总结与内部 ID 一律不输出。找不到案件时（例如 V16 之前的历史 RECALLED 批次）输出通用的进行中文案。
+     *
+     * @param recall 使批次进入 RECALLED 的召回案件（可能为 null）
+     */
+    public static PublicTraceProjectionResponse.RecallDisposition recallDisposition(Recall recall) {
+        if (recall == null || !"CLOSED".equals(recall.getStatus())) {
+            return new PublicTraceProjectionResponse.RecallDisposition("IN_PROGRESS", RECALL_DISPOSITION_IN_PROGRESS, null);
+        }
+        String label = "RETURNED".equals(recall.getPublicDisposition())
+                ? RECALL_DISPOSITION_RETURNED : RECALL_DISPOSITION_DESTROYED;
+        String closedDate = recall.getClosedAt() == null ? null : recall.getClosedAt().toLocalDate().toString();
+        return new PublicTraceProjectionResponse.RecallDisposition("CLOSED", label, closedDate);
     }
 
     /**

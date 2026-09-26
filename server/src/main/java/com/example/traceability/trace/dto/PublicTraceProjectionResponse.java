@@ -20,6 +20,8 @@ import java.util.List;
  * @param flowStatus         目标批次业务流转状态 (DRAFT/ACTIVE/CLOSED)
  * @param riskStatus         目标批次风险状态 (NORMAL/FROZEN/RECALLED)
  * @param recallNotice       模拟召回声明 (仅在 riskStatus=RECALLED 时非空返回系统演练提示，其余为 null)
+ * @param recallDisposition  模拟召回处置进展 (Phase B PB6；仅在 riskStatus=RECALLED 时输出受控状态、固定文案与关闭日期，
+ *                           不含召回编号、原因、组织、内部总结或任何内部 ID)
  * @param queriedAt          查询时间 (带明确 UTC 偏移的 ISO 8601 字符串)
  * @param disclosure         真实性与教学演练声明
  * @author Seafood Traceability Team
@@ -35,9 +37,24 @@ public record PublicTraceProjectionResponse(
         String flowStatus,
         String riskStatus,
         String recallNotice,
+        RecallDisposition recallDisposition,
         String queriedAt,
         String disclosure
 ) {
+
+    /**
+     * 模拟召回处置进展（公开白名单，Phase B PB6）。
+     *
+     * @param status     IN_PROGRESS（处置进行中）/ CLOSED（处置已完成；批次仍保留模拟召回状态）
+     * @param label      受控的固定公开文案（教学演练声明，不含企业自由文本）
+     * @param closedDate 处置完成日期（UTC，yyyy-MM-dd；进行中时为 null）
+     */
+    public record RecallDisposition(
+            String status,
+            String label,
+            String closedDate
+    ) {
+    }
 
     /**
      * 产品公开信息投影。

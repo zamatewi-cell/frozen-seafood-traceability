@@ -243,6 +243,34 @@ class PublicTraceProjectionAssemblerTest {
                 .doesNotContain("流通环节已暂停");
     }
 
+    @Test
+    @DisplayName("模拟召回处置进展（PB6）：只输出受控状态、固定文案与关闭日期；没有召回案件时为进行中；不回显召回原因 / 编号 / 内部总结")
+    void recallDisposition() {
+        var none = PublicTraceProjectionAssembler.recallDisposition(null);
+        assertThat(none.status()).isEqualTo("IN_PROGRESS");
+        assertThat(none.label()).contains("模拟召回处置进行中").contains("非真实召回结论");
+        assertThat(none.closedDate()).isNull();
+
+        com.example.traceability.quality.domain.Recall recall = new com.example.traceability.quality.domain.Recall();
+        recall.setRecallNo("RCL-SECRET-1");
+        recall.setReason("内部原因：供应商 A 冷库故障");
+        recall.setResultSummary("内部总结：销毁 360 kg");
+        recall.setStatus("IN_PROGRESS");
+        assertThat(PublicTraceProjectionAssembler.recallDisposition(recall).status()).isEqualTo("IN_PROGRESS");
+
+        recall.setStatus("CLOSED");
+        recall.setPublicDisposition("DESTROYED");
+        recall.setClosedAt(java.time.LocalDateTime.of(2026, 9, 26, 1, 2, 3));
+        var destroyed = PublicTraceProjectionAssembler.recallDisposition(recall);
+        assertThat(destroyed.status()).isEqualTo("CLOSED");
+        assertThat(destroyed.label()).contains("销毁处置").contains("教学演练").contains("非真实召回结论");
+        assertThat(destroyed.closedDate()).isEqualTo("2026-09-26");
+        assertThat(destroyed.toString()).doesNotContain("RCL-SECRET-1").doesNotContain("供应商").doesNotContain("360");
+
+        recall.setPublicDisposition("RETURNED");
+        assertThat(PublicTraceProjectionAssembler.recallDisposition(recall).label()).contains("退回处置");
+    }
+
     // ------------------------------------------------------------------ fixtures
 
     private static Assembly assemble(long target, List<BatchLineageEdge> edges, Map<Long, Batch> batches, List<TraceEvent> events) {

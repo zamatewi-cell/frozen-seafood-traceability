@@ -20,6 +20,7 @@ import com.example.traceability.trace.domain.TraceEvent;
 import com.example.traceability.trace.dto.PublicTraceCodeResponse;
 import com.example.traceability.trace.dto.PublicTraceProjectionResponse;
 import com.example.traceability.trace.mapper.PublicTraceCodeIdempotencyMapper;
+import com.example.traceability.quality.mapper.RecallMapper;
 import com.example.traceability.trace.mapper.PublicTraceCodeMapper;
 import com.example.traceability.trace.mapper.TraceEventMapper;
 import org.slf4j.Logger;
@@ -80,6 +81,7 @@ public class PublicTraceApplicationService {
     private final TraceEventMapper traceEventMapper;
     private final PublicTraceCodeMapper publicTraceCodeMapper;
     private final PublicTraceCodeIdempotencyMapper idempotencyMapper;
+    private final RecallMapper recallMapper;
 
     public PublicTraceApplicationService(
             BatchMapper batchMapper,
@@ -87,7 +89,8 @@ public class PublicTraceApplicationService {
             ProductMapper productMapper,
             TraceEventMapper traceEventMapper,
             PublicTraceCodeMapper publicTraceCodeMapper,
-            PublicTraceCodeIdempotencyMapper idempotencyMapper
+            PublicTraceCodeIdempotencyMapper idempotencyMapper,
+            RecallMapper recallMapper
     ) {
         this.batchMapper = batchMapper;
         this.batchRelationMapper = batchRelationMapper;
@@ -95,6 +98,7 @@ public class PublicTraceApplicationService {
         this.traceEventMapper = traceEventMapper;
         this.publicTraceCodeMapper = publicTraceCodeMapper;
         this.idempotencyMapper = idempotencyMapper;
+        this.recallMapper = recallMapper;
     }
 
     /**
@@ -299,6 +303,16 @@ public class PublicTraceApplicationService {
         if (code == null) {
             throw new ResourceNotFoundException("该批次尚未激活公开追溯码，无法执行停用操作");
         }
+        // PB6：模拟召回批次的公开追溯码必须保持可查询，消费者才能看到模拟召回提示（停用后与未知码一样返回 404）
+        if (BatchRiskStatus.RECALLED.name().equals(batch.getRiskStatus())
+                && !PublicTraceCodeStatus.DISABLED.name().equals(code.getStatus())) {
+            throw new BusinessException(
+                    HttpStatus.CONFLICT,
+                    "PUBLIC_TRACE_CODE_RECALL_LOCKED",
+                    "模拟召回批次不可停用公开追溯码",
+                    "批次已进入模拟召回，公开追溯码必须保持可查询以向消费者展示模拟召回提示"
+            );
+        }
 
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS);
 
@@ -491,6 +505,10 @@ public class PublicTraceApplicationService {
         String flowStatus = batch.getFlowStatus();
         String riskStatus = batch.getRiskStatus();
         String recallNotice = PublicTraceProjectionAssembler.recallNotice(flowStatus, riskStatus);
+        // PB6：RECALLED 时追加 1 次查询，读取使批次进入模拟召回的案件，只投影受控状态、固定文案与关闭日期
+        PublicTraceProjectionResponse.RecallDisposition recallDisposition = BatchRiskStatus.RECALLED.name().equals(riskStatus)
+                ? PublicTraceProjectionAssembler.recallDisposition(recallMapper.selectRecallingCaseByBatchId(targetBatchId))
+                : null;
         String queriedAt = Instant.now().toString();
 
         return new PublicTraceProjectionResponse(
@@ -503,6 +521,7 @@ public class PublicTraceApplicationService {
                 flowStatus,
                 riskStatus,
                 recallNotice,
+                recallDisposition,
                 queriedAt,
                 PUBLIC_DISCLOSURE_STATEMENT
         );
