@@ -6,6 +6,11 @@
 
 ### Added
 
+- Phase B PB6 消费者模拟召回提示与处置进展（契约 v1.1 §9.2 / §13 步骤 14 / §14）：
+  - 公开投影新增 `recallDisposition`（仅当批次 `riskStatus = RECALLED`）：受控状态 IN_PROGRESS / CLOSED、按公开处置结论 DESTROYED / RETURNED 选择的固定教学演练文案与关闭日期；不含召回编号、内部 ID、原因、内部处置总结、操作人或范围事实。`recallNotice` 规则不变；PublicTraceCode 的 `RECALLED` 码状态仍不写入（码状态与批次风险状态相互独立）。
+  - 模拟召回批次的公开追溯码不能停用（409 `PUBLIC_TRACE_CODE_RECALL_LOCKED`），保证消费者扫码仍能看到模拟召回提示；已停用的码幂等返回。
+  - 生产 Vue：消费者模拟召回横幅展示处置进展（进行中 / 已完成与日期），措辞声明为系统教学演练模拟信息、非真实召回结论。
+
 - Phase B PB5 模拟召回（契约 v1.1 §2.12 / §4.2 / §4.3 / §5 / §13 步骤 8–13 / §14）：
   - Flyway V16：前置条件要求 V1 占位表 `recall` / `recall_batch` 为空（fail-fast，在任何 DDL 之前失败）；以契约对象重建 `recall`（发起组织、可选来源告警、原因、IN_PROGRESS / CLOSED 生命周期形状、受控公开处置结论 DESTROYED / RETURNED 与内部处置总结、发起 / 关闭两套组织内幂等键 + 请求哈希、版本）；新建追加式影响范围快照 `recall_batch`（SEED / DESCENDANT / ANCESTOR 与深度、持有组织、转换前流转 / 风险状态、动作 RECALLED / NOTIFY_HOLDER / ALREADY_RECALLED / TRACE_ONLY 与角色-动作 CHECK、召回风险转换经复合外键必须来源于同一召回、剩余 / 已售数量、未结束交接与运输状态、公开追溯码是否启用）；`batch_risk_transition` 新增类型化来源外键 `source_recall_id` 与 `RECALL` 来源（只允许质量管理员 NORMAL / FROZEN → RECALLED；RECALLED 只能来自 RECALL）。不回填，不修改 V1–V15。
   - `POST /api/v1/recalls`：种子批次当前责任组织的 QUALITY_MANAGER 发起；种子必须 FROZEN，或为证据充分的 NORMAL（最新检验报告 FAIL，或已被其他召回圈定为后续批次，否则 409 `RECALL_EVIDENCE_REQUIRED`）；可引用本组织告警（种子必须是其受影响批次）。同一事务内反向追溯祖先（只溯源）、沿已提交批次操作正向圈定后续批次（本组织持有的转为 RECALLED，其他组织持有的通知持有方由其自行发起召回，草稿只记录），快照库存 / 在途 / 已售数量、未结束交接与公开追溯码，经风险核心 `BatchRiskService.recallForCase` 转换（`SYS:RECALL:{recallId}:BATCH:{batchId}`，审计 `RECALL_START` / `RISK_RECALL`）。ACTIVE 与 CLOSED 批次都可召回（已售罄批次保持 CLOSED 并记录 RECALLED）；召回不改变数量、责任组织、流转状态、交接、运输任务或公开追溯码，不生成 TraceEvent。锁顺序：引用告警时先锁告警（alert → batch，与告警放行同序），再按批次 ID 升序一次锁定全部范围批次（待转换排他、只快照共享），锁后重算正向范围，范围被并发批次操作 / 交接改变时 409 `RECALL_SCOPE_CHANGED`；范围快照中的未结束交接是快照引用（不建外键，避免与交接接受的 shipment → transfer → batch 反向等待）。

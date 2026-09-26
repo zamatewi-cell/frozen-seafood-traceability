@@ -607,6 +607,9 @@ paths:
     post:
       tags: [Batches]
       summary: 停用批次对外公开追溯码（仅限企业操作员）
+      description: |
+        ACTIVE → DISABLED（终态，不可恢复）。PB6：批次已进入模拟召回（`riskStatus = RECALLED`）时，尚未停用的公开追溯码不能停用
+        （409 `PUBLIC_TRACE_CODE_RECALL_LOCKED`），以保证消费者扫码仍能看到模拟召回提示；已停用的码幂等返回。
       operationId: disablePublicTraceCode
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -1907,6 +1910,8 @@ paths:
           SOURCE、PROCESS、FREEZE、PACK、WAREHOUSE_IN、WAREHOUSE_OUT、TRANSPORT、ARRIVAL、SALE；
           排序：业务发生时间 → 谱系世代（祖先在前）→ 固定公开事件权重 → 服务端内部稳定次序。
         - `flowStatus` 与 `riskStatus` 始终分别输出；`recallNotice` 只在批次 `riskStatus = RECALLED` 时出现（与公开码自身状态无关）。
+        - `recallDisposition`（PB6）只在批次 `riskStatus = RECALLED` 时出现：受控状态（IN_PROGRESS / CLOSED）、固定教学演练文案
+          （按公开处置结论 DESTROYED / RETURNED 选择）与关闭日期；不含召回编号、内部 ID、原因、处置总结、操作人或范围事实。
         - `temperatureSummary.result` 恒为 `INSUFFICIENT_DATA`，不推导任何温控合规结论；企业端在途温度记录（PB2）从不进入公开投影，
           `ruleNote` 说明公开页面不展示冷链温度测量明细、本项目未接入实时温控采集。
 
@@ -2647,6 +2652,15 @@ components:
         recallNotice:
           type: string
           description: 仅当批次 riskStatus=RECALLED 时出现的模拟召回提示（按流转状态选择措辞，声明为教学演练）；其他情况字段省略
+        recallDisposition:
+          type: object
+          additionalProperties: false
+          required: [status, label]
+          description: PB6 模拟召回处置进展，仅当批次 riskStatus=RECALLED 时出现；其他情况字段省略
+          properties:
+            status: {type: string, enum: [IN_PROGRESS, CLOSED]}
+            label: {type: string, description: 固定教学演练文案（进行中 / 已完成销毁 / 已完成退回），声明非真实召回结论}
+            closedDate: {type: string, format: date, description: 处置完成日期（UTC）；进行中时字段省略}
         queriedAt: {type: string, format: date-time}
         disclosure: {type: string}
     CreateSaleRequest:
