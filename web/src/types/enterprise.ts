@@ -170,10 +170,10 @@ export interface Sale {
  * RECALLED 码状态属于 Phase B，当前切片不会写入。
  */
 /**
- * 风险状态转换来源类型：MANUAL（PB1，质量管理员人工处置）、ALERT（PB3，在途持续超温告警系统自动冻结，无操作人）。
- * RECALL 随后续阶段的数据库约束同时加入。
+ * 风险状态转换来源类型：MANUAL（PB1，质量管理员人工处置）、ALERT（PB3 在途持续超温告警系统自动冻结，无操作人；
+ * PB4 依据检验结论放行，有操作人）、RECALL（PB5 模拟召回，转为风险终态 RECALLED）。
  */
-export type BatchRiskSourceType = 'MANUAL' | 'ALERT'
+export type BatchRiskSourceType = 'MANUAL' | 'ALERT' | 'RECALL'
 
 /**
  * 批次风险状态转换（PB1：人工 NORMAL ⇄ FROZEN）。orgId 为转换时的责任组织，flowStatus 为转换时的流转状态快照（转换不改变流转状态）。
@@ -188,6 +188,8 @@ export interface BatchRiskTransition {
   sourceType: BatchRiskSourceType
   /** 来源告警（sourceType = ALERT 时存在）。 */
   sourceAlertId?: number
+  /** 来源召回（sourceType = RECALL 时存在）。 */
+  sourceRecallId?: number
   reason: string
   /** 系统路径（ALERT）没有操作人。 */
   actorUserId?: number | null
@@ -521,4 +523,66 @@ export interface InspectionReport {
   dataSource: 'MANUAL' | 'SIMULATED'
   actorUserId: number
   recordedAt: string
+}
+
+/** 模拟召回（PB5）：教学演练案件，不代表真实法定召回。 */
+export type RecallStatus = 'IN_PROGRESS' | 'CLOSED'
+export type RecallPublicDisposition = 'DESTROYED' | 'RETURNED'
+export type RecallScopeRole = 'SEED' | 'DESCENDANT' | 'ANCESTOR'
+export type RecallScopeAction = 'RECALLED' | 'ALREADY_RECALLED' | 'NOTIFY_HOLDER' | 'TRACE_ONLY'
+
+/** 召回影响范围行：快照（持有组织、状态、数量、未结束交接、公开码）+ 批次当前事实。 */
+export interface RecallScopeItem {
+  batchId: number
+  traceBatchNo: string
+  productName?: string
+  scopeRole: RecallScopeRole
+  depth: number
+  holderOrgId: number
+  flowStatus: BatchFlowStatus
+  riskStatusBefore: BatchRiskStatus
+  currentFlowStatus: BatchFlowStatus
+  currentRiskStatus: BatchRiskStatus
+  action: RecallScopeAction
+  riskTransitionId?: number
+  declaredQuantity: number
+  remainingQuantity: number
+  soldQuantity: number
+  unitCode: string
+  openTransferId?: number
+  openTransferNo?: string
+  openTransferStatus?: TransferStatus
+  shipmentStatus?: ShipmentStatus
+  publicCodeActive: boolean
+}
+
+export interface RecallSummary {
+  seedCount: number
+  descendantCount: number
+  ancestorCount: number
+  recalledCount: number
+  notifiedCount: number
+  openTransferCount: number
+  publicCodeCount: number
+  remainingQuantity: number
+  soldQuantity: number
+}
+
+export interface Recall {
+  id: number
+  recallNo: string
+  ownerOrgId: number
+  sourceAlertId?: number
+  reason: string
+  status: RecallStatus
+  startedAt: string
+  startedBy: number
+  closedAt?: string
+  closedBy?: number
+  publicDisposition?: RecallPublicDisposition
+  /** 内部处置总结：只对发起组织与平台可见。 */
+  resultSummary?: string
+  version: number
+  summary?: RecallSummary
+  scope?: RecallScopeItem[]
 }

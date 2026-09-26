@@ -1,4 +1,4 @@
-import type { Alert, AlertAffectedBatch, Batch, CurrentUser, Shipment, Transfer } from '@/types/enterprise'
+import type { Alert, AlertAffectedBatch, Batch, CurrentUser, Recall, Shipment, Transfer } from '@/types/enterprise'
 
 /**
  * 前端入口可见性判断，只用于隐藏不可执行的按钮；服务端仍独立校验全部权限。
@@ -195,4 +195,32 @@ export function canSubmitInspection(user: CurrentUser | null | undefined, curren
     && !user.scopes.includes('PLATFORM')
     && (currentOrgId === user.orgId || (quarantineReceiverOrgId !== null && quarantineReceiverOrgId !== undefined
       && quarantineReceiverOrgId === user.orgId)))
+}
+
+/**
+ * 发起模拟召回（PB5）：批次当前责任组织的质量管理员（非平台 / 系统管理员），批次已生效（ACTIVE / CLOSED）且尚未召回。
+ * NORMAL 批次还需要证据（最新检验不合格或已被上游召回圈定），由服务端在批次行锁下判定。
+ */
+export function canStartRecall(user: CurrentUser | null | undefined,
+  batch: { orgId?: number; currentOrgId?: number; flowStatus?: string; currentFlowStatus?: string; riskStatus?: string; currentRiskStatus?: string } | null | undefined): boolean {
+  if (!user || !batch) return false
+  const orgId = batch.currentOrgId ?? batch.orgId
+  const flow = batch.currentFlowStatus ?? batch.flowStatus
+  const risk = batch.currentRiskStatus ?? batch.riskStatus
+  return user.roles.includes('QUALITY_MANAGER')
+    && !user.roles.includes('SYSTEM_ADMIN')
+    && !user.scopes.includes('PLATFORM')
+    && orgId === user.orgId
+    && (flow === 'ACTIVE' || flow === 'CLOSED')
+    && risk !== 'RECALLED'
+}
+
+/** 关闭模拟召回（PB5）：发起组织的质量管理员，召回处置中。 */
+export function canCloseRecall(user: CurrentUser | null | undefined, recall: Recall | null | undefined): boolean {
+  return Boolean(user && recall
+    && user.roles.includes('QUALITY_MANAGER')
+    && !user.roles.includes('SYSTEM_ADMIN')
+    && !user.scopes.includes('PLATFORM')
+    && recall.ownerOrgId === user.orgId
+    && recall.status === 'IN_PROGRESS')
 }

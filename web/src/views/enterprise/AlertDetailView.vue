@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import InspectionReportPanel from '@/components/enterprise/InspectionReportPanel.vue'
+import RecallStartForm from '@/components/enterprise/RecallStartForm.vue'
 import { acknowledgeAlert, getAlert, releaseAlertBatch, resolveAlert } from '@/api/alerts'
 import { ApiError } from '@/api/client'
 import { useIdempotentWrite } from '@/composables/useIdempotentWrite'
@@ -23,7 +24,14 @@ import {
   formatTemperature,
   formatTransferStatus
 } from '@/utils/formatters'
-import { canAcknowledgeAlert, canHandleAlert, canReleaseAlertBatch, canResolveAlert, canSubmitInspection } from '@/utils/permissions'
+import {
+  canAcknowledgeAlert,
+  canHandleAlert,
+  canReleaseAlertBatch,
+  canResolveAlert,
+  canStartRecall,
+  canSubmitInspection
+} from '@/utils/permissions'
 
 /**
  * 告警详情（Phase B PB3 / PB4；统一业务契约 v1.1 §2.11 / §10.2 / §10.3 / §13）：持续超温片段与判定依据快照、受影响批次
@@ -64,6 +72,18 @@ const resolution = ref('')
 
 function canRelease(b: AlertAffectedBatch): boolean {
   return canReleaseAlertBatch(user.value, alert.value, b)
+}
+
+/** 告警处置中，归属组织的质量管理员可以对仍冻结（或最新检验不合格）的受影响批次发起模拟召回（PB5）。 */
+function canRecall(b: AlertAffectedBatch): boolean {
+  return Boolean(alert.value && alert.value.status === 'ACKNOWLEDGED' && canHandleAlert(user.value, alert.value)
+    && canStartRecall(user.value, b)
+    && (b.currentRiskStatus === 'FROZEN' || b.latestInspectionConclusion === 'FAIL'))
+}
+
+function onRecallConflict(message: string) {
+  flash.value = { tone: 'warning', message }
+  load()
 }
 
 /** 批次的质量处置进展（由服务端返回的事实推导）。 */
@@ -395,6 +415,14 @@ onBeforeUnmount(() => controller?.abort())
               依据检验结论放行
             </button>
           </div>
+          <RecallStartForm
+            v-if="canRecall(b) && releasing !== b.batchId"
+            :batch-ids="[b.batchId]"
+            :label="`批次 ${b.traceBatchNo}`"
+            :alert-id="alert.id"
+            :normal="b.currentRiskStatus === 'NORMAL'"
+            @conflict="onRecallConflict"
+          />
           <div v-if="releasing === b.batchId" class="release-form" :data-testid="`alert-release-form-${b.batchId}`">
             <label class="ent-field">
               <span>放行说明（可选）</span>

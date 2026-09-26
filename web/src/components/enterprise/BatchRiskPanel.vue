@@ -8,7 +8,8 @@ import { useIdempotentWrite } from '@/composables/useIdempotentWrite'
 import type { Batch, BatchRiskTransition, CurrentUser } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import { formatFlowStatus, formatIsoDateTime, formatRiskStatus } from '@/utils/formatters'
-import { canFreezeBatch, canReleaseBatch } from '@/utils/permissions'
+import { canFreezeBatch, canReleaseBatch, canStartRecall } from '@/utils/permissions'
+import RecallStartForm from '@/components/enterprise/RecallStartForm.vue'
 
 /**
  * 批次风险状态（Phase B PB1；统一业务契约 v1.1 §4.2 / §4.3 / §14）：当前责任组织的质量管理员填写原因并二次确认后
@@ -46,6 +47,7 @@ const writer = useIdempotentWrite()
 let controller: AbortController | null = null
 
 const canFreeze = computed(() => canFreezeBatch(props.user, props.batch))
+const canRecall = computed(() => canStartRecall(props.user, props.batch))
 const canRelease = computed(() => canReleaseBatch(props.user, props.batch))
 const confirmText = computed(() => mode.value === 'FREEZE'
   ? '确认风险冻结？冻结后本批次暂停加工 / 拆分、交接、终端销售、冷库仓储登记与首次激活公开追溯码；数量、当前责任组织与流转状态保持不变。'
@@ -118,12 +120,17 @@ async function submit() {
 }
 
 function transitionLabel(t: BatchRiskTransition): string {
-  if (t.sourceType === 'ALERT') return '告警自动冻结'
+  if (t.sourceType === 'RECALL') return '模拟召回'
+  if (t.sourceType === 'ALERT') return t.toStatus === 'FROZEN' ? '告警自动冻结' : '依据检验结论放行'
   return t.toStatus === 'FROZEN' ? '风险冻结' : '解除冻结'
 }
 
 function sourceLabel(t: BatchRiskTransition): string {
-  return t.sourceType === 'ALERT' ? '在途持续超温告警（系统自动，无操作人）' : '质量管理员人工处置'
+  if (t.sourceType === 'RECALL') return '模拟召回案件（质量管理员发起，风险终态）'
+  if (t.sourceType === 'ALERT') {
+    return t.toStatus === 'FROZEN' ? '在途持续超温告警（系统自动，无操作人）' : '告警质量结论（质量管理员依据检验报告）'
+  }
+  return '质量管理员人工处置'
 }
 
 watch(() => [props.batch.id, props.batch.version], () => {
@@ -153,14 +160,23 @@ onBeforeUnmount(() => controller?.abort())
       风险冻结中：加工 / 拆分、交接的创建 / 绑定 / 提交 / 接收、终端销售、冷库仓储登记与首次激活公开追溯码均已暂停；
       查询、消费者公开追溯页、运输发运 / 到达与到货拒收不受影响。
     </p>
-    <p v-else-if="batch.riskStatus === 'RECALLED'" class="ent-muted" data-testid="risk-recalled-note">
-      批次已进入模拟召回（风险终态），不能再风险冻结或解除冻结。
+    <p v-else-if="batch.riskStatus === 'RECALLED'" class="ent-flash error" role="status" data-testid="risk-recalled-note">
+      批次已进入模拟召回（风险终态）：不能再风险冻结、解除冻结、销售、交接或加工；消费者页面显示模拟召回提示。
+      {{ batch.flowStatus === 'CLOSED' ? '流转状态保持已关闭。' : '' }}
     </p>
 
     <div v-if="!mode && (canFreeze || canRelease)" class="ent-actions">
       <button v-if="canFreeze" type="button" class="ent-button ent-danger" data-testid="risk-freeze-open" @click="open('FREEZE')">风险冻结</button>
       <button v-if="canRelease" type="button" class="ent-button ent-primary" data-testid="risk-release-open" @click="open('RELEASE')">解除冻结</button>
     </div>
+
+    <RecallStartForm
+      v-if="!mode && canRecall"
+      :batch-ids="[batch.id]"
+      :label="`批次 ${batch.traceBatchNo}`"
+      :normal="batch.riskStatus === 'NORMAL'"
+      @conflict="(message) => emit('conflict', message)"
+    />
 
     <form v-if="mode" novalidate :data-mode="mode" data-testid="risk-form" @submit.prevent="next">
       <h3 class="form-title" data-testid="risk-form-title">{{ LABELS[mode] }}</h3>
@@ -222,6 +238,7 @@ onBeforeUnmount(() => controller?.abort())
         <div class="ent-muted" data-testid="risk-transition-source" :data-source-type="t.sourceType">
           {{ orgLabel(t.orgId) }} · {{ sourceLabel(t) }}
           <RouterLink v-if="t.sourceAlertId" :to="`/app/alerts/${t.sourceAlertId}`" data-testid="risk-transition-alert-link">查看告警</RouterLink>
+          <RouterLink v-if="t.sourceRecallId" :to="`/app/recalls/${t.sourceRecallId}`" data-testid="risk-transition-recall-link">查看模拟召回</RouterLink>
         </div>
       </li>
     </ol>

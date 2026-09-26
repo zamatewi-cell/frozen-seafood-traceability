@@ -16,6 +16,8 @@ import BatchOperationWizardView from '@/views/enterprise/BatchOperationWizardVie
 import BatchOperationDetailView from '@/views/enterprise/BatchOperationDetailView.vue'
 import AlertListView from '@/views/enterprise/AlertListView.vue'
 import AlertDetailView from '@/views/enterprise/AlertDetailView.vue'
+import RecallListView from '@/views/enterprise/RecallListView.vue'
+import RecallDetailView from '@/views/enterprise/RecallDetailView.vue'
 import { installAuthGuard } from './guards'
 
 declare module 'vue-router' {
@@ -119,6 +121,19 @@ export const routes: RouteRecordRaw[] = [
         component: AlertDetailView,
         props: true,
         meta: { title: '告警详情' }
+      },
+      {
+        path: 'recalls',
+        name: 'RecallList',
+        component: RecallListView,
+        meta: { title: '模拟召回' }
+      },
+      {
+        path: 'recalls/:id',
+        name: 'RecallDetail',
+        component: RecallDetailView,
+        props: true,
+        meta: { title: '模拟召回详情' }
       },
       {
         path: 'shipments',

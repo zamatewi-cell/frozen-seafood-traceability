@@ -468,3 +468,38 @@ export function formatInspectionConclusion(conclusion: string | null | undefined
 export function formatInspectionSubmitter(role: string | null | undefined): string {
   return role === 'QUARANTINE_RECEIVER' ? '隔离收货方提交' : role === 'CURRENT_ORG' ? '当前责任组织提交' : '提交方'
 }
+
+/** 模拟召回状态（PB5）。 */
+export function formatRecallStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'IN_PROGRESS':
+      return { label: '模拟召回处置中', tone: 'danger', description: '教学演练中的模拟召回正在处置' }
+    case 'CLOSED':
+      return { label: '模拟召回已关闭', tone: 'neutral', description: '处置已完成；批次仍保留模拟召回风险终态' }
+    default:
+      return { label: '未知状态', tone: 'neutral', description: '未知召回状态' }
+  }
+}
+
+/** 召回范围角色。 */
+export function formatRecallScopeRole(role: string | null | undefined): string {
+  const map: Record<string, string> = { SEED: '召回批次', DESCENDANT: '正向后续批次', ANCESTOR: '反向上游批次' }
+  return (role && map[role]) || '范围批次'
+}
+
+/** 召回范围处置动作。 */
+export function formatRecallScopeAction(action: string | null | undefined): string {
+  const map: Record<string, string> = {
+    RECALLED: '本次转为模拟召回',
+    ALREADY_RECALLED: '此前已进入模拟召回',
+    NOTIFY_HOLDER: '已通知持有方（由持有方发起召回）',
+    TRACE_ONLY: '溯源调查（不召回）'
+  }
+  return (action && map[action]) || '—'
+}
+
+/** 召回关闭的公开处置结论（消费者页面显示对应固定文案）。 */
+export function formatRecallDisposition(disposition: string | null | undefined): string {
+  const map: Record<string, string> = { DESTROYED: '按演练流程销毁处置', RETURNED: '按演练流程退回处置' }
+  return (disposition && map[disposition]) || '—'
+}
