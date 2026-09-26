@@ -85,7 +85,7 @@ tags:
   - name: ShipmentTemperature
     description: Shipment 在途温度记录（Phase B PB2：承运商单点登记与单点判定；单点不等于持续超温、不对消费者公开）
   - name: Alerts
-    description: 在途持续超温告警（Phase B PB3：系统按持续超温规则创建 Shipment 级告警并经风险核心自动冻结受影响批次；质量管理员确认处置）
+    description: 在途持续超温告警与质量处置（PB3：系统创建 Shipment 级告警并经风险核心自动冻结受影响批次；PB4：检验证据、依据检验结论放行与处置结论）
   - name: Organizations
     description: 企业端最小只读组织目录
   - name: Products
@@ -1204,9 +1204,10 @@ paths:
       - {$ref: '#/components/parameters/IdempotencyKey'}
     post:
       tags: [Transfers]
-      summary: 接收企业确认接受交接（PENDING -> ACCEPTED）
+      summary: 接收企业确认接受交接（PENDING / QUARANTINED -> ACCEPTED）
       description: |
-        前提：关联运输任务已 DELIVERED（否则 409 `SHIPMENT_NOT_DELIVERED`），批次仍为 `ACTIVE + NORMAL`。
+        前提：关联运输任务已 DELIVERED（否则 409 `SHIPMENT_NOT_DELIVERED`），批次仍为 `ACTIVE + NORMAL`（冻结 / 召回批次 409 `BATCH_FLOW_BLOCKED`）。
+        经隔离收货（PB4）的交接沿用隔离登记的到货时间与实收事实：请求实收数量必须与隔离登记一致（422 `QUARANTINE_RECEIPT_MISMATCH`）。
         原子转移批次当前责任组织与公开追溯码归属；批次数量不变；**不生成 ARRIVAL**（ARRIVAL 唯一来源为运输任务到达）。
         承运组织与发货组织不能接受交接（403 `ORG_SCOPE_DENIED`）。批次已开始终端销售：409 `BATCH_SALE_STARTED`（防御性）。
       operationId: acceptTransfer
@@ -1238,8 +1239,8 @@ paths:
       - {$ref: '#/components/parameters/IdempotencyKey'}
     post:
       tags: [Transfers]
-      summary: 接收企业拒收交接（PENDING -> REJECTED）
-      description: 前提：关联运输任务已 DELIVERED（否则 409 `SHIPMENT_NOT_DELIVERED`）。拒收不改变批次责任组织，不生成追溯事件。
+      summary: 接收企业拒收交接（PENDING / QUARANTINED -> REJECTED）
+      description: 前提：关联运输任务已 DELIVERED（否则 409 `SHIPMENT_NOT_DELIVERED`）。任何批次风险状态下都可拒收；经隔离后拒收保留隔离登记的到货时间与实收事实。拒收不改变批次责任组织，不生成追溯事件。
       operationId: rejectTransfer
       parameters:
         - {$ref: '#/components/parameters/CsrfHeader'}
@@ -1251,6 +1252,43 @@ paths:
       responses:
         '200':
           description: 拒收交接成功，批次保留在发货企业
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TransferEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+  /transfers/{transferId}/quarantine:
+    parameters:
+      - name: transferId
+        in: path
+        required: true
+        schema: {type: integer, format: int64}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+    post:
+      tags: [Transfers]
+      summary: 接收企业隔离收货（PENDING -> QUARANTINED，Phase B PB4）
+      description: |
+        契约 v1.1 §7.3 / §10.3。接收方的 OPERATOR 或 QUALITY_MANAGER；前提：关联运输任务已 DELIVERED（否则 409 `SHIPMENT_NOT_DELIVERED`）。
+        登记实收数量（与交接数量不一致时必须填写差异原因，422 `DIFFERENCE_REASON_REQUIRED`）、到货时间（不早于运输到达、不晚于当前时间，
+        422 `INVALID_BUSINESS_TIME`）、隔离场所（必须是本组织启用场所，422 `QUARANTINE_SITE_INVALID`）与隔离原因。
+        批次风险状态不限（冻结批次正是隔离收货的主要场景）。隔离不改变批次当前责任组织（仍为发送方）、数量与风险状态，不生成追溯事件；
+        隔离中的交接仍是未结束交接：批次不能再发起交接、加工或销售。之后批次风险恢复正常时可 ACCEPT（沿用隔离登记的实收事实），
+        任何风险状态下都可 REJECT。同组织同键同语义重放原结果；锁顺序 shipment(FOR SHARE) → transfer(FOR UPDATE)。
+      operationId: quarantineTransfer
+      parameters:
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransferQuarantineRequest'}
+      responses:
+        '200':
+          description: 隔离收货成功，批次仍由发货企业负责
           content:
             application/json:
               schema: {$ref: '#/components/schemas/TransferEnvelope'}
@@ -1618,6 +1656,116 @@ paths:
       responses:
         '200':
           description: 确认后（或幂等重放）的告警详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/inspection-reports:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    post:
+      tags: [Alerts]
+      summary: 提交批次检验报告（Phase B PB4，追加式证据）
+      description: |
+        契约 v1.1 §2.10 / §10.3 / §14。QUALITY_MANAGER（平台 / 系统管理员 403 `ADMIN_RESTRICTED`，其他角色 403 `ACCESS_DENIED`）；
+        提交组织必须是批次当前责任组织（`CURRENT_ORG`），或该批次隔离中（QUARANTINED）交接的接收方（`QUARANTINE_RECEIVER`，
+        隔离期间只有证据提交权限），否则 403 `ORG_SCOPE_DENIED`。可关联告警（批次必须是该告警的受影响批次，否则 422 `ALERT_BATCH_MISMATCH`；
+        告警已形成处置结论 409）。结论只有 PASS / FAIL；组织内报告编号重复 409 `INSPECTION_REPORT_NO_DUPLICATE`。
+        报告只是证据：不自动冻结、放行或召回，也不核验检验机构的资质与真实性；不生成追溯事件。锁顺序：批次行锁（与告警放行串行化）。
+      operationId: submitInspectionReport
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InspectionReportRequest'}
+      responses:
+        '201':
+          description: 已登记（或幂等重放）的检验报告
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InspectionReportEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+    get:
+      tags: [Alerts]
+      summary: 查询批次检验报告
+      description: 批次当前责任组织与平台只读看全部；提交过报告的组织与隔离接收方只看本组织提交的报告；其他组织 403 `ORG_SCOPE_DENIED`。
+      operationId: listInspectionReports
+      responses:
+        '200':
+          description: 检验报告列表（按登记顺序）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InspectionReportListEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /alerts/{alertId}/batches/{batchId}/release:
+    parameters:
+      - {$ref: '#/components/parameters/AlertId'}
+      - {$ref: '#/components/parameters/BatchId'}
+    post:
+      tags: [Alerts]
+      summary: 依据检验结论放行受影响批次（FROZEN → NORMAL，Phase B PB4）
+      description: |
+        契约 v1.1 §10.2 步骤 7 / §13 步骤 10。告警归属组织的 QUALITY_MANAGER；告警必须已确认（OPEN 409 `ALERT_NOT_ACKNOWLEDGED`，
+        RESOLVED 409 `INVALID_STATE_TRANSITION`）；批次必须是本告警的受影响批次（404）且尚未放行（409）；批次当前责任组织必须是本组织（403）。
+        在批次行锁之后读取关联本告警的该批次**最新**检验报告：没有 409 `INSPECTION_REQUIRED`，不合格 409 `INSPECTION_NOT_PASSED`；
+        批次必须仍冻结。成功时经风险核心 FROZEN → NORMAL（来源 ALERT、操作人为该质量管理员、系统键 `SYS:ALERT-RELEASE:{alertId}:BATCH:{batchId}`），
+        追加 `RELEASE_BATCH` 处置动作（引用放行转换与依据报告），审计 `ALERT_RELEASE_BATCH` / `RISK_RELEASE`。交接保持原状态，
+        接收方随后决定接受。处于未处置告警中的批次不能再经人工接口解除冻结（409 `ALERT_DECISION_REQUIRED`）。锁顺序 alert → batch。
+      operationId: releaseAlertBatch
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AlertReleaseRequest'}
+      responses:
+        '200':
+          description: 放行后（或幂等重放）的告警详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+  /alerts/{alertId}/resolve:
+    parameters:
+      - {$ref: '#/components/parameters/AlertId'}
+    post:
+      tags: [Alerts]
+      summary: 形成告警处置结论（ACKNOWLEDGED → RESOLVED，Phase B PB4）
+      description: |
+        告警归属组织的 QUALITY_MANAGER；告警必须处于 ACKNOWLEDGED；每个受影响批次都必须已依据本告警放行或已进入模拟召回（RECALLED），
+        否则 409 `ALERT_BATCHES_PENDING`。处置结论去除首尾空白后 1..500 个字符。追加 `RESOLVE` 动作并审计 `ALERT_RESOLVE`；不改变任何批次。
+      operationId: resolveAlert
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AlertResolveRequest'}
+      responses:
+        '200':
+          description: 形成处置结论后（或幂等重放）的告警详情
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AlertEnvelope'}
@@ -2431,7 +2579,7 @@ components:
     BatchRiskTransition:
       type: object
       additionalProperties: false
-      description: 风险状态转换白名单投影（不含幂等键、请求哈希与登记时间）。人工 NORMAL ⇄ FROZEN（MANUAL）与告警系统自动冻结 NORMAL → FROZEN（ALERT，无操作人）。
+      description: 风险状态转换白名单投影（不含幂等键、请求哈希与登记时间）。人工 NORMAL ⇄ FROZEN（MANUAL）、告警系统自动冻结 NORMAL → FROZEN（ALERT，无操作人）与依据检验结论放行 FROZEN → NORMAL（ALERT，质量管理员操作人）。
       required: [id, batchId, orgId, flowStatus, fromStatus, toStatus, sourceType, reason, occurredAt]
       properties:
         id: {type: integer, format: int64}
@@ -2555,14 +2703,21 @@ components:
         currentRiskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
         quantity: {type: number}
         unitCode: {type: string}
+        released: {type: boolean, description: 是否已依据检验结论放行（PB4）}
+        releaseTransitionId: {type: integer, format: int64}
+        latestInspectionConclusion: {type: string, enum: [PASS, FAIL], description: 关联本告警的最新检验结论；没有报告时不输出}
+        inspectionCount: {type: integer, minimum: 0}
     AlertAction:
       type: object
       additionalProperties: false
       required: [id, action, orgId, actorUserId, occurredAt]
       properties:
         id: {type: integer, format: int64}
-        action: {type: string, enum: [ACKNOWLEDGE]}
+        action: {type: string, enum: [ACKNOWLEDGE, RELEASE_BATCH, RESOLVE]}
         orgId: {type: integer, format: int64}
+        batchId: {type: integer, format: int64, description: RELEASE_BATCH 的放行批次}
+        riskTransitionId: {type: integer, format: int64, description: RELEASE_BATCH 的放行风险转换}
+        inspectionReportId: {type: integer, format: int64, description: RELEASE_BATCH 的依据检验报告}
         actorUserId: {type: integer, format: int64}
         note: {type: string}
         occurredAt: {type: string, format: date-time, description: 'UTC，微秒精度，服务端生成'}
@@ -2622,9 +2777,78 @@ components:
             data:
               type: array
               items: {$ref: '#/components/schemas/Alert'}
+    TransferQuarantineRequest:
+      type: object
+      additionalProperties: false
+      required: [receivedQuantity, unitCode, occurredAt, quarantineSiteId, reason, expectedVersion]
+      properties:
+        receivedQuantity: {type: number, exclusiveMinimum: 0, multipleOf: 0.001}
+        unitCode: {type: string}
+        occurredAt: {type: string, format: date-time, description: 到货业务时间（不早于运输到达）}
+        differenceReason: {type: string, maxLength: 500, description: 实收数量与交接数量不一致时必填}
+        quarantineSiteId: {type: integer, format: int64, description: 本组织启用场所}
+        reason: {type: string, minLength: 1, maxLength: 500}
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+    InspectionReportRequest:
+      type: object
+      additionalProperties: false
+      required: [reportNo, institutionName, inspectedAt, itemsSummary, conclusion, dataSource]
+      properties:
+        reportNo: {type: string, minLength: 1, maxLength: 64}
+        institutionName: {type: string, minLength: 1, maxLength: 128, description: 本系统不核验其资质与真实性}
+        inspectedAt: {type: string, format: date-time}
+        itemsSummary: {type: string, minLength: 1, maxLength: 500}
+        conclusion: {type: string, enum: [PASS, FAIL]}
+        dataSource: {type: string, enum: [MANUAL, SIMULATED]}
+        alertId: {type: integer, format: int64, description: 可选：关联告警（批次必须是其受影响批次）}
+    InspectionReport:
+      type: object
+      additionalProperties: false
+      required: [id, batchId, orgId, submitterRole, reportNo, institutionName, inspectedAt, itemsSummary, conclusion, dataSource, actorUserId, recordedAt]
+      properties:
+        id: {type: integer, format: int64}
+        batchId: {type: integer, format: int64}
+        orgId: {type: integer, format: int64}
+        submitterRole: {type: string, enum: [CURRENT_ORG, QUARANTINE_RECEIVER]}
+        transferId: {type: integer, format: int64, description: QUARANTINE_RECEIVER 的隔离交接}
+        alertId: {type: integer, format: int64}
+        reportNo: {type: string}
+        institutionName: {type: string}
+        inspectedAt: {type: string, format: date-time}
+        itemsSummary: {type: string}
+        conclusion: {type: string, enum: [PASS, FAIL]}
+        dataSource: {type: string, enum: [MANUAL, SIMULATED]}
+        actorUserId: {type: integer, format: int64}
+        recordedAt: {type: string, format: date-time}
+    InspectionReportEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/InspectionReport'}
+    InspectionReportListEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/InspectionReport'}
+    AlertReleaseRequest:
+      type: object
+      additionalProperties: false
+      description: 放行请求；决定人、依据报告与状态由服务端决定。夹带 resolution 或其他未声明字段返回 400。
+      properties:
+        note: {type: string, maxLength: 500, description: 可选说明（写入放行转换原因）}
+    AlertResolveRequest:
+      type: object
+      additionalProperties: false
+      required: [resolution]
+      properties:
+        resolution: {type: string, minLength: 1, maxLength: 500}
     TransferStatus:
       type: string
-      enum: [DRAFT, PENDING, ACCEPTED, REJECTED]
+      enum: [DRAFT, PENDING, QUARANTINED, ACCEPTED, REJECTED]
     Transfer:
       type: object
       additionalProperties: false
@@ -2674,6 +2898,12 @@ components:
           type: [string, "null"]
         rejectionReason:
           type: [string, "null"]
+        quarantineSiteId: {type: integer, format: int64, description: 隔离场所（PB4，QUARANTINED 及其后续决定保留）}
+        quarantineReason: {type: string}
+        quarantinedRecordedAt: {type: string, format: date-time}
+        quarantinedBy: {type: integer, format: int64}
+        batchFlowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
+        batchRiskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
         version: {type: integer, format: int64, minimum: 0}
         createdAt: {type: string, format: date-time}
         updatedAt: {type: string, format: date-time}

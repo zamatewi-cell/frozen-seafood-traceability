@@ -6,6 +6,14 @@
 
 ### Added
 
+- Phase B PB4 隔离收货 → 检验证据 → 质量结论放行 / 拒收 → 告警处置结论（契约 v1.1 §2.10 / §7.3 / §10.2 步骤 5–7 / §10.3 / §13 步骤 5–11 / §14）：
+  - Flyway V15：前置条件要求 V1 占位表 `inspection_report` 为空（fail-fast）；`transfer` 新增隔离事实（隔离场所经复合外键必须属于接收方、原因、登记时间与操作人）、状态 `QUARANTINED`、未结束交接排他覆盖 QUARANTINED，并重建生命周期形状 CHECK（经隔离后的 ACCEPTED / REJECTED 保留隔离事实，隔离后拒收保留实收数量）；以契约对象重建追加式 `inspection_report`（提交身份 CURRENT_ORG / QUARANTINE_RECEIVER，后者经复合外键证明是该批次隔离交接的接收方；可关联告警并经复合外键保证批次属于其受影响批次；结论 PASS / FAIL；不含机构资质核验字段）；`alert_action` 新增 `RELEASE_BATCH`（必须引用来源于同一告警的放行转换与该批次的报告，同批次最多放行一次）与 `RESOLVE`；`batch_risk_transition` ALERT 来源增加质量管理员放行 FROZEN → NORMAL。不回填，不修改 V1–V14。
+  - `POST /api/v1/transfers/{id}/quarantine`：接收方 PENDING → QUARANTINED（运输已到达，实收数量 / 差异原因 / 本组织启用隔离场所 / 原因）；不改变批次责任组织、数量与风险状态，不生成追溯事件；隔离期间批次不能再交接、加工或销售。`accept` / `reject` 接受 QUARANTINED：接受要求批次风险恢复正常并沿用隔离登记的实收事实，拒收在任何风险状态下可用。交接响应新增隔离事实与批次当前流转 / 风险状态。
+  - 检验报告 `POST / GET /api/v1/batches/{batchId}/inspection-reports`：当前责任组织或隔离接收方的质量管理员提交，只是证据（不自动放行 / 冻结 / 召回）；批次行锁与告警放行串行化。
+  - 告警质量处置：`POST /api/v1/alerts/{alertId}/batches/{batchId}/release`（已确认、批次冻结、关联本告警的最新检验报告为 PASS，经风险核心放行，锁顺序 alert → batch）与 `POST /api/v1/alerts/{alertId}/resolve`（全部受影响批次已放行或已进入召回）；人工解除冻结不能绕过未处置告警（409 `ALERT_DECISION_REQUIRED`）。
+  - 确定性竞态（真实 MySQL）：隔离与接受同一交接任一顺序只有一个决定生效；先提交的不合格报告必然阻止之后的放行，先完成的放行不受之后报告影响。
+  - 生产 Vue：待接收交接增加隔离收货（冻结批次禁用接受、隔离场所与原因、二次确认、隔离中 / 已放行提示、按隔离实收数量接受）；告警详情按批次展示检验证据与处置进展、提交检验报告（关联告警）、依据检验结论放行与形成处置结论（均二次确认）；批次详情新增检验报告面板。
+
 - Phase B PB3 在途持续超温 → Shipment 级告警 → 受影响批次自动冻结（契约 v1.1 §2.11 / §10.1 / §10.2 步骤 2–4 / §13 步骤 2–4 / §14）：
   - Flyway V14：前置条件要求 V1 占位表 `alert` 为空（fail-fast，在任何 DDL 之前失败），以契约对象重建 `alert`（只承载 Shipment 级 `TEMP_OVER_UPPER` / `TEMP_UNDER_LOWER`；归属组织经复合外键必须是运输任务发货方；片段首条记录与达到时长记录经复合外键必须属于同一运输任务；判定依据快照；`OPEN → ACKNOWLEDGED → RESOLVED` 生命周期形状；同一片段唯一；不可删除）；新建受影响批次快照 `alert_batch`（冻结转换经复合外键必须来源于同一告警）与追加式处置台账 `alert_action`；`batch_risk_transition` 新增类型化来源外键 `source_alert_id` 与 `ALERT` 来源（只允许系统 NORMAL → FROZEN、无操作人），不回填。不修改 V1–V13。
   - 持续超温判定（纯函数）：只使用温度记录持久化的判定依据快照，按 (measuredAt, id) 排序，连续、同方向、同一判定依据的越界记录构成片段，已测区间 ≥ 允许时长（或允许时长为 0）即构成持续超温；单点、被范围内 / 无规则记录打断、方向改变、依据改变都不构成；乱序补登可补全片段；同一片段只告警一次。
