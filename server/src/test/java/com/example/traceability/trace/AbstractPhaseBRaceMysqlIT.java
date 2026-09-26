@@ -44,7 +44,8 @@ abstract class AbstractPhaseBRaceMysqlIT extends AbstractPhaseBMysqlIT {
     /** 可被门闩拦截的 mapper（后续 PB 按需追加）。 */
     static final List<Class<?>> GATED_MAPPERS = new ArrayList<>(List.of(
             TemperatureRecordMapper.class, ShipmentMapper.class, TransferMapper.class, AuditLogMapper.class,
-            AlertMapper.class, AlertBatchMapper.class, AlertActionMapper.class, BatchRiskTransitionMapper.class));
+            AlertMapper.class, AlertBatchMapper.class, AlertActionMapper.class, BatchRiskTransitionMapper.class,
+            com.example.traceability.quality.mapper.InspectionReportMapper.class));
 
     interface AfterRelease {
         void run() throws Exception;

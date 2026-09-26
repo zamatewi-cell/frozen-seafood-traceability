@@ -247,6 +247,9 @@ abstract class AbstractTransferShipmentMysqlIT {
         // V14：alert_action / alert_batch → alert；alert_batch → batch / transfer / batch_risk_transition，必须先于风险台账清理
         clean("DELETE FROM alert_action WHERE alert_id IN (SELECT id FROM alert WHERE org_id = ?)", createdOrgIds);
         clean("DELETE FROM alert_action WHERE org_id = ?", createdOrgIds);
+        // V15：inspection_report → batch / transfer / alert_batch（追加式），先于受影响批次快照与交接清理
+        clean("DELETE FROM inspection_report WHERE org_id = ?", createdOrgIds);
+        clean("DELETE FROM inspection_report WHERE batch_id = ?", createdBatchIds);
         clean("DELETE FROM alert_batch WHERE alert_id IN (SELECT id FROM alert WHERE org_id = ?)", createdOrgIds);
         clean("DELETE FROM alert_batch WHERE batch_id = ?", createdBatchIds);
         // V12：batch_risk_transition → batch / organization（追加式台账），必须先于批次与组织清理

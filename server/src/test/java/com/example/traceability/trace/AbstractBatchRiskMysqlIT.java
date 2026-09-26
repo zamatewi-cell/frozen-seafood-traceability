@@ -97,9 +97,13 @@ abstract class AbstractBatchRiskMysqlIT extends AbstractTransferShipmentMysqlIT 
                 assertThat(r.get("from_status")).as("ledger chain continuity").isEqualTo(previous);
             }
             if ("ALERT".equals(r.get("source_type"))) {
-                // PB3 系统自动冻结：类型化告警来源，无操作人
+                // PB3 系统自动冻结（无操作人）/ PB4 依据检验结论放行（质量管理员操作人）：类型化告警来源
                 assertThat(r.get("source_alert_id")).isNotNull();
-                assertThat(r.get("actor_user_id")).isNull();
+                if ("FROZEN".equals(r.get("to_status"))) {
+                    assertThat(r.get("actor_user_id")).isNull();
+                } else {
+                    assertThat(r.get("actor_user_id")).isNotNull();
+                }
             } else {
                 assertThat(r.get("source_type")).isEqualTo("MANUAL");
                 assertThat(r.get("actor_user_id")).isNotNull();

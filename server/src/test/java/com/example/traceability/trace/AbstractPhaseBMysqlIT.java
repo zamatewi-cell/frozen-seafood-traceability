@@ -47,6 +47,9 @@ abstract class AbstractPhaseBMysqlIT extends AbstractBatchRiskMysqlIT {
         }
     }
 
+    /** 本测试用例开始时间（UTC，秒精度）：构造确定性的业务时间，使同键重放的请求语义一致。 */
+    protected final LocalDateTime testStartedAt = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.SECONDS);
+
     private MockHttpSession senderQmSession;
     private MockHttpSession receiverQmSession;
 
@@ -146,5 +149,80 @@ abstract class AbstractPhaseBMysqlIT extends AbstractBatchRiskMysqlIT {
     protected int alertLedgerRows(Long batchId, Long alertId) {
         return count("SELECT count(*) FROM batch_risk_transition WHERE batch_id = ? AND source_type = 'ALERT' AND source_alert_id = ?",
                 batchId, alertId);
+    }
+
+    // =========================================================================
+    // PB4：隔离收货、检验报告、告警放行与处置结论
+    // =========================================================================
+
+    /**
+     * 发货方 {@code quantities.length} 个批次装载同一运输任务 → 承运商发运 → 允许越界时长 0 的规则下登记一条越界温度
+     * （形成告警并自动冻结全部批次）→ 承运商确认到达。返回装载清单，告警 ID 通过 {@link #onlyAlertId} 获取。
+     */
+    protected Manifest deliveredAlertManifest(String tag, String... quantities) throws Exception {
+        publishTransportRule(testProduct.getId(), "-25.00", "-15.00", LONG_AGO, null, 0);
+        Manifest m = inTransitManifest(tag, LocalDateTime.now(ZoneOffset.UTC).minusHours(2), quantities);
+        LocalDateTime measured = m.loadedAt().plusMinutes(5);
+        recordAt(m.shipmentId(), measured, "-10.00");
+        arriveAt(m.shipmentId(), measured.plusMinutes(1));
+        return m;
+    }
+
+    protected MockHttpServletRequestBuilder quarantineReq(MockHttpSession session, Long transferId, String qty, String differenceReason,
+                                                         Long siteId, String reason, String idemKey) throws Exception {
+        return quarantineReq(session, transferId, qty, differenceReason, siteId, reason, idemKey, transferVersion(transferId));
+    }
+
+    /** 同上，显式指定期望版本（幂等重放必须原样重发首次请求的版本）。 */
+    protected MockHttpServletRequestBuilder quarantineReq(MockHttpSession session, Long transferId, String qty, String differenceReason,
+                                                         Long siteId, String reason, String idemKey, long expectedVersion) throws Exception {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("receivedQuantity", new BigDecimal(qty));
+        body.put("unitCode", "kg");
+        // 到货时间取运输到达时间后 1 秒：确定性（同一交接的重放语义一致）且不早于运输到达
+        LocalDateTime unloadedAt = jdbcTemplate.queryForObject(
+                "SELECT s.unloaded_at FROM transfer t JOIN shipment s ON s.id = t.shipment_id WHERE t.id = ?", LocalDateTime.class, transferId);
+        body.put("occurredAt", iso((unloadedAt == null ? LocalDateTime.now(ZoneOffset.UTC) : unloadedAt).plusSeconds(1)));
+        if (differenceReason != null) {
+            body.put("differenceReason", differenceReason);
+        }
+        body.put("quarantineSiteId", siteId);
+        body.put("reason", reason);
+        body.put("expectedVersion", expectedVersion);
+        return postJson(session, "/api/v1/transfers/" + transferId + "/quarantine", idemKey, body);
+    }
+
+    protected JsonNode quarantine(Long transferId, String qty) throws Exception {
+        return expect(quarantineReq(receiverSession, transferId, qty, null, receiverSite.getId(), "到货随附持续超温告警，隔离待检",
+                key("idem-trf-q")), 200).get("data");
+    }
+
+    protected MockHttpServletRequestBuilder inspectionReq(MockHttpSession session, Long batchId, String reportNo, String conclusion,
+                                                          Long alertId, String idemKey) throws Exception {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("reportNo", reportNo);
+        body.put("institutionName", "教学演示检测中心");
+        body.put("inspectedAt", iso(testStartedAt.minusMinutes(1)));
+        body.put("itemsSummary", "中心温度、感官与微生物抽检");
+        body.put("conclusion", conclusion);
+        body.put("dataSource", "SIMULATED");
+        if (alertId != null) {
+            body.put("alertId", alertId);
+        }
+        return postJson(session, "/api/v1/batches/" + batchId + "/inspection-reports", idemKey, body);
+    }
+
+    protected JsonNode inspect(MockHttpSession session, Long batchId, String reportNo, String conclusion, Long alertId) throws Exception {
+        return expect(inspectionReq(session, batchId, reportNo, conclusion, alertId, key("idem-insp")), 201).get("data");
+    }
+
+    protected MockHttpServletRequestBuilder releaseReq(MockHttpSession session, Long alertId, Long batchId, String note, String idemKey) throws Exception {
+        return postJson(session, "/api/v1/alerts/" + alertId + "/batches/" + batchId + "/release", idemKey,
+                com.example.traceability.quality.dto.AlertDecisionRequest.release(note));
+    }
+
+    protected MockHttpServletRequestBuilder resolveReq(MockHttpSession session, Long alertId, String resolution, String idemKey) throws Exception {
+        return postJson(session, "/api/v1/alerts/" + alertId + "/resolve", idemKey,
+                com.example.traceability.quality.dto.AlertDecisionRequest.resolve(resolution));
     }
 }
