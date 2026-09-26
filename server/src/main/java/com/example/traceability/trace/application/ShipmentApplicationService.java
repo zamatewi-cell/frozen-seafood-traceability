@@ -73,6 +73,8 @@ import java.util.stream.Collectors;
  * <p>
  * Demo MVP Phase A 阶段性限制：承运方必须为独立的 {@code CARRIER} 类型组织，且承运组织不能作为发货方创建运输任务。
  * 统一业务契约 v1.1 未规定承运方必须与发送 / 接收方不同，因此该限制只在应用层执行，不写入数据库永久约束。
+ * Demo MVP（Phase B PB2）阶段性限制：同一运输任务只装载同一产品的批次，作为契约 §7.1“兼容的运输温控规则”在多温区混装
+ * 不在 MVP 范围内时的无歧义解释；同样只在应用层执行，不写入数据库永久约束。
  * </p>
  *
  * @author Seafood Traceability Team
@@ -310,10 +312,12 @@ public class ShipmentApplicationService {
                     "同一运输任务中的交接必须具有相同发送方、接收方、起点与终点；该交接的接收方与运输任务目的组织不一致"
             );
         }
+        Set<Long> manifestBatchIds = new HashSet<>();
         for (Transfer loaded : transferMapper.selectByShipmentId(shipmentId)) {
             if (Objects.equals(loaded.getBatchId(), transfer.getBatchId())) {
                 throw shipmentBatchDuplicate();
             }
+            manifestBatchIds.add(loaded.getBatchId());
         }
 
         Batch batch = batchMapper.selectByIdForUpdate(transfer.getBatchId());
@@ -323,6 +327,7 @@ public class ShipmentApplicationService {
         requireBatchTransferable(batch, orgId);
         // 防御性：已开始终端销售的批次不得装载交接（正常情况下交接创建时已被拒绝）
         BatchSaleGuard.rejectIfSaleStarted(batch, "装载交接");
+        requireSameProductManifest(batch, manifestBatchIds);
 
         try {
             if (transferMapper.bindShipment(transfer.getId(), shipmentId, req.expectedTransferVersion(), principal.getUserId()) != 1) {
@@ -817,6 +822,32 @@ public class ShipmentApplicationService {
                     "批次已被物料操作消耗",
                     "批次已被已提交的批次操作作为投入(INPUT)消耗，禁止装载交接"
             );
+        }
+    }
+
+    /**
+     * Demo MVP（PB2）应用层限制：同一运输任务只装载同一产品的批次。
+     * <p>
+     * 契约 v1.1 §7.1 要求同一 Shipment 的 Transfer 具有兼容的运输温控规则，但未定义“兼容”；规则按产品、环节与测量业务时间
+     * 版本化选择（§10.1），多温区混装是 MVP 非目标（§1.1）。只有“同一产品”在整个运输期间始终对应唯一规则版本序列，
+     * 因此 Demo MVP 以此作为无歧义的解释。这不是契约对所有运输任务的普遍要求，不写入数据库永久约束。
+     * 批次产品创建后不可变，装载清单上其他批次的产品用非锁定读即可稳定获得，不引入新的锁。
+     * </p>
+     */
+    private void requireSameProductManifest(Batch batch, Set<Long> manifestBatchIds) {
+        if (manifestBatchIds.isEmpty()) {
+            return;
+        }
+        for (Batch loaded : batchMapper.selectByIdsIgnoreTenant(manifestBatchIds)) {
+            if (!Objects.equals(loaded.getProductId(), batch.getProductId())) {
+                throw new BusinessException(
+                        HttpStatus.UNPROCESSABLE_ENTITY,
+                        "SHIPMENT_PRODUCT_MISMATCH",
+                        "装载产品不一致",
+                        "Demo MVP 阶段同一运输任务只装载同一产品的批次，以保证运输温控规则唯一（多温区混装不在 MVP 范围内）；"
+                                + "该交接的批次产品与装载清单中已有批次不同，请为其另建运输任务"
+                );
+            }
         }
     }
 

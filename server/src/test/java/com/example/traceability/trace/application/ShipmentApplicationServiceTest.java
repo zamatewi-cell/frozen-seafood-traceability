@@ -250,6 +250,54 @@ class ShipmentApplicationServiceTest {
     }
 
     @Test
+    @DisplayName("绑定（PB2 Demo MVP 限制）：批次产品与装载清单已有批次不同时 422 SHIPMENT_PRODUCT_MISMATCH，不绑定、不递增版本")
+    void bind_rejectsDifferentProductOnManifest() {
+        when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.PLANNED));
+        when(transferMapper.selectByIdForUpdate(5021L)).thenReturn(transfer(5021L, 1021L, TransferStatus.DRAFT));
+        Transfer loaded = transfer(5020L, 1020L, TransferStatus.DRAFT);
+        loaded.setShipmentId(SHIPMENT_ID);
+        when(transferMapper.selectByShipmentId(SHIPMENT_ID)).thenReturn(List.of(loaded));
+        Batch onManifest = batch(1020L);
+        onManifest.setProductId(7L);
+        Batch incoming = batch(1021L);
+        incoming.setProductId(8L);
+        when(batchMapper.selectByIdForUpdate(1021L)).thenReturn(incoming);
+        when(batchMapper.selectByIdsIgnoreTenant(any())).thenReturn(List.of(onManifest));
+
+        assertThatThrownBy(() -> service.bindTransfer(SHIPMENT_ID, new ShipmentBindTransferRequest(5021L, 0L), "idem-bind-000000021", sender))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(e -> {
+                    BusinessException be = (BusinessException) e;
+                    assertThat(be.getCode()).isEqualTo("SHIPMENT_PRODUCT_MISMATCH");
+                    assertThat(be.getStatus().value()).isEqualTo(422);
+                });
+        verify(transferMapper, never()).bindShipment(anyLong(), anyLong(), anyLong(), anyLong());
+        verify(shipmentMapper, never()).bumpManifestVersion(anyLong(), anyLong());
+    }
+
+    @Test
+    @DisplayName("绑定（PB2 Demo MVP 限制）：同一产品的第二个批次可以装载同一运输任务")
+    void bind_allowsSameProductOnManifest() {
+        when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.PLANNED));
+        when(transferMapper.selectByIdForUpdate(5023L)).thenReturn(transfer(5023L, 1023L, TransferStatus.DRAFT));
+        Transfer loaded = transfer(5022L, 1022L, TransferStatus.DRAFT);
+        loaded.setShipmentId(SHIPMENT_ID);
+        when(transferMapper.selectByShipmentId(SHIPMENT_ID)).thenReturn(List.of(loaded));
+        Batch onManifest = batch(1022L);
+        onManifest.setProductId(7L);
+        Batch incoming = batch(1023L);
+        incoming.setProductId(7L);
+        when(batchMapper.selectByIdForUpdate(1023L)).thenReturn(incoming);
+        when(batchMapper.selectByIdsIgnoreTenant(any())).thenReturn(List.of(onManifest));
+        when(transferMapper.bindShipment(5023L, SHIPMENT_ID, 0L, 101L)).thenReturn(1);
+        when(shipmentMapper.bumpManifestVersion(SHIPMENT_ID, 101L)).thenReturn(1);
+
+        service.bindTransfer(SHIPMENT_ID, new ShipmentBindTransferRequest(5023L, 0L), "idem-bind-000000023", sender);
+
+        verify(transferMapper).bindShipment(5023L, SHIPMENT_ID, 0L, 101L);
+    }
+
+    @Test
     @DisplayName("绑定：非 PLANNED 运输任务禁止变更装载清单，且不会锁交接")
     void bind_afterDispatch_rejected() {
         when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.IN_TRANSIT));
