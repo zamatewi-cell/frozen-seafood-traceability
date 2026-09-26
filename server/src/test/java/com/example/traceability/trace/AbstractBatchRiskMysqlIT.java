@@ -89,14 +89,22 @@ abstract class AbstractBatchRiskMysqlIT extends AbstractTransferShipmentMysqlIT 
      */
     protected void assertLedgerConsistent(Long batchId) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "SELECT from_status, to_status, source_type, actor_user_id FROM batch_risk_transition WHERE batch_id = ? ORDER BY id", batchId);
+                "SELECT from_status, to_status, source_type, source_alert_id, actor_user_id FROM batch_risk_transition "
+                        + "WHERE batch_id = ? ORDER BY id", batchId);
         String previous = null;
         for (Map<String, Object> r : rows) {
             if (previous != null) {
                 assertThat(r.get("from_status")).as("ledger chain continuity").isEqualTo(previous);
             }
-            assertThat(r.get("source_type")).isEqualTo("MANUAL");
-            assertThat(r.get("actor_user_id")).isNotNull();
+            if ("ALERT".equals(r.get("source_type"))) {
+                // PB3 系统自动冻结：类型化告警来源，无操作人
+                assertThat(r.get("source_alert_id")).isNotNull();
+                assertThat(r.get("actor_user_id")).isNull();
+            } else {
+                assertThat(r.get("source_type")).isEqualTo("MANUAL");
+                assertThat(r.get("actor_user_id")).isNotNull();
+                assertThat(r.get("source_alert_id")).isNull();
+            }
             previous = (String) r.get("to_status");
         }
         if (previous != null) {
