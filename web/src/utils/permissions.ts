@@ -90,6 +90,16 @@ export function shipmentRoleOf(user: CurrentUser | null | undefined, shipment: S
 }
 
 /**
+ * Shipment 在途温度登记（Phase B PB2）：运输任务指定承运组织的操作员（非平台角色），仅在运输途中（IN_TRANSIT）。
+ * 发货方与接收方只读；服务端仍独立校验承运组织、运输状态与测量时间窗口。
+ */
+export function canRecordShipmentTemperature(user: CurrentUser | null | undefined, shipment: Shipment | null | undefined): boolean {
+  return Boolean(isCarrierOperator(user) && shipment
+    && shipment.carrierOrg.id === user?.orgId
+    && shipment.status === 'IN_TRANSIT')
+}
+
+/**
  * 公开追溯码管理（激活 / 停用）：批次当前责任组织的企业操作员（非平台角色）；组织类型不受限。
  * 历史参与组织在批次转出后不能再修改该批次的公开追溯码（服务端同样校验）。
  */
