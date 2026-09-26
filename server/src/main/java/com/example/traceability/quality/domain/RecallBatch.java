@@ -42,6 +42,8 @@ public class RecallBatch {
     private String currentRiskStatus;
     private String currentFlowStatus;
     private String openTransferNo;
+    /** 范围批次的当前责任组织（只用于服务端判定查看范围与字段过滤，不直接输出）。 */
+    private Long currentOrgId;
 
     public Long getId() {
         return id;
@@ -233,5 +235,13 @@ public class RecallBatch {
 
     public void setOpenTransferNo(String openTransferNo) {
         this.openTransferNo = openTransferNo;
+    }
+
+    public Long getCurrentOrgId() {
+        return currentOrgId;
+    }
+
+    public void setCurrentOrgId(Long currentOrgId) {
+        this.currentOrgId = currentOrgId;
     }
 }

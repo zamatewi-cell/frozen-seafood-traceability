@@ -101,6 +101,10 @@ public class RecallService {
     static final int REASON_MAX = 500;
     static final int SUMMARY_MAX = 1000;
     static final Set<String> PUBLIC_DISPOSITIONS = Set.of("DESTROYED", "RETURNED");
+    static final String RELATION_OWNER = "OWNER";
+    static final String RELATION_CURRENT_HOLDER = "CURRENT_HOLDER";
+    static final String RELATION_HISTORICAL_HOLDER = "HISTORICAL_HOLDER";
+    static final String RELATION_PLATFORM = "PLATFORM";
     private static final DateTimeFormatter RECALL_NO_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
     private static final SecureRandom RANDOM = new SecureRandom();
 
@@ -393,7 +397,8 @@ public class RecallService {
     }
 
     /**
-     * 召回详情：发起组织与平台只读角色看完整范围；范围批次持有组织只看案件概要与本组织持有的范围行；其他组织 403。
+     * 召回详情：发起组织与平台只读角色看完整范围；范围批次的当前责任组织与发起时的持有组织只看案件概要与自己的范围行
+     * （历史持有方只看发起时快照）；其他组织 403。
      */
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public RecallResponse getRecall(Long recallId, TraceSecurityPrincipal principal) {
@@ -409,17 +414,31 @@ public class RecallService {
     // 辅助
     // =========================================================================
 
+    /**
+     * 召回通知属于批次（独立评审修复）：范围批次交接后，新的当前责任组织看到该批次的范围行（快照 + 当前状态），
+     * 发起时的持有方只保留发起时快照（不输出新责任组织的当前事实）。发起组织与平台只读角色看完整范围。
+     */
     private RecallResponse detail(Recall recall, TraceSecurityPrincipal principal) {
-        boolean full = isPlatformScope(principal) || Objects.equals(recall.getOwnerOrgId(), principal.getOrgId());
+        Long viewer = principal.getOrgId();
+        boolean platform = isPlatformScope(principal);
+        boolean owner = Objects.equals(recall.getOwnerOrgId(), viewer);
         List<RecallBatch> rows = recallBatchMapper.selectByRecallId(recall.getId());
-        if (!full) {
-            rows = rows.stream().filter(r -> Objects.equals(r.getHolderOrgId(), principal.getOrgId())).toList();
+        String relation;
+        if (platform) {
+            relation = RELATION_PLATFORM;
+        } else if (owner) {
+            relation = RELATION_OWNER;
+        } else {
+            rows = rows.stream().filter(r -> Objects.equals(r.getHolderOrgId(), viewer) || Objects.equals(r.getCurrentOrgId(), viewer))
+                    .toList();
             if (rows.isEmpty()) {
                 throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权",
-                        "仅召回发起组织与影响范围批次的持有组织可以查看该召回");
+                        "仅召回发起组织、影响范围批次的当前责任组织与发起时的持有组织可以查看该召回");
             }
+            relation = rows.stream().anyMatch(r -> Objects.equals(r.getCurrentOrgId(), viewer))
+                    ? RELATION_CURRENT_HOLDER : RELATION_HISTORICAL_HOLDER;
         }
-        return RecallResponse.detailOf(recall, full, rows);
+        return RecallResponse.detailOf(recall, platform || owner, relation, viewer, rows);
     }
 
     private RecallResponse replayStart(Recall existing, String requestHash, TraceSecurityPrincipal principal) {

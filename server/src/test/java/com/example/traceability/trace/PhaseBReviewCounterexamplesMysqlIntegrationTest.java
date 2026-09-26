@@ -252,5 +252,67 @@ class PhaseBReviewCounterexamplesMysqlIntegrationTest extends AbstractPhaseBMysq
         softly.assertThat(status(raDetail)).as("RA（历史持有方）保留自己的历史记录（响应：%s）", describe(raDetail)).isEqualTo(200);
         softly.assertThat(descendantEvidence).as("召回证据按批次判定（RB 已可据此发起紧急召回）").isEqualTo(1);
         softly.assertAll();
+
+        // ---------------------------------------------------------------- 通知随批次：查看关系、字段过滤与批次风险事项
+        // RB 作为新的当前责任组织风险冻结 C：这是 RB 的内部当前事实，历史持有方 RA 不得看到
+        freeze(rb.qm(), child, "收到上游模拟召回通知，冻结调查");
+        JsonNode rbView = expect(getReq(rb.qm(), "/api/v1/recalls/" + recallId), 200).get("data");
+        JsonNode raView = expect(getReq(ra.qm(), "/api/v1/recalls/" + recallId), 200).get("data");
+        JsonNode ownerView = expect(getReq(processorQm, "/api/v1/recalls/" + recallId), 200).get("data");
+
+        assertThat(rbView.get("viewerRelation").asString()).isEqualTo("CURRENT_HOLDER");
+        assertThat(rbView.get("scope")).hasSize(1);
+        JsonNode rbRow = rbView.get("scope").get(0);
+        assertThat(rbRow.get("batchId").asLong()).isEqualTo(child);
+        assertThat(rbRow.get("heldByViewer").asBoolean()).isTrue();
+        assertThat(rbRow.get("currentRiskStatus").asString()).isEqualTo("FROZEN");
+        assertThat(rbRow.get("currentFlowStatus").asString()).isEqualTo("ACTIVE");
+        assertThat(rbRow.get("holderOrgId").asLong()).as("发起时快照仍记录当时的持有方").isEqualTo(ra.org().getId());
+        assertThat(rbView.has("resultSummary")).isFalse();
+
+        assertThat(raView.get("viewerRelation").asString()).isEqualTo("HISTORICAL_HOLDER");
+        assertThat(raView.get("scope")).hasSize(1);
+        JsonNode raRow = raView.get("scope").get(0);
+        assertThat(raRow.get("heldByViewer").asBoolean()).isFalse();
+        assertThat(raRow.has("currentRiskStatus")).as("历史持有方看不到新责任组织的当前风险状态").isFalse();
+        assertThat(raRow.has("currentFlowStatus")).as("历史持有方看不到新责任组织的当前流转状态").isFalse();
+        assertThat(raRow.get("riskStatusBefore").asString()).as("只看发起时快照").isEqualTo("NORMAL");
+        assertThat(raView.toString()).doesNotContain("FROZEN");
+
+        assertThat(ownerView.get("viewerRelation").asString()).isEqualTo("OWNER");
+        assertThat(ownerView.get("scope").size()).isGreaterThan(1);
+
+        JsonNode rbListed = null;
+        for (JsonNode r : expect(getReq(rb.qm(), "/api/v1/recalls"), 200).get("data")) {
+            if (r.get("id").asLong() == recallId) {
+                rbListed = r;
+            }
+        }
+        assertThat(rbListed).isNotNull();
+        assertThat(rbListed.get("viewerRelation").asString()).isEqualTo("CURRENT_HOLDER");
+        JsonNode raListed = null;
+        for (JsonNode r : expect(getReq(ra.qm(), "/api/v1/recalls"), 200).get("data")) {
+            if (r.get("id").asLong() == recallId) {
+                raListed = r;
+            }
+        }
+        assertThat(raListed).isNotNull();
+        assertThat(raListed.get("viewerRelation").asString()).isEqualTo("HISTORICAL_HOLDER");
+
+        // 无关组织：看不到
+        Party rc = retailer("RC");
+        expectProblem(getReq(rc.qm(), "/api/v1/recalls/" + recallId), 403, "ORG_SCOPE_DENIED");
+        assertThat(expect(getReq(rc.qm(), "/api/v1/recalls"), 200).get("data")).isEmpty();
+
+        // 批次风险事项：通知属于批次，只对当前责任组织输出
+        JsonNode holds = expect(getReq(rb.operator(), "/api/v1/batches/" + child + "/risk-holds"), 200).get("data");
+        assertThat(holds.get("riskStatus").asString()).isEqualTo("FROZEN");
+        assertThat(holds.get("manualFreezeHold").asBoolean()).isTrue();
+        assertThat(holds.get("alertHolds")).isEmpty();
+        assertThat(holds.get("recallNotices")).hasSize(1);
+        assertThat(holds.get("recallNotices").get(0).get("recallId").asLong()).isEqualTo(recallId);
+        assertThat(holds.get("recallNotices").get(0).get("ownerOrgId").asLong()).isEqualTo(receiverOrg.getId());
+        expectProblem(getReq(ra.qm(), "/api/v1/batches/" + child + "/risk-holds"), 403, "ORG_SCOPE_DENIED");
+        expectProblem(getReq(processorQm, "/api/v1/batches/" + child + "/risk-holds"), 403, "ORG_SCOPE_DENIED");
     }
 }

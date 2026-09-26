@@ -49,7 +49,9 @@ class OrgScopedReadTransactionContractTest {
                 Arguments.of(com.example.traceability.quality.application.RecallService.class
                         .getMethod("listRecalls", TraceSecurityPrincipal.class)),
                 Arguments.of(com.example.traceability.quality.application.RecallService.class
-                        .getMethod("getRecall", Long.class, TraceSecurityPrincipal.class))
+                        .getMethod("getRecall", Long.class, TraceSecurityPrincipal.class)),
+                Arguments.of(com.example.traceability.quality.application.BatchRiskHoldService.class
+                        .getMethod("getRiskHolds", Long.class, TraceSecurityPrincipal.class))
         );
     }
 

@@ -1,6 +1,7 @@
 package com.example.traceability.quality.mapper;
 
 import com.example.traceability.quality.domain.RecallBatch;
+import com.example.traceability.quality.domain.RecallNotice;
 import com.example.traceability.quality.domain.RecallScopeFact;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
@@ -38,10 +39,11 @@ public interface RecallBatchMapper {
 
     /**
      * 召回影响范围快照，关联批次当前事实（角色顺序 SEED → DESCENDANT → ANCESTOR，其内按谱系距离与批次 ID）。
+     * 当前责任组织只用于服务端判定查看范围与字段过滤。
      */
     @Select("""
             SELECT rb.*, b.trace_batch_no, p.public_name AS product_name, b.risk_status AS current_risk_status,
-                   b.flow_status AS current_flow_status, t.transfer_no AS open_transfer_no
+                   b.flow_status AS current_flow_status, b.org_id AS current_org_id, t.transfer_no AS open_transfer_no
             FROM recall_batch rb
             JOIN batch b ON b.id = rb.batch_id
             LEFT JOIN product p ON p.id = b.product_id
@@ -51,6 +53,19 @@ public interface RecallBatchMapper {
             """)
     @Options(flushCache = Options.FlushCachePolicy.TRUE)
     List<RecallBatch> selectByRecallId(@Param("recallId") Long recallId);
+
+    /**
+     * 批次收到的上游召回通知（范围动作 NOTIFY_HOLDER；按召回 ID 升序）。通知属于批次，由批次当前责任组织查看与处置。
+     */
+    @Select("""
+            SELECT r.id AS recall_id, r.recall_no, r.status AS recall_status, r.owner_org_id, r.started_at, rb.depth
+            FROM recall_batch rb
+            JOIN recall r ON r.id = rb.recall_id
+            WHERE rb.batch_id = #{batchId} AND rb.action = 'NOTIFY_HOLDER'
+            ORDER BY r.id ASC
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.TRUE)
+    List<RecallNotice> selectNoticesByBatchId(@Param("batchId") Long batchId);
 
     /**
      * 批次是否出现在其他召回的正向影响范围中（NORMAL 批次紧急召回的证据之一：上游召回已圈定该批次）。

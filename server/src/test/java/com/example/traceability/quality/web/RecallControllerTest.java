@@ -90,7 +90,7 @@ class RecallControllerTest {
 
     private static RecallResponse recall(String status) {
         OffsetDateTime t = OffsetDateTime.of(2026, 9, 26, 1, 0, 0, 0, ZoneOffset.UTC);
-        return new RecallResponse(9001L, "RCL-1", 30L, null, "检验不合格", status, t, 801L, null, null, null, null, 0L, null, null);
+        return new RecallResponse(9001L, "RCL-1", 30L, null, "检验不合格", status, t, 801L, null, null, null, null, 0L, "OWNER", null, null);
     }
 
     @Test

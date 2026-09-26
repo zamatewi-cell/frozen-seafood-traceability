@@ -34,6 +34,9 @@ public class Recall {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
+    /** 查询计算字段（非本表列）：查看组织与召回的关系 OWNER / CURRENT_HOLDER / HISTORICAL_HOLDER / PLATFORM。 */
+    private String viewerRelation;
+
     public Long getId() {
         return id;
     }
@@ -184,5 +187,13 @@ public class Recall {
 
     public void setUpdatedAt(LocalDateTime updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    public String getViewerRelation() {
+        return viewerRelation;
+    }
+
+    public void setViewerRelation(String viewerRelation) {
+        this.viewerRelation = viewerRelation;
     }
 }

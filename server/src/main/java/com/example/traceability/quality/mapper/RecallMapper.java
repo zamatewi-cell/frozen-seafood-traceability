@@ -63,16 +63,29 @@ public interface RecallMapper {
     Recall selectByOrgIdAndCloseIdempotencyKey(@Param("orgId") Long orgId, @Param("idempotencyKey") String idempotencyKey);
 
     /**
-     * 可见召回列表（按主键倒序，最多 200 条）：平台只读角色看全部；企业看本组织发起的召回，以及本组织持有范围批次的召回
-     * （正向后续批次的持有方据此收到通知，反向上游批次的持有方据此协助溯源调查）。
+     * 可见召回列表（按主键倒序，最多 200 条）：平台只读角色看全部；企业看本组织发起的召回、本组织<b>当前</b>负责其范围批次的召回
+     * （召回通知随批次交接转给新的当前责任组织），以及本组织在召回发起时持有范围批次的召回（历史快照，只读）。
+     * 同时计算查看关系 viewer_relation：OWNER / CURRENT_HOLDER / HISTORICAL_HOLDER / PLATFORM。
      */
     @Select("""
             <script>
-            SELECT r.* FROM recall r
+            SELECT r.*,
+            <choose>
+              <when test="platform">'PLATFORM'</when>
+              <otherwise>
+                CASE WHEN r.owner_org_id = #{orgId} THEN 'OWNER'
+                     WHEN EXISTS (SELECT 1 FROM recall_batch rb JOIN batch b ON b.id = rb.batch_id
+                                  WHERE rb.recall_id = r.id AND b.org_id = #{orgId}) THEN 'CURRENT_HOLDER'
+                     ELSE 'HISTORICAL_HOLDER' END
+              </otherwise>
+            </choose> AS viewer_relation
+            FROM recall r
             WHERE 1 = 1
             <if test="!platform">
               AND (r.owner_org_id = #{orgId}
-                   OR EXISTS (SELECT 1 FROM recall_batch rb WHERE rb.recall_id = r.id AND rb.holder_org_id = #{orgId}))
+                   OR EXISTS (SELECT 1 FROM recall_batch rb WHERE rb.recall_id = r.id AND rb.holder_org_id = #{orgId})
+                   OR EXISTS (SELECT 1 FROM recall_batch rb JOIN batch b ON b.id = rb.batch_id
+                              WHERE rb.recall_id = r.id AND b.org_id = #{orgId}))
             </if>
             ORDER BY r.id DESC
             LIMIT 200
