@@ -5,14 +5,15 @@ import { randomUUID } from 'node:crypto'
  * Phase B 异常闭环真实浏览器验收（由 scripts/smoke.mjs 编排；PB3 → PB4 → PB5 → PB6）。
  *
  * 夹具（smoke.mjs 经真实 API）：来源企业把 X1 300kg / X2 200kg 两个来源批次（已激活公开追溯码）装入同一运输任务 SX 发往加工企业，
- * 承运商以 50 分钟前的装载时间发运（界面发运按钮固定使用当前时间；持续超温需要已测区间达到规则允许的 1800 秒）。
+ * 承运商以 100 分钟前的装载时间发运（界面发运按钮固定使用当前时间；两个持续超温片段各需要已测区间达到规则允许的 1800 秒）。
  * 以下全部在相互隔离的浏览器上下文中完成（真实 Session + CSRF），禁止 page.route 或任何接口替身：
- *   承运商在途登记 4 条温度（NORMAL / HIGH / HIGH / HIGH）：第 2、3 条越界只是单点、不告警；第 4 条使连续越界达到 1800 秒
- *   → 系统创建运输任务级持续超温告警并经风险核心自动冻结 X1 / X2
- *   → 来源企业质量管理员确认异常 → 承运商确认到达 → 加工企业不能直接接受冻结批次，隔离收货 X1 / X2
- *   → 加工企业质量管理员（隔离接收方）在告警中提交检验证据：X1 合格、X2 不合格
- *   → 来源企业质量管理员依据合格结论放行 X1；对不合格的 X2 发起模拟召回（范围快照含隔离中的交接）
- *   → 加工企业按隔离实收数量接受 X1；拒收已召回的 X2 → 来源质量管理员形成告警处置结论、以“退回”关闭模拟召回
+ *   承运商在途登记 7 条温度：NORMAL / HIGH / HIGH / HIGH（片段 1 达到 1800 秒 → 告警 A1，经风险核心自动冻结 X1 / X2）
+ *   / NORMAL（片段结束）/ HIGH / HIGH（片段 2 达到 1800 秒 → 告警 A2，X1 / X2 已冻结只快照）
+ *   → 来源企业质量管理员确认 A1、A2 → 承运商确认到达 → 加工企业不能直接接受冻结批次，隔离收货 X1 / X2
+ *   → 加工企业质量管理员（隔离接收方）提交检验证据：A1 中 X1 合格、X2 不合格；A2 中 X1 合格
+ *   → 独立评审修复：来源质量管理员依据 A1 放行 X1 只记录 A1 的结论，X1 仍被 A2 冻结；依据 A2 放行后才恢复正常
+ *   → 对不合格的 X2 发起模拟召回（范围快照含隔离中的交接；召回同时解除 X2 在两个告警中的风险事项）
+ *   → 加工企业按隔离实收数量接受 X1；拒收已召回的 X2 → 来源质量管理员对 A1、A2 形成处置结论、以“退回”关闭模拟召回
  *   → 匿名消费者扫码 X2 看到模拟召回提示与处置进展（不含任何内部事实），扫码 X1 保持正常。
  * 证据只输出方法、路径、状态码与请求编号，绝不输出密码、Cookie 或 CSRF 凭据。
  */
@@ -175,12 +176,23 @@ test('Phase B: sustained excursion → alert + auto-freeze → quarantine → in
   readings.push(await recordTemperature(carrier.page, loadedAt + 41 * minute, '-10.80'))
   expect(readings[3].evaluation).toBe('HIGH')
   await expect(carrier.page.getByTestId('shipment-flash')).toContainText('系统已创建持续超温告警并冻结受影响批次')
-  const alertRow = carrier.page.getByTestId('shipment-alert-row')
-  await expect(alertRow).toHaveCount(1)
-  await expect(alertRow).toHaveAttribute('data-status', 'OPEN')
-  const alertHref = await alertRow.locator('a').getAttribute('href')
-  const alertId = Number(/\/app\/alerts\/(\d+)$/.exec(alertHref ?? '')?.[1])
+  await expect(carrier.page.getByTestId('shipment-alert-row')).toHaveCount(1)
+  // 回到范围内结束片段 1；片段 2 的首条越界还不构成持续超温，第二条越界使片段 2 也达到 1800 秒
+  readings.push(await recordTemperature(carrier.page, loadedAt + 45 * minute, '-18.50'))
+  readings.push(await recordTemperature(carrier.page, loadedAt + 50 * minute, '-11.00'))
+  await expect(carrier.page.getByTestId('shipment-alert-row')).toHaveCount(1)
+  readings.push(await recordTemperature(carrier.page, loadedAt + 81 * minute, '-10.50'))
+  expect(readings.map((r) => r.evaluation)).toEqual(['NORMAL', 'HIGH', 'HIGH', 'HIGH', 'NORMAL', 'HIGH', 'HIGH'])
+  const alertRows = carrier.page.getByTestId('shipment-alert-row')
+  await expect(alertRows).toHaveCount(2)
+  const alertIds: number[] = []
+  for (const row of await alertRows.all()) {
+    await expect(row).toHaveAttribute('data-status', 'OPEN')
+    alertIds.push(Number(/\/app\/alerts\/(\d+)$/.exec((await row.locator('a').getAttribute('href')) ?? '')?.[1]))
+  }
+  const [alertId, alert2Id] = alertIds.sort((a, b) => a - b)
   expect(alertId).toBeGreaterThan(0)
+  expect(alert2Id).toBeGreaterThan(alertId)
 
   // ---------------------------------------------------------------- 来源企业质量管理员：告警详情、自动冻结、确认异常
   const sourceQm = await loginAs(browser, accounts.sourceQm, 'SOURCE_QM', evidence)
@@ -203,6 +215,17 @@ test('Phase B: sustained excursion → alert + auto-freeze → quarantine → in
   const ack = waitForApi(sourceQm.page, 'POST', new RegExp(`^/api/v1/alerts/${alertId}/acknowledge$`))
   await sourceQm.page.getByTestId('alert-ack-confirm').click()
   expect((await ack).status()).toBe(200)
+  await expect(sourceQm.page.getByTestId('alert-status')).toHaveAttribute('data-status', 'ACKNOWLEDGED')
+  // A2：两个批次在 A2 创建时已被 A1 冻结，只快照（不是 A2 自动冻结的）
+  await sourceQm.page.goto(`/app/alerts/${alert2Id}`)
+  const alert2No = (await sourceQm.page.getByTestId('alert-no').innerText()).trim()
+  await expect(sourceQm.page.getByTestId('alert-duration')).toContainText('31 分钟')
+  for (const cell of await sourceQm.page.getByTestId('alert-batch-auto-frozen').all()) await expect(cell).toHaveText('否（告警时已非正常）')
+  await sourceQm.page.getByTestId('alert-ack-open').click()
+  await sourceQm.page.getByTestId('alert-ack-next').click()
+  const ack2 = waitForApi(sourceQm.page, 'POST', new RegExp(`^/api/v1/alerts/${alert2Id}/acknowledge$`))
+  await sourceQm.page.getByTestId('alert-ack-confirm').click()
+  expect((await ack2).status()).toBe(200)
   await expect(sourceQm.page.getByTestId('alert-status')).toHaveAttribute('data-status', 'ACKNOWLEDGED')
   // 风险历史：系统自动冻结（无操作人），数量 / 责任组织 / 流转状态不变
   await sourceQm.page.goto(`/app/batches/${expected.x1Id}`)
@@ -251,6 +274,11 @@ test('Phase B: sustained excursion → alert + auto-freeze → quarantine → in
   await expect(processorQm.page.getByTestId(`alert-release-open-${expected.x1Id}`)).toHaveCount(0)
   await expect(processorQm.page.getByTestId('recall-start-open')).toHaveCount(0)
   await expect(processorQm.page.getByTestId('alert-resolve-open')).toHaveCount(0)
+  // A2 是独立的质量调查：X1 需要关联 A2 的检验证据
+  await processorQm.page.goto(`/app/alerts/${alert2Id}`)
+  await inspect(processorQm.page, expected.x1Id, 'PB-RCV-X1-A2-PASS', 'PASS')
+  // 隔离接收方看不到发货方的其他风险事项明细
+  await expect(processorQm.page.getByTestId('alert-batch-pending-holds')).toHaveCount(0)
 
   // ---------------------------------------------------------------- 来源质量管理员：依据合格结论放行 X1
   await sourceQm.page.goto(`/app/alerts/${alertId}`)
@@ -263,9 +291,33 @@ test('Phase B: sustained excursion → alert + auto-freeze → quarantine → in
   const release = waitForApi(sourceQm.page, 'POST', new RegExp(`^/api/v1/alerts/${alertId}/batches/${expected.x1Id}/release$`))
   await sourceQm.page.getByTestId('alert-release-confirm').click()
   expect((await release).status()).toBe(200)
-  await expect(sourceQm.page.locator(`[data-testid="alert-batch-row"][data-batch-id="${expected.x1Id}"]`)).toHaveAttribute('data-risk-status', 'NORMAL')
+  // 独立评审修复：A1 的合格结论只解除 A1 的风险事项，X1 仍被 A2 冻结
+  await expect(sourceQm.page.locator(`[data-testid="alert-batch-row"][data-batch-id="${expected.x1Id}"]`)).toHaveAttribute('data-risk-status', 'FROZEN')
+  await expect(sourceQm.page.getByTestId('alert-flash')).toContainText(`批次仍被告警 ${alert2No}冻结`)
+  await expect(x1Block.getByTestId('alert-batch-pending-alert')).toHaveAttribute('href', `/app/alerts/${alert2Id}`)
+  await expect(sourceQm.page.getByTestId(`alert-release-open-${expected.x1Id}`)).toHaveCount(0)
   // 不合格的 X2 不能放行，只能召回（或等待新的证据）
   await expect(sourceQm.page.getByTestId(`alert-release-open-${expected.x2Id}`)).toHaveCount(0)
+  // 批次风险面板：仍未解除的告警风险事项，人工解除冻结入口隐藏；接收方此时仍不能接受
+  await sourceQm.page.goto(`/app/batches/${expected.x1Id}`)
+  await expect(sourceQm.page.getByTestId('risk-current')).toHaveAttribute('data-status', 'FROZEN')
+  await expect(sourceQm.page.getByTestId('risk-hold-alert')).toContainText(alert2No)
+  await expect(sourceQm.page.getByTestId('risk-release-open')).toHaveCount(0)
+  const acceptTooEarly = await probe(processor.page, 'POST', `/api/v1/transfers/${expected.t1Id}/accept`, {
+    receivedQuantity: 300, unitCode: 'kg', occurredAt: new Date(Date.now() - 1_000).toISOString(),
+    expectedVersion: (await (await processor.page.request.get(`/api/v1/transfers/${expected.t1Id}`)).json()).data.version
+  })
+  expect(`${acceptTooEarly.status} ${acceptTooEarly.code}`).toMatch(/^(409|422) BATCH_FLOW_BLOCKED$/)
+  // 依据 A2 的合格结论形成 A2 的放行结论：解除最后一个风险事项，X1 恢复正常
+  await sourceQm.page.goto(`/app/alerts/${alert2Id}`)
+  await sourceQm.page.getByTestId(`alert-release-open-${expected.x1Id}`).click()
+  await sourceQm.page.getByTestId('alert-release-next').click()
+  const release2 = waitForApi(sourceQm.page, 'POST', new RegExp(`^/api/v1/alerts/${alert2Id}/batches/${expected.x1Id}/release$`))
+  await sourceQm.page.getByTestId('alert-release-confirm').click()
+  expect((await release2).status()).toBe(200)
+  await expect(sourceQm.page.locator(`[data-testid="alert-batch-row"][data-batch-id="${expected.x1Id}"]`)).toHaveAttribute('data-risk-status', 'NORMAL')
+  await expect(sourceQm.page.getByTestId('alert-flash')).toContainText('风险状态恢复正常')
+  await sourceQm.page.goto(`/app/alerts/${alertId}`)
 
   // ---------------------------------------------------------------- PB5：来源质量管理员对不合格的 X2 发起模拟召回
   await x2Block.getByTestId('recall-start-open').click()
@@ -324,6 +376,16 @@ test('Phase B: sustained excursion → alert + auto-freeze → quarantine → in
   expect((await resolve).status()).toBe(200)
   await expect(sourceQm.page.getByTestId('alert-status')).toHaveAttribute('data-status', 'RESOLVED')
   await expect(sourceQm.page.getByTestId('alert-history-row')).toHaveCount(4)
+  // A2：X1 已有 A2 的放行结论，X2 已进入模拟召回（召回同时解除了 A2 的风险事项）
+  await sourceQm.page.goto(`/app/alerts/${alert2Id}`)
+  await expect(sourceQm.page.locator(`[data-testid="alert-batch-row"][data-batch-id="${expected.x2Id}"]`)).toHaveAttribute('data-risk-status', 'RECALLED')
+  await sourceQm.page.getByTestId('alert-resolve-open').click()
+  await sourceQm.page.getByTestId('field-alert-resolution').fill('片段 2：X1 复检合格放行；X2 已随片段 1 的不合格结论进入模拟召回')
+  await sourceQm.page.getByTestId('alert-resolve-next').click()
+  const resolve2 = waitForApi(sourceQm.page, 'POST', new RegExp(`^/api/v1/alerts/${alert2Id}/resolve$`))
+  await sourceQm.page.getByTestId('alert-resolve-confirm').click()
+  expect((await resolve2).status()).toBe(200)
+  await expect(sourceQm.page.getByTestId('alert-status')).toHaveAttribute('data-status', 'RESOLVED')
 
   await sourceQm.page.goto(`/app/recalls/${recall.id}`)
   await sourceQm.page.getByTestId('recall-close-open').click()
@@ -389,8 +451,9 @@ test('Phase B: sustained excursion → alert + auto-freeze → quarantine → in
   await expect(disposition).toContainText('非真实召回结论')
   await expect(consumer.locator('.temp-summary-card')).toContainText('暂无实时时序采集')
   // 告警 / 检验 / 召回的内部事实（编号、原因、处置总结、温度读数）与企业信息都不得进入匿名页面或响应
-  const forbidden = [...expected.forbidden, alertNo, recall.recallNo, 'PB-RCV-X1-PASS', 'PB-RCV-X2-FAIL', '教学演示检测中心（模拟）',
-    '隔离检验不合格', '随车持续超温', '拒收并按演练流程退回', '发货方已启动模拟召回', '-10.80', '-11.50', '-12.00', 'QUARANTINE', 'ALERT']
+  const forbidden = [...expected.forbidden, alertNo, alert2No, recall.recallNo, 'PB-RCV-X1-PASS', 'PB-RCV-X1-A2-PASS', 'PB-RCV-X2-FAIL',
+    '教学演示检测中心（模拟）', '隔离检验不合格', '随车持续超温', '拒收并按演练流程退回', '发货方已启动模拟召回', '片段 2',
+    '-10.80', '-11.50', '-12.00', '-18.50', '-11.00', '-10.50', 'QUARANTINE', 'ALERT']
   const x2Text = await consumer.locator('body').innerText()
   for (const secret of forbidden) {
     expect(x2Body, `public X2 response leaks ${secret}`).not.toContain(secret)
@@ -414,20 +477,21 @@ test('Phase B: sustained excursion → alert + auto-freeze → quarantine → in
   // ---------------------------------------------------------------- 页面写请求证据
   const businessWrites = evidence.filter((e) => !e.path.startsWith('/api/v1/auth/'))
   expect(businessWrites.map((e) => `${e.actor} ${e.method} ${e.path.replace(/\/\d+(?=\/|$)/g, '/:id')}`)).toEqual([
-    'CARRIER POST /api/v1/shipments/:id/temperature-records',
-    'CARRIER POST /api/v1/shipments/:id/temperature-records',
-    'CARRIER POST /api/v1/shipments/:id/temperature-records',
-    'CARRIER POST /api/v1/shipments/:id/temperature-records',
+    ...Array<string>(7).fill('CARRIER POST /api/v1/shipments/:id/temperature-records'),
+    'SOURCE_QM POST /api/v1/alerts/:id/acknowledge',
     'SOURCE_QM POST /api/v1/alerts/:id/acknowledge',
     'CARRIER POST /api/v1/shipments/:id/arrive',
     'PROCESSOR POST /api/v1/transfers/:id/quarantine',
     'PROCESSOR POST /api/v1/transfers/:id/quarantine',
     'PROCESSOR_QM POST /api/v1/batches/:id/inspection-reports',
     'PROCESSOR_QM POST /api/v1/batches/:id/inspection-reports',
+    'PROCESSOR_QM POST /api/v1/batches/:id/inspection-reports',
+    'SOURCE_QM POST /api/v1/alerts/:id/batches/:id/release',
     'SOURCE_QM POST /api/v1/alerts/:id/batches/:id/release',
     'SOURCE_QM POST /api/v1/recalls',
     'PROCESSOR POST /api/v1/transfers/:id/reject',
     'PROCESSOR POST /api/v1/transfers/:id/accept',
+    'SOURCE_QM POST /api/v1/alerts/:id/resolve',
     'SOURCE_QM POST /api/v1/alerts/:id/resolve',
     'SOURCE_QM POST /api/v1/recalls/:id/close'
   ])
@@ -443,7 +507,8 @@ test('Phase B: sustained excursion → alert + auto-freeze → quarantine → in
   console.log(`  quarantine receiver recall ${quarantinedRecall.status} ${quarantinedRecall.code ?? ''}`)
   for (const [name, r] of probes) console.log(`  ${name} ${r.status} ${r.code ?? ''}`)
   console.log(`[phase-b-smoke] 在途温度: ${readings.map((r) => `${r.temperature}℃=${r.evaluation}`).join(', ')}`)
-  console.log(`[phase-b-smoke] PHASEB_RESULT ${JSON.stringify({ alertId, recallId: recall.id, recallNo: recall.recallNo, readings: readings.map((r) => r.id) })}`)
+  console.log(`[phase-b-smoke] 同一批次两个告警：依据 A1 放行后 X1 仍被 ${alert2No} 冻结，接受探测 ${acceptTooEarly.status} ${acceptTooEarly.code}；依据 A2 放行后恢复正常`)
+  console.log(`[phase-b-smoke] PHASEB_RESULT ${JSON.stringify({ alertId, alert2Id, recallId: recall.id, recallNo: recall.recallNo, readings: readings.map((r) => r.id) })}`)
 
   await Promise.all([carrier.context.close(), sourceQm.context.close(), processor.context.close(), processorQm.context.close(),
     source.context.close(), consumerContext.close()])
