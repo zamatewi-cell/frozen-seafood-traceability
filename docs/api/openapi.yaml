@@ -86,6 +86,8 @@ tags:
     description: Shipment 在途温度记录（Phase B PB2：承运商单点登记与单点判定；单点不等于持续超温、不对消费者公开）
   - name: Alerts
     description: 在途持续超温告警与质量处置（PB3：系统创建 Shipment 级告警并经风险核心自动冻结受影响批次；PB4：检验证据、依据检验结论放行与处置结论）
+  - name: Recalls
+    description: 模拟召回（Phase B PB5：反向追溯、正向圈定、库存 / 在途 / 已售快照、RECALLED 风险终态与受控处置结论；教学演练，不代表真实法定召回）
   - name: Organizations
     description: 企业端最小只读组织目录
   - name: Products
@@ -1774,6 +1776,119 @@ paths:
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/Problem'}
+  /recalls:
+    post:
+      tags: [Recalls]
+      summary: 发起模拟召回（Phase B PB5）
+      description: |
+        契约 v1.1 §2.12 / §4.2 / §4.3 / §5 / §13 步骤 8–12 / §14。校验顺序：未认证 401；平台 / 系统管理员 403 `ADMIN_RESTRICTED`；
+        非 `QUALITY_MANAGER` 403 `ACCESS_DENIED`；幂等键缺失 / 格式错误 / 使用保留前缀 `SYS:`、`batchIds` 为空 / 非正整数 / 超过 20 个、
+        原因去空白后为空或超过 500 字符、夹带未声明字段：400 `INVALID_REQUEST`；同组织同键同语义（种子集合去重升序、原因、来源告警）
+        重放原召回，语义不同 409 `IDEMPOTENCY_CONFLICT`；来源告警不存在 404、不属于本组织 403、种子不是其受影响批次 422 `ALERT_BATCH_MISMATCH`。
+
+        种子批次必须由本组织当前持有（403 `ORG_SCOPE_DENIED`）、已生效（ACTIVE 或 CLOSED；DRAFT 409 `INVALID_STATE_TRANSITION`）、
+        尚未召回（RECALLED 409 `INVALID_STATE_TRANSITION`）；FROZEN 可直接召回，NORMAL 只有证据充分时可紧急召回（该批次最新检验报告为 FAIL，
+        或已被其他召回圈定为正向后续批次），否则 409 `RECALL_EVIDENCE_REQUIRED`。
+
+        同一事务（READ COMMITTED）内：
+        - 正向圈定：沿已提交批次操作的 BatchRelation 向下可达的全部后续批次（DESCENDANT，depth = 最短距离）。本组织持有的转为 RECALLED
+          （`RECALLED`）；其他组织持有的通知持有方（`NOTIFY_HOLDER`，由持有方的质量管理员以本召回为证据发起自己的召回）；已召回的
+          `ALREADY_RECALLED`；草稿 `TRACE_ONLY`。
+        - 反向追溯：种子的全部祖先（ANCESTOR，depth 为负数），只用于溯源调查（`TRACE_ONLY`），不转换。
+        - 对每个范围批次快照转换前流转 / 风险状态、剩余（库存与在途）/ 已售数量、未结束交接与运输状态、公开追溯码是否启用。
+        - 经风险核心 `BatchRiskService.recallForCase` 转换（来源 RECALL、系统键 `SYS:RECALL:{recallId}:BATCH:{batchId}`、审计 `RISK_RECALL`），
+          审计 `RECALL_START`。ACTIVE 与 CLOSED 批次都可召回（已售罄批次保持 CLOSED 并记录 RECALLED）；RECALLED 是风险终态。
+        召回不改变数量、责任组织、流转状态、交接、运输任务或公开追溯码，不生成 TraceEvent。
+
+        锁顺序：幂等预读 → 引用来源告警时锁定告警（alert → batch，与告警放行同序）→ 按批次 ID 升序一次锁定全部范围批次（待转换的种子与
+        本组织持有的后续批次排他锁，其他组织持有的后续批次与祖先批次共享锁）→ 锁后幂等复读 → 重新计算正向范围并与加锁集合比对
+        （并发批次操作 / 交接改变了范围或持有组织时 409 `RECALL_SCOPE_CHANGED`，可刷新重试）。不锁运输任务或交接（范围快照中的
+        未结束交接只是快照引用），加锁阶段之后不再等待任何其他锁。
+      operationId: startRecall
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecallCreateRequest'}
+      responses:
+        '201':
+          description: 已发起（或幂等重放）的召回详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecallEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+    get:
+      tags: [Recalls]
+      summary: 可见模拟召回列表
+      description: |
+        按主键倒序。发起组织（任意角色）、影响范围批次的持有组织（任意角色，上游召回通知 / 溯源协查）与 PLATFORM 只读角色可见；
+        其他组织得到空列表。列表项不含影响范围与汇总；非发起组织看不到内部处置总结。只读 REPEATABLE READ 快照。
+      operationId: listRecalls
+      responses:
+        '200':
+          description: 召回列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecallListEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+  /recalls/{recallId}:
+    parameters:
+      - {$ref: '#/components/parameters/RecallId'}
+    get:
+      tags: [Recalls]
+      summary: 模拟召回详情（影响范围按查看组织过滤）
+      description: |
+        发起组织与 PLATFORM 只读角色看到完整影响范围、汇总与内部处置总结；范围批次持有组织只看到案件概要与本组织持有的范围行
+        （汇总只统计这些行，不含 `resultSummary`）；其他组织 403 `ORG_SCOPE_DENIED`；不存在 404；匿名 401。
+      operationId: getRecall
+      responses:
+        '200':
+          description: 召回详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecallEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /recalls/{recallId}/close:
+    parameters:
+      - {$ref: '#/components/parameters/RecallId'}
+    post:
+      tags: [Recalls]
+      summary: 关闭模拟召回（IN_PROGRESS → CLOSED，受控公开处置结论）
+      description: |
+        契约 v1.1 §13 步骤 13–14。发起组织的 QUALITY_MANAGER；`publicDisposition` 只能为 DESTROYED / RETURNED（消费者页面只显示对应的
+        固定教学演练文案），`resultSummary` 为内部处置总结（去空白后 1..1000 字符，不进入公开投影）。幂等预读 → 召回行锁 → 锁后复读 →
+        条件关闭（版本 +1）→ 审计 `RECALL_CLOSE`。已关闭 409 `INVALID_STATE_TRANSITION`；非发起组织 403 `ORG_SCOPE_DENIED`。
+        关闭不改变任何批次：已召回批次永久保留 RECALLED（不能再冻结、解除、销售、交接或加工）。
+      operationId: closeRecall
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecallCloseRequest'}
+      responses:
+        '200':
+          description: 关闭后（或幂等重放）的召回详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecallEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
   /public/traces/{publicTraceId}:
     servers:
       - url: /api/public/v1
@@ -1840,6 +1955,11 @@ components:
       schema: {type: integer, format: int64}
     AlertId:
       name: alertId
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    RecallId:
+      name: recallId
       in: path
       required: true
       schema: {type: integer, format: int64}
@@ -2579,7 +2699,7 @@ components:
     BatchRiskTransition:
       type: object
       additionalProperties: false
-      description: 风险状态转换白名单投影（不含幂等键、请求哈希与登记时间）。人工 NORMAL ⇄ FROZEN（MANUAL）、告警系统自动冻结 NORMAL → FROZEN（ALERT，无操作人）与依据检验结论放行 FROZEN → NORMAL（ALERT，质量管理员操作人）。
+      description: 风险状态转换白名单投影（不含幂等键、请求哈希与登记时间）。人工 NORMAL ⇄ FROZEN（MANUAL）、告警系统自动冻结 NORMAL → FROZEN（ALERT，无操作人）、依据检验结论放行 FROZEN → NORMAL（ALERT，质量管理员操作人）与模拟召回 NORMAL / FROZEN → RECALLED（RECALL，质量管理员操作人；RECALLED 为终态）。
       required: [id, batchId, orgId, flowStatus, fromStatus, toStatus, sourceType, reason, occurredAt]
       properties:
         id: {type: integer, format: int64}
@@ -2587,9 +2707,10 @@ components:
         orgId: {type: integer, format: int64, description: 转换时批次当前责任组织}
         flowStatus: {type: string, enum: [ACTIVE, CLOSED], description: 转换时流转状态快照（转换不改变流转状态）}
         fromStatus: {type: string, enum: [NORMAL, FROZEN]}
-        toStatus: {type: string, enum: [NORMAL, FROZEN]}
-        sourceType: {type: string, enum: [MANUAL, ALERT], description: 来源类型；RECALL（PB5）随对应迁移同时加入}
+        toStatus: {type: string, enum: [NORMAL, FROZEN, RECALLED]}
+        sourceType: {type: string, enum: [MANUAL, ALERT, RECALL]}
         sourceAlertId: {type: integer, format: int64, description: 来源告警（sourceType = ALERT 时输出）}
+        sourceRecallId: {type: integer, format: int64, description: 来源模拟召回（sourceType = RECALL 时输出）}
         reason: {type: string}
         actorUserId: {type: integer, format: int64, description: 人工转换操作人（系统路径 ALERT 没有操作人，不输出）}
         occurredAt: {type: string, format: date-time, description: 'UTC，微秒精度，服务端生成'}
@@ -2846,6 +2967,106 @@ components:
       required: [resolution]
       properties:
         resolution: {type: string, minLength: 1, maxLength: 500}
+    RecallCreateRequest:
+      type: object
+      additionalProperties: false
+      description: 发起模拟召回请求；召回编号、影响范围、状态与时间由服务端决定。夹带任何未声明字段返回 400。
+      required: [batchIds, reason]
+      properties:
+        batchIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: {type: integer, format: int64, minimum: 1}
+          description: 种子批次（本组织当前持有；服务端去重并升序规范化）
+        reason: {type: string, minLength: 1, maxLength: 500}
+        alertId: {type: integer, format: int64, description: 可选来源告警（种子必须是其受影响批次）}
+    RecallCloseRequest:
+      type: object
+      additionalProperties: false
+      required: [publicDisposition, resultSummary]
+      properties:
+        publicDisposition: {type: string, enum: [DESTROYED, RETURNED], description: 受控公开处置结论（消费者只看到对应的固定文案）}
+        resultSummary: {type: string, minLength: 1, maxLength: 1000, description: 内部处置总结（只对发起组织与平台可见，不公开）}
+    RecallSummary:
+      type: object
+      additionalProperties: false
+      description: 影响范围汇总（按查看组织可见的范围行计算；数量只统计 SEED / DESCENDANT）
+      required: [seedCount, descendantCount, ancestorCount, recalledCount, notifiedCount, openTransferCount, publicCodeCount, remainingQuantity, soldQuantity]
+      properties:
+        seedCount: {type: integer}
+        descendantCount: {type: integer}
+        ancestorCount: {type: integer}
+        recalledCount: {type: integer, description: RECALLED 与 ALREADY_RECALLED 行数}
+        notifiedCount: {type: integer, description: NOTIFY_HOLDER 行数}
+        openTransferCount: {type: integer, description: 发起时存在未结束交接（在途）的批次数}
+        publicCodeCount: {type: integer, description: 发起时公开追溯码启用中的批次数}
+        remainingQuantity: {type: number, description: 剩余（库存与在途）数量合计}
+        soldQuantity: {type: number, description: 已终端销售数量合计}
+    RecallScopeItem:
+      type: object
+      additionalProperties: false
+      description: 影响范围行：发起时快照 + 批次当前流转 / 风险状态
+      required: [batchId, traceBatchNo, scopeRole, depth, holderOrgId, flowStatus, riskStatusBefore, action, declaredQuantity, remainingQuantity, soldQuantity, unitCode, publicCodeActive]
+      properties:
+        batchId: {type: integer, format: int64}
+        traceBatchNo: {type: string}
+        productName: {type: string}
+        scopeRole: {type: string, enum: [SEED, DESCENDANT, ANCESTOR]}
+        depth: {type: integer, description: 种子为 0，后续批次为正（最短距离），祖先为负}
+        holderOrgId: {type: integer, format: int64, description: 发起时的持有（责任）组织}
+        flowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
+        riskStatusBefore: {$ref: '#/components/schemas/BatchRiskStatus'}
+        currentFlowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
+        currentRiskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
+        action: {type: string, enum: [RECALLED, NOTIFY_HOLDER, ALREADY_RECALLED, TRACE_ONLY]}
+        riskTransitionId: {type: integer, format: int64, description: action = RECALLED 时的召回风险转换}
+        declaredQuantity: {type: number}
+        remainingQuantity: {type: number}
+        soldQuantity: {type: number}
+        unitCode: {type: string}
+        openTransferId: {type: integer, format: int64}
+        openTransferNo: {type: string}
+        openTransferStatus: {type: string, enum: [DRAFT, PENDING, QUARANTINED]}
+        shipmentStatus: {type: string}
+        publicCodeActive: {type: boolean}
+    Recall:
+      type: object
+      additionalProperties: false
+      description: 模拟召回（企业端白名单投影，不含幂等键与请求哈希）。教学演练，不代表真实法定召回。列表项不含 `summary` / `scope`。
+      required: [id, recallNo, ownerOrgId, reason, status, startedAt, startedBy, version]
+      properties:
+        id: {type: integer, format: int64}
+        recallNo: {type: string}
+        ownerOrgId: {type: integer, format: int64, description: 发起组织（种子批次当前责任组织）}
+        sourceAlertId: {type: integer, format: int64}
+        reason: {type: string}
+        status: {type: string, enum: [IN_PROGRESS, CLOSED]}
+        startedAt: {type: string, format: date-time}
+        startedBy: {type: integer, format: int64}
+        closedAt: {type: string, format: date-time}
+        closedBy: {type: integer, format: int64}
+        publicDisposition: {type: string, enum: [DESTROYED, RETURNED]}
+        resultSummary: {type: string, description: 内部处置总结，只对发起组织与平台输出}
+        version: {type: integer, format: int64}
+        summary: {$ref: '#/components/schemas/RecallSummary'}
+        scope:
+          type: array
+          items: {$ref: '#/components/schemas/RecallScopeItem'}
+    RecallEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Recall'}
+    RecallListEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/Recall'}
     TransferStatus:
       type: string
       enum: [DRAFT, PENDING, QUARANTINED, ACCEPTED, REJECTED]

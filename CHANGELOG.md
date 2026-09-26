@@ -6,6 +6,13 @@
 
 ### Added
 
+- Phase B PB5 模拟召回（契约 v1.1 §2.12 / §4.2 / §4.3 / §5 / §13 步骤 8–13 / §14）：
+  - Flyway V16：前置条件要求 V1 占位表 `recall` / `recall_batch` 为空（fail-fast，在任何 DDL 之前失败）；以契约对象重建 `recall`（发起组织、可选来源告警、原因、IN_PROGRESS / CLOSED 生命周期形状、受控公开处置结论 DESTROYED / RETURNED 与内部处置总结、发起 / 关闭两套组织内幂等键 + 请求哈希、版本）；新建追加式影响范围快照 `recall_batch`（SEED / DESCENDANT / ANCESTOR 与深度、持有组织、转换前流转 / 风险状态、动作 RECALLED / NOTIFY_HOLDER / ALREADY_RECALLED / TRACE_ONLY 与角色-动作 CHECK、召回风险转换经复合外键必须来源于同一召回、剩余 / 已售数量、未结束交接与运输状态、公开追溯码是否启用）；`batch_risk_transition` 新增类型化来源外键 `source_recall_id` 与 `RECALL` 来源（只允许质量管理员 NORMAL / FROZEN → RECALLED；RECALLED 只能来自 RECALL）。不回填，不修改 V1–V15。
+  - `POST /api/v1/recalls`：种子批次当前责任组织的 QUALITY_MANAGER 发起；种子必须 FROZEN，或为证据充分的 NORMAL（最新检验报告 FAIL，或已被其他召回圈定为后续批次，否则 409 `RECALL_EVIDENCE_REQUIRED`）；可引用本组织告警（种子必须是其受影响批次）。同一事务内反向追溯祖先（只溯源）、沿已提交批次操作正向圈定后续批次（本组织持有的转为 RECALLED，其他组织持有的通知持有方由其自行发起召回，草稿只记录），快照库存 / 在途 / 已售数量、未结束交接与公开追溯码，经风险核心 `BatchRiskService.recallForCase` 转换（`SYS:RECALL:{recallId}:BATCH:{batchId}`，审计 `RECALL_START` / `RISK_RECALL`）。ACTIVE 与 CLOSED 批次都可召回（已售罄批次保持 CLOSED 并记录 RECALLED）；召回不改变数量、责任组织、流转状态、交接、运输任务或公开追溯码，不生成 TraceEvent。锁顺序：引用告警时先锁告警（alert → batch，与告警放行同序），再按批次 ID 升序一次锁定全部范围批次（待转换排他、只快照共享），锁后重算正向范围，范围被并发批次操作 / 交接改变时 409 `RECALL_SCOPE_CHANGED`；范围快照中的未结束交接是快照引用（不建外键，避免与交接接受的 shipment → transfer → batch 反向等待）。
+  - `POST /api/v1/recalls/{id}/close`：发起组织的质量管理员给出受控公开处置结论与内部处置总结（召回行锁，审计 `RECALL_CLOSE`）；批次永久保留 RECALLED。`GET /api/v1/recalls`、`GET /api/v1/recalls/{id}`：发起组织与平台看完整范围与内部总结，范围批次持有组织只看本组织持有的范围行，其他组织 403。
+  - 确定性竞态（真实 MySQL）：召回与销售 / 交接接受 / 批次操作 / 告警放行 / 重复召回任一顺序结果确定（召回先提交则后续动作被 RECALLED 终态阻断；接受先提交则原组织召回 403、新责任组织可召回；批次操作先提交则 409 范围变化并可重试），不同组织对同一谱系的并发召回无死锁，并发关闭只生效一次。
+  - 生产 Vue：模拟召回列表 / 详情（案件概要、种子 / 后续 / 祖先范围表与数量快照、持有方只读视图与“发起本组织召回”提示、受控处置结论与二次确认关闭、模拟演练声明）；批次风险面板与告警详情可发起模拟召回（原因 + 二次确认，NORMAL 批次提示证据要求）；风险历史标注“模拟召回”并链接召回；RECALLED 批次显示终态提示。
+
 - Phase B PB4 隔离收货 → 检验证据 → 质量结论放行 / 拒收 → 告警处置结论（契约 v1.1 §2.10 / §7.3 / §10.2 步骤 5–7 / §10.3 / §13 步骤 5–11 / §14）：
   - Flyway V15：前置条件要求 V1 占位表 `inspection_report` 为空（fail-fast）；`transfer` 新增隔离事实（隔离场所经复合外键必须属于接收方、原因、登记时间与操作人）、状态 `QUARANTINED`、未结束交接排他覆盖 QUARANTINED，并重建生命周期形状 CHECK（经隔离后的 ACCEPTED / REJECTED 保留隔离事实，隔离后拒收保留实收数量）；以契约对象重建追加式 `inspection_report`（提交身份 CURRENT_ORG / QUARANTINE_RECEIVER，后者经复合外键证明是该批次隔离交接的接收方；可关联告警并经复合外键保证批次属于其受影响批次；结论 PASS / FAIL；不含机构资质核验字段）；`alert_action` 新增 `RELEASE_BATCH`（必须引用来源于同一告警的放行转换与该批次的报告，同批次最多放行一次）与 `RESOLVE`；`batch_risk_transition` ALERT 来源增加质量管理员放行 FROZEN → NORMAL。不回填，不修改 V1–V14。
   - `POST /api/v1/transfers/{id}/quarantine`：接收方 PENDING → QUARANTINED（运输已到达，实收数量 / 差异原因 / 本组织启用隔离场所 / 原因）；不改变批次责任组织、数量与风险状态，不生成追溯事件；隔离期间批次不能再交接、加工或销售。`accept` / `reject` 接受 QUARANTINED：接受要求批次风险恢复正常并沿用隔离登记的实收事实，拒收在任何风险状态下可用。交接响应新增隔离事实与批次当前流转 / 风险状态。
