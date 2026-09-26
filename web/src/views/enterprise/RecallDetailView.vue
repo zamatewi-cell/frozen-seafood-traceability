@@ -26,7 +26,8 @@ import { canCloseRecall } from '@/utils/permissions'
 /**
  * 模拟召回详情（Phase B PB5；统一业务契约 v1.1 §2.12 / §13 步骤 8–14）：召回批次、正向后续批次（本组织持有的已召回，
  * 其他组织持有的已通知持有方）、反向上游批次（溯源调查），以及剩余（库存与在途）/ 已售数量、未结束交接与运输状态、公开追溯码事实；
- * 发起组织的质量管理员给出受控公开处置结论与内部总结后关闭，批次仍保留模拟召回风险终态。范围批次的持有方只看到本组织的范围行。
+ * 发起组织的质量管理员给出受控公开处置结论与内部总结后关闭，批次仍保留模拟召回风险终态。召回通知属于批次：范围批次的当前责任组织
+ * 看到本组织当前负责的范围行（发起时快照与当前状态）；发起时的持有方在批次转出后只看到发起时快照。
  * 模拟召回是教学演练，不代表真实法定召回。服务端是最终权限边界。
  */
 const props = defineProps<{ id: string }>()
@@ -66,9 +67,12 @@ const nextStep = computed<string | null>(() => {
       ? '处置中：其他组织持有的后续批次已通知持有方，由持有方质量管理员发起召回；处置完成后填写公开处置结论并关闭。'
       : '处置中：完成库存、在途与已售部分的演练处置后，填写公开处置结论并关闭。'
   }
-  return rowsOf('DESCENDANT').some((row) => row.action === 'NOTIFY_HOLDER' && row.currentRiskStatus !== 'RECALLED')
-    ? '本组织持有的后续批次已被上游模拟召回圈定：请质量管理员在批次详情中以此为依据发起本组织的模拟召回。'
-    : '本组织持有的范围批次仅用于溯源协查。'
+  if (r.viewerRelation === 'HISTORICAL_HOLDER') {
+    return '本组织在召回发起时持有这些范围批次，之后已转出：这里只显示发起时的历史快照，召回通知由批次的当前责任组织处置。'
+  }
+  return rowsOf('DESCENDANT').some((row) => row.heldByViewer && row.action === 'NOTIFY_HOLDER' && row.currentRiskStatus !== 'RECALLED')
+    ? '本组织当前负责的后续批次已被上游模拟召回圈定：请质量管理员在批次详情中调查，必要时风险冻结，或以此为依据发起本组织的模拟召回。'
+    : '本组织负责的范围批次仅用于溯源协查。'
 })
 
 let controller: AbortController | null = null
@@ -158,7 +162,7 @@ onBeforeUnmount(() => controller?.abort())
     <div v-if="loadState === 'loading' && !recall" class="ent-card ent-state" data-testid="recall-loading">正在加载模拟召回…</div>
     <div v-else-if="loadState === 'not-found'" class="ent-card ent-state" role="alert" data-testid="recall-not-found">未找到该模拟召回。</div>
     <div v-else-if="loadState === 'forbidden'" class="ent-card ent-state error" role="alert" data-testid="recall-forbidden">
-      只有召回发起组织与影响范围批次的持有组织可以查看该模拟召回。
+      只有召回发起组织、影响范围批次的当前责任组织与召回发起时的持有组织可以查看该模拟召回。
     </div>
     <div v-else-if="loadState === 'error'" class="ent-card ent-state error" role="alert">
       <p>{{ loadError }}</p>
@@ -237,17 +241,22 @@ onBeforeUnmount(() => controller?.abort())
                 :data-batch-id="row.batchId"
                 :data-action="row.action"
                 :data-risk-status="row.currentRiskStatus"
+                :data-held-by-viewer="row.heldByViewer ? 'true' : 'false'"
               >
                 <td class="mono">
-                  <RouterLink v-if="row.holderOrgId === user?.orgId" :to="`/app/batches/${row.batchId}`">{{ row.traceBatchNo }}</RouterLink>
+                  <RouterLink v-if="row.heldByViewer" :to="`/app/batches/${row.batchId}`">{{ row.traceBatchNo }}</RouterLink>
                   <span v-else>{{ row.traceBatchNo }}</span>
                   <div v-if="row.productName" class="ent-muted">{{ row.productName }}</div>
+                  <div v-if="row.heldByViewer && !owner" class="ent-muted" data-testid="recall-scope-held">本组织当前负责</div>
                 </td>
                 <td>{{ organizationLabel(row.holderOrgId) }}</td>
                 <td>{{ formatFlowStatus(row.flowStatus).label }} / {{ formatRiskStatus(row.riskStatusBefore).label }}</td>
                 <td>
-                  <StatusBadge :info="formatRiskStatus(row.currentRiskStatus)" dimension="风险" />
-                  <StatusBadge :info="formatFlowStatus(row.currentFlowStatus)" dimension="流转" />
+                  <template v-if="row.currentRiskStatus && row.currentFlowStatus">
+                    <StatusBadge :info="formatRiskStatus(row.currentRiskStatus)" dimension="风险" />
+                    <StatusBadge :info="formatFlowStatus(row.currentFlowStatus)" dimension="流转" />
+                  </template>
+                  <span v-else class="ent-muted" data-testid="recall-scope-current-hidden">—（已转出，只显示发起时快照）</span>
                 </td>
                 <td data-testid="recall-scope-action">{{ formatRecallScopeAction(row.action) }}</td>
                 <td v-if="role !== 'ANCESTOR'" data-testid="recall-scope-quantities">

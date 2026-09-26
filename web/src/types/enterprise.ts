@@ -448,11 +448,21 @@ export interface AlertAffectedBatch {
   currentRiskStatus: BatchRiskStatus
   quantity: number
   unitCode: string
-  /** PB4：是否已依据检验结论放行、关联本告警的最新检验结论与报告数。 */
+  /** PB4：本告警是否已依据检验结论对该批次形成放行结论、关联本告警的最新检验结论与报告数。 */
   released: boolean
+  /** 放行结论解除了批次最后一个风险事项时的放行转换；形成结论时批次仍被其他风险事项冻结则不输出。 */
   releaseTransitionId?: number
   latestInspectionConclusion?: InspectionConclusion
   inspectionCount: number
+  /** 批次仍处于 FROZEN 时，除本告警外仍未解除的风险事项（只对批次当前责任组织与平台输出）。 */
+  pendingHolds?: AlertPendingHold[]
+}
+
+/** 仍使批次保持 FROZEN 的其他风险事项：其他未处置告警尚未形成放行结论，或人工风险冻结尚未人工解除。 */
+export interface AlertPendingHold {
+  type: 'ALERT' | 'MANUAL_FREEZE'
+  alertId?: number
+  alertNo?: string
 }
 
 /** 告警处置动作（追加式历史）。 */
@@ -541,8 +551,9 @@ export interface RecallScopeItem {
   holderOrgId: number
   flowStatus: BatchFlowStatus
   riskStatusBefore: BatchRiskStatus
-  currentFlowStatus: BatchFlowStatus
-  currentRiskStatus: BatchRiskStatus
+  /** 当前流转 / 风险状态：只对发起组织、平台与该批次的当前责任组织输出；历史持有方只看发起时快照。 */
+  currentFlowStatus?: BatchFlowStatus
+  currentRiskStatus?: BatchRiskStatus
   action: RecallScopeAction
   riskTransitionId?: number
   declaredQuantity: number
@@ -554,6 +565,8 @@ export interface RecallScopeItem {
   openTransferStatus?: TransferStatus
   shipmentStatus?: ShipmentStatus
   publicCodeActive: boolean
+  /** 查看组织当前负责该批次（召回通知需要由它处置）。 */
+  heldByViewer?: boolean
 }
 
 export interface RecallSummary {
@@ -583,6 +596,19 @@ export interface Recall {
   /** 内部处置总结：只对发起组织与平台可见。 */
   resultSummary?: string
   version: number
+  /** 查看组织与召回的关系：发起组织、范围批次的当前责任组织、发起时的持有组织（历史快照）或平台只读。 */
+  viewerRelation?: RecallViewerRelation
   summary?: RecallSummary
   scope?: RecallScopeItem[]
+}
+
+export type RecallViewerRelation = 'OWNER' | 'CURRENT_HOLDER' | 'HISTORICAL_HOLDER' | 'PLATFORM'
+
+/** 批次当前未解除的风险事项与收到的上游召回通知（只对批次当前责任组织与平台输出）。 */
+export interface BatchRiskHolds {
+  batchId: number
+  riskStatus: BatchRiskStatus
+  alertHolds: Array<{ alertId: number; alertNo: string; alertStatus: AlertStatus }>
+  manualFreezeHold: boolean
+  recallNotices: Array<{ recallId: number; recallNo: string; recallStatus: RecallStatus; ownerOrgId: number; notifiedAt: string; depth: number }>
 }

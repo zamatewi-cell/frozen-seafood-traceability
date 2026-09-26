@@ -2,10 +2,10 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
-import { freezeBatch, listRiskTransitions, releaseBatch } from '@/api/batchRisk'
+import { freezeBatch, getBatchRiskHolds, listRiskTransitions, releaseBatch } from '@/api/batchRisk'
 import { ApiError } from '@/api/client'
 import { useIdempotentWrite } from '@/composables/useIdempotentWrite'
-import type { Batch, BatchRiskTransition, CurrentUser } from '@/types/enterprise'
+import type { Batch, BatchRiskHolds, BatchRiskTransition, CurrentUser } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import { formatFlowStatus, formatIsoDateTime, formatRiskStatus } from '@/utils/formatters'
 import { canFreezeBatch, canReleaseBatch, canStartRecall } from '@/utils/permissions'
@@ -16,6 +16,8 @@ import RecallStartForm from '@/components/enterprise/RecallStartForm.vue'
  * 风险冻结（NORMAL → FROZEN）或解除冻结（FROZEN → NORMAL），ACTIVE 与 CLOSED 批次均可。
  * 风险转换只改变风险状态：不改变数量、当前责任组织与流转状态，不生成追溯事件；冻结期间的业务阻断由服务端既有守卫执行。
  * 这是教学实训中的模拟质量处置，不代表真实的产品扣留、安全判定或监管措施。服务端是最终权限边界。
+ * 独立评审修复：风险事项与召回通知属于批次——当前责任组织看到仍未解除的告警风险事项、人工风险冻结与上游召回通知；
+ * 仍有未处置告警时人工解除冻结入口隐藏（需先在告警中依据检验结论形成放行结论）。
  */
 type Action = 'FREEZE' | 'RELEASE'
 
@@ -23,6 +25,8 @@ const props = defineProps<{
   batch: Batch
   user: CurrentUser | null
   orgLabel: (orgId: number) => string
+  /** 请求目录解析组织名称（风险转换的历史责任组织、召回通知的发起组织）。 */
+  resolveOrgs?: (orgIds: Iterable<number>) => void
 }>()
 
 const emit = defineEmits<{
@@ -45,10 +49,16 @@ const submitting = ref(false)
 const writeError = ref('')
 const writer = useIdempotentWrite()
 let controller: AbortController | null = null
+const holds = ref<BatchRiskHolds | null>(null)
 
+/** 当前责任组织与平台只读角色可以查看批次的风险事项与召回通知。 */
+const canSeeHolds = computed(() => Boolean(props.user
+  && (props.user.orgId === props.batch.orgId || props.user.scopes.includes('PLATFORM'))))
+const pendingAlertHolds = computed(() => holds.value?.alertHolds ?? [])
+const openRecallNotices = computed(() => (props.batch.riskStatus === 'RECALLED' ? [] : holds.value?.recallNotices ?? []))
 const canFreeze = computed(() => canFreezeBatch(props.user, props.batch))
 const canRecall = computed(() => canStartRecall(props.user, props.batch))
-const canRelease = computed(() => canReleaseBatch(props.user, props.batch))
+const canRelease = computed(() => canReleaseBatch(props.user, props.batch) && pendingAlertHolds.value.length === 0)
 const confirmText = computed(() => mode.value === 'FREEZE'
   ? '确认风险冻结？冻结后本批次暂停加工 / 拆分、交接、终端销售、冷库仓储登记与首次激活公开追溯码；数量、当前责任组织与流转状态保持不变。'
   : props.batch.flowStatus === 'CLOSED'
@@ -65,10 +75,24 @@ async function load() {
     if (current.signal.aborted) return
     transitions.value = result
     loadState.value = 'loaded'
+    props.resolveOrgs?.(result.map((t) => t.orgId))
   } catch (err: unknown) {
     if (current.signal.aborted) return
     transitions.value = []
     loadState.value = err instanceof ApiError && err.status === 403 ? 'forbidden' : 'error'
+  }
+  if (!canSeeHolds.value) {
+    holds.value = null
+    return
+  }
+  try {
+    const result = await getBatchRiskHolds(props.batch.id, current.signal)
+    if (current.signal.aborted) return
+    holds.value = result
+    props.resolveOrgs?.(result.recallNotices.map((n) => n.ownerOrgId))
+  } catch {
+    // 风险事项只是提示：读取失败时不影响风险面板其余功能，服务端仍是最终的放行守卫
+    if (!current.signal.aborted) holds.value = null
   }
 }
 
@@ -164,6 +188,31 @@ onBeforeUnmount(() => controller?.abort())
       批次已进入模拟召回（风险终态）：不能再风险冻结、解除冻结、销售、交接或加工；消费者页面显示模拟召回提示。
       {{ batch.flowStatus === 'CLOSED' ? '流转状态保持已关闭。' : '' }}
     </p>
+
+    <div v-if="pendingAlertHolds.length > 0 || holds?.manualFreezeHold" class="risk-holds" data-testid="risk-holds">
+      <strong>仍未解除的风险事项：</strong>
+      <ul>
+        <li v-for="h in pendingAlertHolds" :key="h.alertId" data-testid="risk-hold-alert">
+          持续超温告警 <RouterLink :to="`/app/alerts/${h.alertId}`" class="mono">{{ h.alertNo }}</RouterLink>
+          ：需在告警中依据关联的检验结论形成放行结论
+        </li>
+        <li v-if="holds?.manualFreezeHold" data-testid="risk-hold-manual">
+          人工风险冻结：{{ pendingAlertHolds.length > 0 ? '告警结论全部形成后' : '' }}由质量管理员填写原因人工解除
+        </li>
+      </ul>
+      <p class="ent-muted">批次只有在全部风险事项都形成结论后才恢复正常；任何一个事项的结论都不会单独解除其他事项。</p>
+    </div>
+
+    <div v-if="openRecallNotices.length > 0" class="ent-flash warning" role="status" data-testid="risk-recall-notices">
+      <strong>上游模拟召回通知：</strong>
+      <ul>
+        <li v-for="n in openRecallNotices" :key="n.recallId" data-testid="risk-recall-notice" :data-recall-id="n.recallId">
+          <RouterLink :to="`/app/recalls/${n.recallId}`" class="mono">{{ n.recallNo }}</RouterLink>
+          （发起组织：{{ orgLabel(n.ownerOrgId) }}，通知时间 {{ formatIsoDateTime(n.notifiedAt) }}）
+        </li>
+      </ul>
+      本批次已被上游模拟召回正向圈定。请质量管理员调查该批次：必要时风险冻结，或以上游召回为证据发起本组织的模拟召回。
+    </div>
 
     <div v-if="!mode && (canFreeze || canRelease)" class="ent-actions">
       <button v-if="canFreeze" type="button" class="ent-button ent-danger" data-testid="risk-freeze-open" @click="open('FREEZE')">风险冻结</button>
@@ -268,6 +317,15 @@ onBeforeUnmount(() => controller?.abort())
   flex-direction: column;
   gap: 10px;
   font-size: 13px;
+}
+.risk-holds {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+.risk-holds ul,
+[data-testid='risk-recall-notices'] ul {
+  margin: 4px 0;
+  padding-left: 18px;
 }
 .risk-row-head {
   display: flex;

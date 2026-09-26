@@ -35,6 +35,22 @@ async function load() {
   }
 }
 
+/** 与本组织的关系（服务端按批次当前责任组织与发起时快照计算）。 */
+function relationLabel(r: Recall): string {
+  switch (r.viewerRelation) {
+    case 'OWNER':
+      return '本组织发起'
+    case 'CURRENT_HOLDER':
+      return '本组织当前负责范围批次（召回通知，待处置）'
+    case 'HISTORICAL_HOLDER':
+      return '本组织曾持有范围批次（历史快照，只读）'
+    case 'PLATFORM':
+      return '平台只读'
+    default:
+      return r.ownerOrgId === user.value?.orgId ? '本组织发起' : '本组织持有范围批次（通知 / 协查）'
+  }
+}
+
 load()
 onBeforeUnmount(() => controller?.abort())
 </script>
@@ -67,7 +83,7 @@ onBeforeUnmount(() => controller?.abort())
             <td><StatusBadge :info="formatRecallStatus(r.status)" dimension="召回" /></td>
             <td>{{ r.reason }}</td>
             <td>{{ formatIsoDateTime(r.startedAt) }}</td>
-            <td>{{ r.ownerOrgId === user?.orgId ? '本组织发起' : '本组织持有范围批次（通知 / 协查）' }}</td>
+            <td data-testid="recall-relation" :data-relation="r.viewerRelation">{{ relationLabel(r) }}</td>
           </tr>
         </tbody>
       </table>

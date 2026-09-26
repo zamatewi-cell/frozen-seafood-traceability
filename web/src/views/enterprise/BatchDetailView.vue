@@ -525,6 +525,7 @@ onBeforeUnmount(() => {
         :batch="batch"
         :user="user"
         :org-label="directory.organizationLabel"
+        :resolve-orgs="directory.resolveOrganizations"
         @changed="onRiskChanged"
         @conflict="onRiskConflict"
       />

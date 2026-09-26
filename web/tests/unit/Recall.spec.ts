@@ -151,15 +151,17 @@ describe('RecallDetailView', () => {
   it('shows the holder only its own rows with a hint to start its own recall', async () => {
     backend(retailerQm, {
       'GET /api/v1/recalls/7001': () => ({ status: 200, body: envelope(recallBody({
+        viewerRelation: 'CURRENT_HOLDER',
         summary: { seedCount: 0, descendantCount: 1, ancestorCount: 0, recalledCount: 0, notifiedCount: 1, openTransferCount: 0, publicCodeCount: 1,
           remainingQuantity: 0, soldQuantity: 360 },
         scope: [scopeRow({ batchId: 23, traceBatchNo: 'TB-B3', scopeRole: 'DESCENDANT', depth: 1, holderOrgId: 60, action: 'NOTIFY_HOLDER',
-          currentRiskStatus: 'NORMAL', soldQuantity: 360, declaredQuantity: 360 })]
+          currentRiskStatus: 'NORMAL', soldQuantity: 360, declaredQuantity: 360, heldByViewer: true })]
       })) })
     })
     const { view } = await mountAt('/app/recalls/7001')
     expect(view.findAll('[data-testid="recall-scope-row"]')).toHaveLength(1)
     expect(view.get('[data-testid="recall-next-step"]').text()).toContain('发起本组织的模拟召回')
+    expect(view.get('[data-testid="recall-scope-held"]').text()).toBe('本组织当前负责')
     expect(view.find('[data-testid="recall-close"]').exists()).toBe(false)
     expect(view.find('[data-testid="recall-result-summary"]').exists()).toBe(false)
   })

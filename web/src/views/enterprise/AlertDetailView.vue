@@ -87,8 +87,16 @@ function onRecallConflict(message: string) {
 }
 
 /** 批次的质量处置进展（由服务端返回的事实推导）。 */
+/** 仍使批次保持冻结的其他风险事项（服务端只对批次当前责任组织输出明细）。 */
+function holdsText(b: AlertAffectedBatch): string {
+  const holds = b.pendingHolds ?? []
+  if (holds.length === 0) return '其他风险事项'
+  return holds.map((h) => (h.type === 'ALERT' ? `告警 ${h.alertNo}` : '人工风险冻结')).join('、')
+}
+
 function dispositionOf(b: AlertAffectedBatch): string {
   if (b.currentRiskStatus === 'RECALLED') return '已进入模拟召回'
+  if (b.released && b.currentRiskStatus === 'FROZEN') return `已记录本告警的放行结论；批次仍被${holdsText(b)}冻结`
   if (b.released) return '已依据检验结论放行'
   if (b.latestInspectionConclusion === 'FAIL') return '最新检验不合格：可拒收或发起模拟召回'
   if (b.latestInspectionConclusion === 'PASS') return '最新检验合格：可放行'
@@ -231,7 +239,10 @@ async function submitRelease(b: AlertAffectedBatch) {
       (payload, key) => releaseAlertBatch(a.id, b.batchId, payload, key)
     )
     closeRelease()
-    flash.value = { tone: 'success', message: `批次 ${b.traceBatchNo} 已依据检验结论放行，风险状态恢复正常；接收方可以接受隔离中的交接。` }
+    const after = alert.value?.batches?.find((x) => x.batchId === b.batchId)
+    flash.value = after && after.currentRiskStatus === 'FROZEN'
+      ? { tone: 'warning', message: `已记录本告警对批次 ${b.traceBatchNo} 的放行结论；批次仍被${holdsText(after)}冻结，这些风险事项也形成结论后才恢复正常。` }
+      : { tone: 'success', message: `批次 ${b.traceBatchNo} 已依据检验结论放行，风险状态恢复正常；接收方可以接受隔离中的交接。` }
   } catch (err: unknown) {
     if (err instanceof ApiError && err.status === 401) return
     const message = describeWriteError(err, '放行批次')
@@ -403,6 +414,14 @@ onBeforeUnmount(() => controller?.abort())
             <StatusBadge :info="formatInspectionConclusion(b.latestInspectionConclusion)" dimension="检验" data-testid="alert-batch-inspection" />
             <span class="ent-muted">{{ dispositionOf(b) }}</span>
           </div>
+          <p v-if="b.currentRiskStatus === 'FROZEN' && b.pendingHolds && b.pendingHolds.length > 0" class="ent-muted" data-testid="alert-batch-pending-holds">
+            仍未解除的风险事项：
+            <template v-for="(h, i) in b.pendingHolds" :key="`${h.type}-${h.alertId ?? i}`">
+              <span v-if="i > 0">、</span>
+              <RouterLink v-if="h.type === 'ALERT'" :to="`/app/alerts/${h.alertId}`" data-testid="alert-batch-pending-alert">告警 {{ h.alertNo }}</RouterLink>
+              <span v-else data-testid="alert-batch-pending-manual">人工风险冻结（需在批次详情中人工解除）</span>
+            </template>
+          </p>
           <InspectionReportPanel
             :batch-id="b.batchId"
             :alert-id="alert.id"
