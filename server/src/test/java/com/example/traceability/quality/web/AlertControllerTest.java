@@ -13,6 +13,7 @@ import com.example.traceability.identity.mapper.UserRoleMapper;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.quality.application.AlertApplicationService;
 import com.example.traceability.quality.dto.AlertAcknowledgeRequest;
+import com.example.traceability.quality.dto.AlertDecisionRequest;
 import com.example.traceability.quality.dto.AlertResponse;
 import com.example.traceability.quality.dto.TemperatureRecordResponse;
 import org.junit.jupiter.api.BeforeEach;
@@ -146,5 +147,29 @@ class AlertControllerTest {
                 .contentType(MediaType.APPLICATION_JSON).content("{\"note\":\"已确认\",\"status\":\"RESOLVED\"}"));
         verify(alertService).acknowledge(eq(5001L), argThat((AlertAcknowledgeRequest r) -> r.unknownFields().containsKey("status")),
                 eq(KEY), any());
+    }
+
+    @Test
+    @DisplayName("PB4 放行与处置结论：匿名 401、缺失 CSRF 403；透传告警 / 批次、幂等键与说明 / 结论")
+    void releaseAndResolve() throws Exception {
+        mockMvc.perform(post("/api/v1/alerts/5001/batches/21/release").with(csrf()).header("Idempotency-Key", KEY)
+                .contentType(MediaType.APPLICATION_JSON).content("{}")).andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/v1/alerts/5001/resolve").with(user(qm)).header("Idempotency-Key", KEY)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"resolution\":\"x\"}")).andExpect(status().isForbidden());
+        verify(alertService, never()).releaseBatch(any(), any(), any(), any(), any());
+        verify(alertService, never()).resolve(any(), any(), any(), any());
+
+        when(alertService.releaseBatch(eq(5001L), eq(21L), argThat((AlertDecisionRequest r) -> "复检合格".equals(r.note())), eq(KEY), any()))
+                .thenReturn(alert("ACKNOWLEDGED"));
+        mockMvc.perform(post("/api/v1/alerts/5001/batches/21/release").with(user(qm)).with(csrf()).header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"note\":\"复检合格\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.id").value(5001));
+        when(alertService.resolve(eq(5001L), argThat((AlertDecisionRequest r) -> "处置完毕".equals(r.resolution())), eq(KEY), any()))
+                .thenReturn(alert("RESOLVED"));
+        mockMvc.perform(post("/api/v1/alerts/5001/resolve").with(user(qm)).with(csrf()).header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"resolution\":\"处置完毕\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("RESOLVED"));
     }
 }

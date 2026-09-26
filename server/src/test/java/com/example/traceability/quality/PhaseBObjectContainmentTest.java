@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.example.traceability.quality.mapper.AlertActionMapper;
 import com.example.traceability.quality.mapper.AlertBatchMapper;
 import com.example.traceability.quality.mapper.AlertMapper;
+import com.example.traceability.quality.mapper.InspectionReportMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -29,7 +30,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * 扫描 {@code src/main/java} 与 {@code src/main/resources} 中的非迁移 XML / SQL：
  * <ul>
- *   <li>alert_batch / alert_action 追加式：任何 UPDATE / DELETE / REPLACE / ON DUPLICATE KEY UPDATE 都不允许；</li>
+ *   <li>alert_batch / alert_action / inspection_report（PB4）追加式：任何 UPDATE / DELETE / REPLACE / ON DUPLICATE KEY UPDATE 都不允许，
+ *       且 INSERT 只存在于各自的 mapper；</li>
  *   <li>alert 从不删除；其 INSERT 与 UPDATE 只存在于 AlertMapper，UPDATE 只推进处置生命周期列，不改写片段、判定依据、
  *       归属组织或运输任务；</li>
  *   <li>三个 mapper 都不继承 BaseMapper，只声明 insert / select / 生命周期推进方法。</li>
@@ -45,7 +47,12 @@ class PhaseBObjectContainmentTest {
     private static final Path MIGRATIONS = MAIN_RESOURCES.resolve("db/migration");
 
     /** 追加式表：任何修改都不允许。 */
-    private static final List<String> APPEND_ONLY_TABLES = List.of("alert_batch", "alert_action");
+    private static final List<String> APPEND_ONLY_TABLES = List.of("alert_batch", "alert_action", "inspection_report");
+    /** 追加式表与唯一允许 INSERT 的 mapper 文件。 */
+    private static final Map<String, String> APPEND_ONLY_OWNERS = Map.of(
+            "alert_batch", "AlertBatchMapper.java",
+            "alert_action", "AlertActionMapper.java",
+            "inspection_report", "InspectionReportMapper.java");
     /** alert 允许由 AlertMapper 推进的生命周期列。 */
     private static final List<String> ALERT_LIFECYCLE_COLUMNS = List.of("status", "acknowledged_at", "acknowledged_by",
             "resolved_at", "resolved_by", "resolution", "version", "updated_at", "updated_by");
@@ -121,6 +128,14 @@ class PhaseBObjectContainmentTest {
                     violations.add(rel + ": " + m.group().replaceAll("\\s+", " "));
                 }
             }
+            for (Map.Entry<String, String> own : APPEND_ONLY_OWNERS.entrySet()) {
+                Matcher insert = Pattern.compile("(?is)\\bINSERT\\s+INTO\\s+`?" + own.getKey() + "`?\\s*\\(").matcher(src);
+                while (insert.find()) {
+                    if (!e.getKey().getFileName().toString().equals(own.getValue())) {
+                        violations.add(rel + ": INSERT INTO " + own.getKey() + " outside " + own.getValue());
+                    }
+                }
+            }
             Matcher del = ALERT_DELETE.matcher(src);
             while (del.find()) {
                 violations.add(rel + ": DELETE FROM alert");
@@ -150,14 +165,16 @@ class PhaseBObjectContainmentTest {
     @Test
     @DisplayName("告警相关 mapper 不继承 BaseMapper，只声明 insert / select / 生命周期推进方法")
     void mappersAreConfined() {
-        for (Class<?> mapper : List.of(AlertMapper.class, AlertBatchMapper.class, AlertActionMapper.class)) {
+        for (Class<?> mapper : List.of(AlertMapper.class, AlertBatchMapper.class, AlertActionMapper.class, InspectionReportMapper.class)) {
             assertThat(BaseMapper.class.isAssignableFrom(mapper)).as("%s must not inherit generic BaseMapper writes", mapper.getSimpleName())
                     .isFalse();
         }
         assertThat(Arrays.stream(AlertBatchMapper.class.getDeclaredMethods()).map(Method::getName))
-                .allMatch(n -> n.equals("insert") || n.startsWith("select"));
+                .allMatch(n -> n.equals("insert") || n.startsWith("select") || n.startsWith("count"));
         assertThat(Arrays.stream(AlertActionMapper.class.getDeclaredMethods()).map(Method::getName))
-                .allMatch(n -> n.equals("insert") || n.startsWith("select"));
+                .allMatch(n -> n.equals("insert") || n.startsWith("select") || n.startsWith("count"));
+        assertThat(Arrays.stream(InspectionReportMapper.class.getDeclaredMethods()).map(Method::getName))
+                .allMatch(n -> n.equals("insert") || n.startsWith("select") || n.startsWith("count"));
         assertThat(Arrays.stream(AlertMapper.class.getDeclaredMethods()).map(Method::getName))
                 .allMatch(n -> n.equals("insert") || n.startsWith("select") || List.of("acknowledge", "resolve").contains(n));
     }

@@ -37,6 +37,11 @@ public class AlertBatch {
     private String transferNo;
     private String transferStatus;
 
+    // 查询关联字段（非本表列）：质量处置进展（PB4）
+    private Long releaseTransitionId;
+    private String latestInspectionConclusion;
+    private Integer inspectionCount;
+
     public Long getId() {
         return id;
     }
@@ -163,5 +168,29 @@ public class AlertBatch {
 
     public void setTransferStatus(String transferStatus) {
         this.transferStatus = transferStatus;
+    }
+
+    public Long getReleaseTransitionId() {
+        return releaseTransitionId;
+    }
+
+    public void setReleaseTransitionId(Long releaseTransitionId) {
+        this.releaseTransitionId = releaseTransitionId;
+    }
+
+    public String getLatestInspectionConclusion() {
+        return latestInspectionConclusion;
+    }
+
+    public void setLatestInspectionConclusion(String latestInspectionConclusion) {
+        this.latestInspectionConclusion = latestInspectionConclusion;
+    }
+
+    public Integer getInspectionCount() {
+        return inspectionCount;
+    }
+
+    public void setInspectionCount(Integer inspectionCount) {
+        this.inspectionCount = inspectionCount;
     }
 }

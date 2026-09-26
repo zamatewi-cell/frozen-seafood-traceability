@@ -70,4 +70,20 @@ public interface BatchRiskTransitionMapper {
      */
     @Select("SELECT COUNT(*) FROM batch_risk_transition WHERE batch_id = #{batchId} AND org_id = #{orgId}")
     int countByBatchIdAndOrgId(@Param("batchId") Long batchId, @Param("orgId") Long orgId);
+
+    /**
+     * 统计批次所在的、尚未对该批次形成放行决定的未处置告警数（PB4）。只在持有批次行锁后调用：
+     * 告警冻结与告警放行同样先锁批次行，因此 READ COMMITTED 下的这次读取稳定。大于 0 时人工解除冻结必须改走告警质量结论放行。
+     */
+    @Select("""
+            SELECT COUNT(*)
+            FROM alert_batch ab
+            JOIN alert a ON a.id = ab.alert_id
+            WHERE ab.batch_id = #{batchId}
+              AND a.status <> 'RESOLVED'
+              AND NOT EXISTS (SELECT 1 FROM alert_action x
+                              WHERE x.alert_id = ab.alert_id AND x.action = 'RELEASE_BATCH' AND x.batch_id = ab.batch_id)
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.TRUE)
+    int countPendingAlertDecisions(@Param("batchId") Long batchId);
 }

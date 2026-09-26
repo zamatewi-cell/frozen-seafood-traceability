@@ -39,7 +39,13 @@ class OrgScopedReadTransactionContractTest {
                 Arguments.of(SaleApplicationService.class.getMethod("listSales", Long.class, TraceSecurityPrincipal.class)),
                 Arguments.of(BatchApplicationService.class.getMethod("getBatchById", Long.class, TraceSecurityPrincipal.class)),
                 Arguments.of(BatchApplicationService.class.getMethod("listBatches", BatchQueryCriteria.class, TraceSecurityPrincipal.class)),
-                Arguments.of(ShipmentTemperatureService.class.getMethod("listRecords", Long.class, TraceSecurityPrincipal.class))
+                Arguments.of(ShipmentTemperatureService.class.getMethod("listRecords", Long.class, TraceSecurityPrincipal.class)),
+                Arguments.of(com.example.traceability.quality.application.AlertApplicationService.class
+                        .getMethod("listAlerts", String.class, Long.class, TraceSecurityPrincipal.class)),
+                Arguments.of(com.example.traceability.quality.application.AlertApplicationService.class
+                        .getMethod("getAlert", Long.class, TraceSecurityPrincipal.class)),
+                Arguments.of(com.example.traceability.quality.application.InspectionReportService.class
+                        .getMethod("listReports", Long.class, TraceSecurityPrincipal.class))
         );
     }
 

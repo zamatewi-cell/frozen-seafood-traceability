@@ -17,6 +17,10 @@ public class AlertAction {
     private Long alertId;
     private Long orgId;
     private String action;
+    /** RELEASE_BATCH（PB4）：放行批次、放行风险转换与依据检验报告。 */
+    private Long batchId;
+    private Long riskTransitionId;
+    private Long inspectionReportId;
     private Long actorUserId;
     private String note;
     private String idempotencyKey;
@@ -93,5 +97,29 @@ public class AlertAction {
 
     public void setOccurredAt(LocalDateTime occurredAt) {
         this.occurredAt = occurredAt;
+    }
+
+    public Long getBatchId() {
+        return batchId;
+    }
+
+    public void setBatchId(Long batchId) {
+        this.batchId = batchId;
+    }
+
+    public Long getRiskTransitionId() {
+        return riskTransitionId;
+    }
+
+    public void setRiskTransitionId(Long riskTransitionId) {
+        this.riskTransitionId = riskTransitionId;
+    }
+
+    public Long getInspectionReportId() {
+        return inspectionReportId;
+    }
+
+    public void setInspectionReportId(Long inspectionReportId) {
+        this.inspectionReportId = inspectionReportId;
     }
 }

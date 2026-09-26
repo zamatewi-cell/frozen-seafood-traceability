@@ -4,6 +4,7 @@ import com.example.traceability.common.envelope.SuccessEnvelope;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.quality.application.AlertApplicationService;
 import com.example.traceability.quality.dto.AlertAcknowledgeRequest;
+import com.example.traceability.quality.dto.AlertDecisionRequest;
 import com.example.traceability.quality.dto.AlertResponse;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -67,5 +68,32 @@ public class AlertController {
             @AuthenticationPrincipal TraceSecurityPrincipal principal
     ) {
         return SuccessEnvelope.of(alertService.acknowledge(alertId, request, idempotencyKey, principal));
+    }
+
+    /**
+     * 依据检验结论放行受影响批次（PB4；FROZEN → NORMAL，同一幂等键同一语义重放，返回当前告警详情）。
+     */
+    @PostMapping("/{alertId}/batches/{batchId}/release")
+    public SuccessEnvelope<AlertResponse> releaseBatch(
+            @PathVariable Long alertId,
+            @PathVariable Long batchId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody AlertDecisionRequest request,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal
+    ) {
+        return SuccessEnvelope.of(alertService.releaseBatch(alertId, batchId, request, idempotencyKey, principal));
+    }
+
+    /**
+     * 形成处置结论（PB4；ACKNOWLEDGED → RESOLVED，同一幂等键同一语义重放，返回当前告警详情）。
+     */
+    @PostMapping("/{alertId}/resolve")
+    public SuccessEnvelope<AlertResponse> resolve(
+            @PathVariable Long alertId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody AlertDecisionRequest request,
+            @AuthenticationPrincipal TraceSecurityPrincipal principal
+    ) {
+        return SuccessEnvelope.of(alertService.resolve(alertId, request, idempotencyKey, principal));
     }
 }

@@ -121,4 +121,23 @@ public interface AlertMapper {
             """)
     int acknowledge(@Param("id") Long id, @Param("expectedVersion") Long expectedVersion, @Param("userId") Long userId,
                     @Param("nowUtc") LocalDateTime nowUtc);
+
+    /**
+     * ACKNOWLEDGED → RESOLVED（处置结论，PB4）；状态与版本谓词不满足时影响 0 行。
+     */
+    @Update("""
+            UPDATE alert
+            SET status = 'RESOLVED',
+                resolved_at = #{nowUtc},
+                resolved_by = #{userId},
+                resolution = #{resolution},
+                version = version + 1,
+                updated_at = #{nowUtc},
+                updated_by = #{userId}
+            WHERE id = #{id}
+              AND status = 'ACKNOWLEDGED'
+              AND version = #{expectedVersion}
+            """)
+    int resolve(@Param("id") Long id, @Param("expectedVersion") Long expectedVersion, @Param("userId") Long userId,
+                @Param("resolution") String resolution, @Param("nowUtc") LocalDateTime nowUtc);
 }

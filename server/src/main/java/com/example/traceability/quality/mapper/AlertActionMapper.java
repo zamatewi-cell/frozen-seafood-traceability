@@ -26,9 +26,11 @@ public interface AlertActionMapper {
      */
     @Insert("""
             INSERT INTO alert_action
-                (alert_id, org_id, action, actor_user_id, note, idempotency_key, request_hash, occurred_at)
+                (alert_id, org_id, action, batch_id, risk_transition_id, inspection_report_id, actor_user_id, note,
+                 idempotency_key, request_hash, occurred_at)
             VALUES
-                (#{alertId}, #{orgId}, #{action}, #{actorUserId}, #{note}, #{idempotencyKey}, #{requestHash}, #{occurredAt})
+                (#{alertId}, #{orgId}, #{action}, #{batchId}, #{riskTransitionId}, #{inspectionReportId}, #{actorUserId}, #{note},
+                 #{idempotencyKey}, #{requestHash}, #{occurredAt})
             """)
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
     int insert(AlertAction action);
@@ -54,4 +56,11 @@ public interface AlertActionMapper {
     @Select("SELECT * FROM alert_action WHERE alert_id = #{alertId} ORDER BY id ASC")
     @Options(flushCache = Options.FlushCachePolicy.TRUE)
     List<AlertAction> selectByAlertId(@Param("alertId") Long alertId);
+
+    /**
+     * 告警是否已放行该批次（PB4；在告警行锁下读取）。
+     */
+    @Select("SELECT COUNT(*) FROM alert_action WHERE alert_id = #{alertId} AND action = 'RELEASE_BATCH' AND batch_id = #{batchId}")
+    @Options(flushCache = Options.FlushCachePolicy.TRUE)
+    int countReleaseByAlertIdAndBatchId(@Param("alertId") Long alertId, @Param("batchId") Long batchId);
 }

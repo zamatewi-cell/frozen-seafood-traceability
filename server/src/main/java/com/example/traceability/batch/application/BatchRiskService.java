@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -53,7 +54,9 @@ import java.util.regex.Pattern;
  * <p>
  * PB3 系统路径 {@link #freezeForAlert}：在途持续超温告警创建时，在调用方（温度登记）同一事务内把 Shipment → Transfer → Batch
  * 确定的受影响批次 NORMAL → FROZEN（来源 ALERT、类型化来源外键 source_alert_id、无操作人、保留前缀 {@code SYS:} 系统幂等键）。
- * 已冻结或已召回的批次不重复转换。Recall（PB5）同样必须调用本服务的核心，不得另建写入口。
+ * 已冻结或已召回的批次不重复转换。PB4 {@link #releaseForAlert}：告警归属组织的质量管理员依据检验结论放行受影响批次
+ * FROZEN → NORMAL（来源 ALERT、有操作人）；处于未处置告警中的批次不能再经人工接口解除冻结（必须走告警放行）。
+ * Recall（PB5）同样必须调用本服务的核心，不得另建写入口。
  * </p>
  * <p>
  * 锁顺序与死锁安全：
@@ -234,6 +237,11 @@ public class BatchRiskService {
             throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权",
                     "只有批次当前责任组织的质量管理员可以" + action.label);
         }
+        // PB4：处于未处置告警中的批次只能依据检验结论经告警放行，人工接口不能绕过质量结论解除冻结
+        if (action == RiskAction.RELEASE && transitionMapper.countPendingAlertDecisions(batch.getId()) > 0) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ALERT_DECISION_REQUIRED", "需经告警质量结论放行",
+                    "批次处于尚未处置的持续超温告警中，请在告警中依据检验结论放行，不能直接解除冻结");
+        }
 
         // 4. 风险核心：状态校验 → 追加台账 → 批次条件更新
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS);
@@ -316,6 +324,51 @@ public class BatchRiskService {
             outcomes.add(new AlertFreezeOutcome(batch, before, t));
         }
         return outcomes;
+    }
+
+    /**
+     * 告警质量结论放行（PB4；契约 §10.2 步骤 7 / §13 步骤 10）：FROZEN → NORMAL，来源 ALERT、有操作人。
+     * <p>
+     * 必须在调用方已开启的 READ COMMITTED 事务内调用（告警放行：已持有告警行锁）。锁定批次行后先校验当前责任组织，再执行
+     * 调用方的锁后守卫（例如依据检验结论的判定：检验报告提交同样先锁批次行，因此守卫读到的是放行时刻的最新结论），
+     * 最后经风险核心转换并写 RISK_RELEASE 审计。系统幂等键 {@code SYS:ALERT-RELEASE:{alertId}:BATCH:{batchId}}：
+     * 同一告警对同一批次只放行一次。锁顺序 alert → batch。
+     * </p>
+     *
+     * @param guardAfterLock 批次行锁之后、转换之前执行的守卫（抛出业务异常即拒绝放行）
+     * @return 写入的放行转换
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public BatchRiskTransition releaseForAlert(Long alertId, Long batchId, Long actorUserId, Long actorOrgId, String reason,
+                                               Consumer<Batch> guardAfterLock, LocalDateTime nowUtc) {
+        Objects.requireNonNull(alertId, "alertId 不能为空");
+        Batch batch = batchMapper.selectByIdIgnoreTenantForUpdate(batchId);
+        if (batch == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + batchId + " 的批次");
+        }
+        if (!Objects.equals(batch.getOrgId(), actorOrgId)) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权",
+                    "只有批次当前责任组织的质量管理员可以放行");
+        }
+        guardAfterLock.accept(batch);
+        String key = RESERVED_SYSTEM_KEY_PREFIX + "ALERT-RELEASE:" + alertId + ":BATCH:" + batchId;
+        String hash = computeSystemRequestHash("ALERT_RELEASE", alertId, batchId);
+        Applied applied = applyTransition(batch, RiskAction.RELEASE, BatchRiskSourceType.ALERT, actorUserId, alertId,
+                reason, key, hash, nowUtc);
+        if (applied.replayed()) {
+            throw invalidTransition("该告警已放行过此批次");
+        }
+        BatchRiskTransition t = applied.transition();
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("transitionId", t.getId());
+        summary.put("fromStatus", t.getFromStatus());
+        summary.put("toStatus", t.getToStatus());
+        summary.put("flowStatus", t.getFlowStatus());
+        summary.put("sourceType", t.getSourceType());
+        summary.put("sourceAlertId", alertId);
+        auditService.recordAudit(actorUserId, actorOrgId, AUDIT_ACTION_RELEASE, AUDIT_OBJECT_TYPE, batch.getId(),
+                nowUtc, "SUCCESS", serializeSummary(summary));
+        return t;
     }
 
     /**

@@ -59,7 +59,9 @@ public record AlertResponse(
     /**
      * 受影响批次快照与其当前事实。
      *
-     * @param autoFrozen 本告警是否自动冻结了该批次（快照时为 NORMAL）
+     * @param autoFrozen                 本告警是否自动冻结了该批次（快照时为 NORMAL）
+     * @param released                   是否已依据检验结论放行（PB4）
+     * @param latestInspectionConclusion 关联本告警的最新检验结论（PASS / FAIL），没有报告时不输出
      */
     public record AffectedBatch(
             Long batchId,
@@ -74,13 +76,19 @@ public record AlertResponse(
             String currentFlowStatus,
             String currentRiskStatus,
             BigDecimal quantity,
-            String unitCode
+            String unitCode,
+            boolean released,
+            Long releaseTransitionId,
+            String latestInspectionConclusion,
+            int inspectionCount
     ) {
 
         static AffectedBatch fromEntity(AlertBatch b) {
             return new AffectedBatch(b.getBatchId(), b.getTraceBatchNo(), b.getTransferId(), b.getTransferNo(), b.getTransferStatus(),
                     b.getRiskStatusBefore(), b.getFreezeTransitionId() != null, b.getFreezeTransitionId(), b.getCurrentOrgId(),
-                    b.getCurrentFlowStatus(), b.getCurrentRiskStatus(), b.getQuantity(), b.getUnitCode());
+                    b.getCurrentFlowStatus(), b.getCurrentRiskStatus(), b.getQuantity(), b.getUnitCode(),
+                    b.getReleaseTransitionId() != null, b.getReleaseTransitionId(), b.getLatestInspectionConclusion(),
+                    b.getInspectionCount() == null ? 0 : b.getInspectionCount());
         }
     }
 
@@ -91,6 +99,9 @@ public record AlertResponse(
             Long id,
             String action,
             Long orgId,
+            Long batchId,
+            Long riskTransitionId,
+            Long inspectionReportId,
             Long actorUserId,
             String note,
             @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX", timezone = "UTC")
@@ -98,7 +109,8 @@ public record AlertResponse(
     ) {
 
         static Action fromEntity(AlertAction a) {
-            return new Action(a.getId(), a.getAction(), a.getOrgId(), a.getActorUserId(), a.getNote(), utc(a.getOccurredAt()));
+            return new Action(a.getId(), a.getAction(), a.getOrgId(), a.getBatchId(), a.getRiskTransitionId(), a.getInspectionReportId(),
+                    a.getActorUserId(), a.getNote(), utc(a.getOccurredAt()));
         }
     }
 
