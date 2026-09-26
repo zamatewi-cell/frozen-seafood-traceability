@@ -34,7 +34,8 @@ public interface AlertBatchMapper {
     int insert(AlertBatch alertBatch);
 
     /**
-     * 告警受影响批次快照，关联批次与交接的当前事实与质量处置进展（放行转换、关联本告警的最新检验结论与报告数；按批次 ID 升序）。
+     * 告警受影响批次快照，关联批次与交接的当前事实与质量处置进展（放行结论与其放行转换、关联本告警的最新检验结论与报告数；
+     * 按批次 ID 升序）。放行结论形成时仍有其他风险事项的，放行转换为空。
      */
     @Select("""
             SELECT ab.id, ab.alert_id, ab.batch_id, ab.transfer_id, ab.org_id, ab.risk_status_before,
@@ -42,6 +43,8 @@ public interface AlertBatchMapper {
                    b.trace_batch_no, b.org_id AS current_org_id, b.flow_status AS current_flow_status,
                    b.risk_status AS current_risk_status, b.quantity, b.unit_code,
                    t.transfer_no, t.status AS transfer_status,
+                   (SELECT x.id FROM alert_action x
+                     WHERE x.alert_id = ab.alert_id AND x.action = 'RELEASE_BATCH' AND x.batch_id = ab.batch_id) AS release_action_id,
                    (SELECT x.risk_transition_id FROM alert_action x
                      WHERE x.alert_id = ab.alert_id AND x.action = 'RELEASE_BATCH' AND x.batch_id = ab.batch_id) AS release_transition_id,
                    (SELECT ir.conclusion FROM inspection_report ir

@@ -10,6 +10,7 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 告警白名单响应 DTO（企业端；Phase B PB3）。
@@ -60,8 +61,10 @@ public record AlertResponse(
      * 受影响批次快照与其当前事实。
      *
      * @param autoFrozen                 本告警是否自动冻结了该批次（快照时为 NORMAL）
-     * @param released                   是否已依据检验结论放行（PB4）
+     * @param released                   本告警是否已依据检验结论对该批次形成放行结论（PB4）
+     * @param releaseTransitionId        放行结论解除了批次最后一个风险事项时的放行转换；形成结论时仍有其他风险事项则不输出
      * @param latestInspectionConclusion 关联本告警的最新检验结论（PASS / FAIL），没有报告时不输出
+     * @param pendingHolds               批次仍处于 FROZEN 时，除本告警外仍未解除的风险事项（只对告警归属组织与平台输出）
      */
     public record AffectedBatch(
             Long batchId,
@@ -80,16 +83,27 @@ public record AlertResponse(
             boolean released,
             Long releaseTransitionId,
             String latestInspectionConclusion,
-            int inspectionCount
+            int inspectionCount,
+            List<PendingHold> pendingHolds
     ) {
 
-        static AffectedBatch fromEntity(AlertBatch b) {
+        static AffectedBatch fromEntity(AlertBatch b, List<PendingHold> pendingHolds) {
             return new AffectedBatch(b.getBatchId(), b.getTraceBatchNo(), b.getTransferId(), b.getTransferNo(), b.getTransferStatus(),
                     b.getRiskStatusBefore(), b.getFreezeTransitionId() != null, b.getFreezeTransitionId(), b.getCurrentOrgId(),
                     b.getCurrentFlowStatus(), b.getCurrentRiskStatus(), b.getQuantity(), b.getUnitCode(),
-                    b.getReleaseTransitionId() != null, b.getReleaseTransitionId(), b.getLatestInspectionConclusion(),
-                    b.getInspectionCount() == null ? 0 : b.getInspectionCount());
+                    b.getReleaseActionId() != null, b.getReleaseTransitionId(), b.getLatestInspectionConclusion(),
+                    b.getInspectionCount() == null ? 0 : b.getInspectionCount(), pendingHolds);
         }
+    }
+
+    /**
+     * 仍使批次保持 FROZEN 的其他风险事项。
+     *
+     * @param type    ALERT（其他未处置告警尚未对该批次形成放行结论）或 MANUAL_FREEZE（人工风险冻结尚未人工解除）
+     * @param alertId type = ALERT 时的告警
+     * @param alertNo type = ALERT 时的告警编号
+     */
+    public record PendingHold(String type, Long alertId, String alertNo) {
     }
 
     /**
@@ -118,8 +132,12 @@ public record AlertResponse(
         return of(a, null, null);
     }
 
-    public static AlertResponse detail(Alert a, List<AlertBatch> batches, List<AlertAction> actions) {
-        return of(a, batches.stream().map(AffectedBatch::fromEntity).toList(), actions.stream().map(Action::fromEntity).toList());
+    /**
+     * @param pendingHolds 按批次 ID 给出的其他未解除风险事项；不含某批次（或整个参数为 null）时该批次不输出 pendingHolds
+     */
+    public static AlertResponse detail(Alert a, List<AlertBatch> batches, List<AlertAction> actions, Map<Long, List<PendingHold>> pendingHolds) {
+        return of(a, batches.stream().map(b -> AffectedBatch.fromEntity(b, pendingHolds == null ? null : pendingHolds.get(b.getBatchId()))).toList(),
+                actions.stream().map(Action::fromEntity).toList());
     }
 
     private static AlertResponse of(Alert a, List<AffectedBatch> batches, List<Action> actions) {

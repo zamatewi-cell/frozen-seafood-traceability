@@ -3,7 +3,7 @@ package com.example.traceability.quality.application;
 import com.example.traceability.audit.application.AuditApplicationService;
 import com.example.traceability.batch.application.BatchRiskService;
 import com.example.traceability.batch.domain.BatchRiskStatus;
-import com.example.traceability.batch.domain.BatchRiskTransition;
+import com.example.traceability.batch.domain.PendingAlertHold;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
@@ -30,6 +30,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -53,9 +54,11 @@ import static com.example.traceability.quality.application.QualityWriteGuards.va
  * 处置（只有告警归属组织的质量管理员，平台 / 系统管理员不可代办）：
  * <ul>
  *   <li>确认异常 OPEN → ACKNOWLEDGED（确认人即处置负责人）；</li>
- *   <li>依据检验结论放行受影响批次（PB4）：告警已确认、批次仍冻结且关联本告警的<b>最新</b>检验报告为 PASS，
- *       经风险核心 FROZEN → NORMAL（来源 ALERT、有操作人），同一批次只放行一次；放行后接收方才能接受隔离中的交接；</li>
- *   <li>形成处置结论 ACKNOWLEDGED → RESOLVED（PB4）：每个受影响批次都已放行或已进入召回（RECALLED）。</li>
+ *   <li>依据检验结论对受影响批次形成放行结论（PB4；独立评审修复）：告警已确认、批次仍冻结、关联本告警的<b>最新</b>检验报告为 PASS，
+ *       且该批次最新的检验报告（不论关联哪个告警或未关联告警）不是不合格；同一告警对同一批次只形成一次放行结论。
+ *       风险事项属于批次：只有解除了批次最后一个风险事项（其他未处置告警、尚未人工解除的人工风险冻结）的结论才经风险核心
+ *       FROZEN → NORMAL（来源 ALERT、有操作人），否则只记录本告警的结论、批次保持 FROZEN；恢复正常后接收方才能接受隔离中的交接；</li>
+ *   <li>形成处置结论 ACKNOWLEDGED → RESOLVED（PB4）：每个受影响批次都已由本告警形成放行结论，或已进入召回（RECALLED）。</li>
  * </ul>
  * 告警处置不改变交接、运输任务或批次数量，不生成 TraceEvent；检验报告不会自动放行。
  * </p>
@@ -136,7 +139,7 @@ public class AlertApplicationService {
             throw new ResourceNotFoundException("未找到 ID 为 " + alertId + " 的告警");
         }
         requireVisible(alert, principal);
-        return detail(alert);
+        return detail(alert, principal);
     }
 
     /**
@@ -170,7 +173,7 @@ public class AlertApplicationService {
         // 先追加动作行（此前本事务未修改任何数据，同键冲突时可安全重放或拒绝），再条件推进告警状态
         LocalDateTime nowUtc = now();
         AlertAction action = newAction(alert, ACTION_ACKNOWLEDGE, principal, note, cleanKey, requestHash, nowUtc);
-        AlertResponse replay = insertAction(action, requestHash);
+        AlertResponse replay = insertAction(action, requestHash, principal);
         if (replay != null) {
             return replay;
         }
@@ -182,13 +185,14 @@ public class AlertApplicationService {
         summary.put("fromStatus", AlertStatus.OPEN.name());
         summary.put("toStatus", AlertStatus.ACKNOWLEDGED.name());
         audit(principal, AUDIT_ACTION_ACKNOWLEDGE, alert.getId(), nowUtc, summary);
-        return detail(alertMapper.selectById(alert.getId()));
+        return detail(alertMapper.selectById(alert.getId()), principal);
     }
 
     /**
-     * 依据检验结论放行受影响批次（PB4）：告警 ACKNOWLEDGED、批次属于本告警且尚未放行、批次当前责任组织为本组织且仍冻结、
-     * 关联本告警的最新检验报告为 PASS。经风险核心 FROZEN → NORMAL（来源 ALERT、操作人为本质量管理员），追加 RELEASE_BATCH 动作。
-     * 交接保持原状态：接收方随后依据批次恢复正常的事实接受隔离中的交接。
+     * 依据检验结论对受影响批次形成放行结论（PB4；独立评审修复）：告警 ACKNOWLEDGED、批次属于本告警且本告警尚未对其形成放行结论、
+     * 批次当前责任组织为本组织且仍冻结、关联本告警的最新检验报告为 PASS，且该批次最新的检验报告不是不合格。
+     * 追加 RELEASE_BATCH 动作；只有解除了批次最后一个风险事项时才经风险核心 FROZEN → NORMAL（来源 ALERT、操作人为本质量管理员）
+     * 并在动作上引用该转换，否则批次保持 FROZEN、动作不引用转换。交接保持原状态：接收方随后依据批次恢复正常的事实接受隔离中的交接。
      */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public AlertResponse releaseBatch(Long alertId, Long batchId, AlertDecisionRequest req, String idempotencyKey,
@@ -221,13 +225,13 @@ public class AlertApplicationService {
             throw new ResourceNotFoundException("批次 " + batchId + " 不是该告警的受影响批次");
         }
         if (alertActionMapper.countReleaseByAlertIdAndBatchId(alertId, batchId) > 0) {
-            throw invalidState("该告警已放行过此批次");
+            throw invalidState("该告警已对此批次形成放行结论");
         }
 
         LocalDateTime nowUtc = now();
         AtomicReference<InspectionReport> basis = new AtomicReference<>();
         String reason = note != null ? note : "依据告警 " + alert.getAlertNo() + " 关联的检验结论放行";
-        BatchRiskTransition transition = batchRiskService.releaseForAlert(alertId, batchId, principal.getUserId(),
+        BatchRiskService.AlertReleaseOutcome outcome = batchRiskService.releaseForAlert(alertId, batchId, principal.getUserId(),
                 principal.getOrgId(), reason, batch -> {
                     // 批次行锁之后读取最新结论：检验报告提交同样先锁批次行，结论与放行不会交错
                     InspectionReport latest = inspectionReportMapper.selectLatestByAlertIdAndBatchId(alertId, batchId);
@@ -239,20 +243,27 @@ public class AlertApplicationService {
                         throw new BusinessException(HttpStatus.CONFLICT, "INSPECTION_NOT_PASSED", "检验结论不合格",
                                 "关联本告警的该批次最新检验报告（" + latest.getReportNo() + "）结论为不合格，不能放行");
                     }
+                    // 该批次最新的检验证据（不论关联哪个告警或未关联告警）为不合格时，不能只凭本告警较早的合格结论放行
+                    InspectionReport newest = inspectionReportMapper.selectLatestByBatchId(batchId);
+                    if (newest != null && !"PASS".equals(newest.getConclusion())) {
+                        throw new BusinessException(HttpStatus.CONFLICT, "INSPECTION_NOT_PASSED", "检验结论不合格",
+                                "该批次最新检验报告（" + newest.getReportNo() + "）结论为不合格，不能依据较早的合格结论放行");
+                    }
                     if (!BatchRiskStatus.FROZEN.name().equals(batch.getRiskStatus())) {
                         throw invalidState("批次当前不处于风险冻结状态 (riskStatus=" + batch.getRiskStatus() + ")，无需放行");
                     }
                     basis.set(latest);
                 }, nowUtc);
 
+        Long transitionId = outcome.transition() == null ? null : outcome.transition().getId();
         AlertAction action = newAction(alert, ACTION_RELEASE_BATCH, principal, note, cleanKey, requestHash, nowUtc);
         action.setBatchId(batchId);
-        action.setRiskTransitionId(transition.getId());
+        action.setRiskTransitionId(transitionId);
         action.setInspectionReportId(basis.get().getId());
         try {
             alertActionMapper.insert(action);
         } catch (DuplicateKeyException e) {
-            // 批次已在本事务内转换，不能重放：同键请求已被告警行锁串行化，这里只可能是另一告警上的同键请求
+            // 本事务可能已写入放行转换，不能重放：同键请求已被告警行锁串行化，这里只可能是另一告警上的同键请求
             throw new BusinessException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "幂等提交冲突",
                     "当前幂等键已被本组织用于其他告警处置请求，本次放行已回滚");
         }
@@ -260,14 +271,18 @@ public class AlertApplicationService {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("alertActionId", action.getId());
         summary.put("batchId", batchId);
-        summary.put("riskTransitionId", transition.getId());
+        summary.put("riskTransitionId", transitionId);
         summary.put("inspectionReportId", basis.get().getId());
+        summary.put("batchRiskStatus", transitionId == null ? outcome.batch().getRiskStatus() : outcome.transition().getToStatus());
+        summary.put("remainingAlertIds", outcome.remainingAlertHolds().stream().map(PendingAlertHold::getAlertId).toList());
+        summary.put("manualFreezeHold", outcome.manualFreezeHold());
         audit(principal, AUDIT_ACTION_RELEASE_BATCH, alert.getId(), nowUtc, summary);
-        return detail(alertMapper.selectById(alert.getId()));
+        return detail(alertMapper.selectById(alert.getId()), principal);
     }
 
     /**
-     * 形成处置结论（PB4）：ACKNOWLEDGED → RESOLVED；每个受影响批次都必须已依据本告警放行，或已进入模拟召回（RECALLED）。
+     * 形成处置结论（PB4）：ACKNOWLEDGED → RESOLVED；每个受影响批次都必须已由本告警形成放行结论（不论当时是否恢复正常），
+     * 或已进入模拟召回（RECALLED）。
      */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public AlertResponse resolve(Long alertId, AlertDecisionRequest req, String idempotencyKey, TraceSecurityPrincipal principal) {
@@ -293,16 +308,16 @@ public class AlertApplicationService {
         }
         List<AlertBatch> batches = alertBatchMapper.selectByAlertId(alertId);
         long pending = batches.stream()
-                .filter(b -> b.getReleaseTransitionId() == null && !BatchRiskStatus.RECALLED.name().equals(b.getCurrentRiskStatus()))
+                .filter(b -> b.getReleaseActionId() == null && !BatchRiskStatus.RECALLED.name().equals(b.getCurrentRiskStatus()))
                 .count();
         if (pending > 0) {
             throw new BusinessException(HttpStatus.CONFLICT, "ALERT_BATCHES_PENDING", "仍有批次未处置",
-                    "仍有 " + pending + " 个受影响批次尚未依据检验结论放行或进入召回，不能形成处置结论");
+                    "仍有 " + pending + " 个受影响批次尚未由本告警依据检验结论形成放行结论或进入召回，不能形成处置结论");
         }
 
         LocalDateTime nowUtc = now();
         AlertAction action = newAction(alert, ACTION_RESOLVE, principal, null, cleanKey, requestHash, nowUtc);
-        AlertResponse replay = insertAction(action, requestHash);
+        AlertResponse replay = insertAction(action, requestHash, principal);
         if (replay != null) {
             return replay;
         }
@@ -313,10 +328,10 @@ public class AlertApplicationService {
         summary.put("alertActionId", action.getId());
         summary.put("fromStatus", AlertStatus.ACKNOWLEDGED.name());
         summary.put("toStatus", AlertStatus.RESOLVED.name());
-        summary.put("releasedBatchCount", batches.stream().filter(b -> b.getReleaseTransitionId() != null).count());
+        summary.put("releasedBatchCount", batches.stream().filter(b -> b.getReleaseActionId() != null).count());
         summary.put("recalledBatchCount", batches.stream().filter(b -> BatchRiskStatus.RECALLED.name().equals(b.getCurrentRiskStatus())).count());
         audit(principal, AUDIT_ACTION_RESOLVE, alert.getId(), nowUtc, summary);
-        return detail(alertMapper.selectById(alert.getId()));
+        return detail(alertMapper.selectById(alert.getId()), principal);
     }
 
     // =========================================================================
@@ -334,12 +349,12 @@ public class AlertApplicationService {
         Long orgId = principal.getOrgId();
         AlertAction existing = alertActionMapper.selectByOrgIdAndIdempotencyKey(orgId, cleanKey);
         if (existing != null) {
-            return new Locked(null, replayOrConflict(existing, requestHash));
+            return new Locked(null, replayOrConflict(existing, requestHash, principal));
         }
         Alert alert = alertMapper.selectByIdForUpdate(alertId);
         AlertAction afterLock = alertActionMapper.selectByOrgIdAndIdempotencyKey(orgId, cleanKey);
         if (afterLock != null) {
-            return new Locked(null, replayOrConflict(afterLock, requestHash));
+            return new Locked(null, replayOrConflict(afterLock, requestHash, principal));
         }
         if (alert == null) {
             throw new ResourceNotFoundException("未找到 ID 为 " + alertId + " 的告警");
@@ -351,9 +366,29 @@ public class AlertApplicationService {
         return new Locked(alert, null);
     }
 
-    private AlertResponse detail(Alert alert) {
-        return AlertResponse.detail(alert, alertBatchMapper.selectByAlertId(alert.getId()),
-                alertActionMapper.selectByAlertId(alert.getId()));
+    /**
+     * 告警详情。仍处于 FROZEN 的受影响批次附带除本告警外仍未解除的风险事项，只对该批次的当前责任组织与平台只读角色输出
+     * （其他可见方——例如接收方、承运方，或批次已转出后的原归属组织——看不到当前责任组织的风险事项）。
+     */
+    private AlertResponse detail(Alert alert, TraceSecurityPrincipal viewer) {
+        List<AlertBatch> batches = alertBatchMapper.selectByAlertId(alert.getId());
+        Map<Long, List<AlertResponse.PendingHold>> holds = new LinkedHashMap<>();
+        boolean platform = isPlatformScope(viewer);
+        for (AlertBatch b : batches) {
+            if (!BatchRiskStatus.FROZEN.name().equals(b.getCurrentRiskStatus())
+                    || !(platform || Objects.equals(b.getCurrentOrgId(), viewer.getOrgId()))) {
+                continue;
+            }
+            BatchRiskService.RiskHolds open = batchRiskService.openHolds(b.getBatchId(), b.getCurrentRiskStatus());
+            List<AlertResponse.PendingHold> others = new ArrayList<>();
+            open.alertHolds().stream().filter(h -> !Objects.equals(h.getAlertId(), alert.getId()))
+                    .forEach(h -> others.add(new AlertResponse.PendingHold("ALERT", h.getAlertId(), h.getAlertNo())));
+            if (open.manualFreezeHold()) {
+                others.add(new AlertResponse.PendingHold("MANUAL_FREEZE", null, null));
+            }
+            holds.put(b.getBatchId(), others);
+        }
+        return AlertResponse.detail(alert, batches, alertActionMapper.selectByAlertId(alert.getId()), holds);
     }
 
     private static AlertAction newAction(Alert alert, String action, TraceSecurityPrincipal principal, String note,
@@ -376,14 +411,14 @@ public class AlertApplicationService {
      *
      * @return null 表示已插入；非 null 为同键已提交动作的重放结果，调用方直接返回
      */
-    private AlertResponse insertAction(AlertAction action, String requestHash) {
+    private AlertResponse insertAction(AlertAction action, String requestHash, TraceSecurityPrincipal principal) {
         try {
             alertActionMapper.insert(action);
             return null;
         } catch (DuplicateKeyException e) {
             AlertAction dup = alertActionMapper.selectByOrgIdAndIdempotencyKeyForUpdate(action.getOrgId(), action.getIdempotencyKey());
             if (dup != null) {
-                return replayOrConflict(dup, requestHash);
+                return replayOrConflict(dup, requestHash, principal);
             }
             throw e;
         } catch (PessimisticLockingFailureException e) {
@@ -392,12 +427,12 @@ public class AlertApplicationService {
         }
     }
 
-    private AlertResponse replayOrConflict(AlertAction existing, String requestHash) {
+    private AlertResponse replayOrConflict(AlertAction existing, String requestHash, TraceSecurityPrincipal principal) {
         if (!Objects.equals(existing.getRequestHash(), requestHash)) {
             throw new BusinessException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "幂等提交冲突",
                     "当前幂等键已被本组织用于不同语义的告警处置请求");
         }
-        return detail(alertMapper.selectById(existing.getAlertId()));
+        return detail(alertMapper.selectById(existing.getAlertId()), principal);
     }
 
     private static void requireVisible(Alert alert, TraceSecurityPrincipal principal) {

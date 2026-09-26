@@ -146,6 +146,35 @@ abstract class AbstractPhaseBMysqlIT extends AbstractBatchRiskMysqlIT {
         return expect(acknowledgeReq(senderQm(), alertId, "发货方质量管理员确认在途超温异常", key("idem-alert-ack")), 200).get("data");
     }
 
+    /** 同一运输任务的一个批次 B 先后处于两个未处置告警 A1、A2 中（均已确认；Phase B 独立评审反例 1 的前提）。 */
+    protected record TwoAlerts(Manifest manifest, Long batchId, Long a1, Long a2) {
+    }
+
+    /**
+     * 允许越界时长 0 的运输规则下：越界（片段 1 → A1，自动冻结 B）→ 回到范围内（片段结束）→ 再次越界（片段 2 → A2，B 已冻结只快照）
+     * → 承运商确认到达 → 发货方质量管理员确认 A1、A2。交接仍为 PENDING，B 仍由发货方负责。
+     */
+    protected TwoAlerts twoOpenAlertsOnOneBatch(String tag) throws Exception {
+        publishTransportRule(testProduct.getId(), "-25.00", "-15.00", LONG_AGO, null, 0);
+        Manifest m = inTransitManifest(tag, LocalDateTime.now(ZoneOffset.UTC).minusHours(2), "500");
+        LocalDateTime t0 = m.loadedAt();
+        recordAt(m.shipmentId(), t0.plusMinutes(5), "-10.00");
+        recordAt(m.shipmentId(), t0.plusMinutes(10), "-18.00");
+        recordAt(m.shipmentId(), t0.plusMinutes(15), "-10.00");
+        arriveAt(m.shipmentId(), t0.plusMinutes(20));
+        List<Long> alerts = alertRows(m.shipmentId()).stream().map(r -> ((Number) r.get("id")).longValue()).toList();
+        assertThat(alerts).as("两个越界片段各形成一个告警").hasSize(2);
+        Long batchId = m.batch(0);
+        assertThat(riskStatus(batchId)).isEqualTo("FROZEN");
+        assertThat(count("SELECT count(*) FROM alert_batch WHERE alert_id = ? AND batch_id = ? AND risk_status_before = 'NORMAL' "
+                + "AND freeze_transition_id IS NOT NULL", alerts.get(0), batchId)).as("A1 自动冻结 B").isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM alert_batch WHERE alert_id = ? AND batch_id = ? AND risk_status_before = 'FROZEN' "
+                + "AND freeze_transition_id IS NULL", alerts.get(1), batchId)).as("A2 创建时 B 已冻结，只快照").isEqualTo(1);
+        acknowledge(alerts.get(0));
+        acknowledge(alerts.get(1));
+        return new TwoAlerts(m, batchId, alerts.get(0), alerts.get(1));
+    }
+
     protected int alertLedgerRows(Long batchId, Long alertId) {
         return count("SELECT count(*) FROM batch_risk_transition WHERE batch_id = ? AND source_type = 'ALERT' AND source_alert_id = ?",
                 batchId, alertId);

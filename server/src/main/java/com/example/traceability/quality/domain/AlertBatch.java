@@ -38,6 +38,9 @@ public class AlertBatch {
     private String transferStatus;
 
     // 查询关联字段（非本表列）：质量处置进展（PB4）
+    /** 本告警对该批次的放行结论（RELEASE_BATCH 动作 ID）；为空表示尚未形成放行结论。 */
+    private Long releaseActionId;
+    /** 放行结论解除了批次最后一个风险事项时的放行转换；结论形成时仍有其他风险事项则为空。 */
     private Long releaseTransitionId;
     private String latestInspectionConclusion;
     private Integer inspectionCount;
@@ -168,6 +171,14 @@ public class AlertBatch {
 
     public void setTransferStatus(String transferStatus) {
         this.transferStatus = transferStatus;
+    }
+
+    public Long getReleaseActionId() {
+        return releaseActionId;
+    }
+
+    public void setReleaseActionId(Long releaseActionId) {
+        this.releaseActionId = releaseActionId;
     }
 
     public Long getReleaseTransitionId() {

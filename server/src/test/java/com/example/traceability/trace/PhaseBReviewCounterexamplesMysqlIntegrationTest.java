@@ -39,35 +39,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("Phase B 独立评审反例复现 MySQL 8.4 集成测试")
 class PhaseBReviewCounterexamplesMysqlIntegrationTest extends AbstractPhaseBMysqlIT {
 
-    /** 同一运输任务的一个批次 B，先后两个越界片段形成两个未处置告警 A1、A2（均已确认）。 */
-    private record TwoAlerts(Manifest manifest, Long batchId, Long a1, Long a2) {
-    }
-
-    /**
-     * 允许越界时长 0 的运输规则下：越界（片段 1 → A1，自动冻结 B）→ 回到范围内（片段结束）→ 再次越界（片段 2 → A2，B 已冻结只快照）
-     * → 承运商确认到达 → 发货方质量管理员确认 A1、A2。交接仍为 PENDING，B 仍由发货方负责。
-     */
-    private TwoAlerts twoOpenAlertsOnOneBatch(String tag) throws Exception {
-        publishTransportRule(testProduct.getId(), "-25.00", "-15.00", LONG_AGO, null, 0);
-        Manifest m = inTransitManifest(tag, LocalDateTime.now(ZoneOffset.UTC).minusHours(2), "500");
-        LocalDateTime t0 = m.loadedAt();
-        recordAt(m.shipmentId(), t0.plusMinutes(5), "-10.00");
-        recordAt(m.shipmentId(), t0.plusMinutes(10), "-18.00");
-        recordAt(m.shipmentId(), t0.plusMinutes(15), "-10.00");
-        arriveAt(m.shipmentId(), t0.plusMinutes(20));
-        List<Long> alerts = alertRows(m.shipmentId()).stream().map(r -> ((Number) r.get("id")).longValue()).toList();
-        assertThat(alerts).as("两个越界片段各形成一个告警").hasSize(2);
-        Long batchId = m.batch(0);
-        assertThat(riskStatus(batchId)).isEqualTo("FROZEN");
-        assertThat(count("SELECT count(*) FROM alert_batch WHERE alert_id = ? AND batch_id = ? AND risk_status_before = 'NORMAL' "
-                + "AND freeze_transition_id IS NOT NULL", alerts.get(0), batchId)).as("A1 自动冻结 B").isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM alert_batch WHERE alert_id = ? AND batch_id = ? AND risk_status_before = 'FROZEN' "
-                + "AND freeze_transition_id IS NULL", alerts.get(1), batchId)).as("A2 创建时 B 已冻结，只快照").isEqualTo(1);
-        acknowledge(alerts.get(0));
-        acknowledge(alerts.get(1));
-        return new TwoAlerts(m, batchId, alerts.get(0), alerts.get(1));
-    }
-
     private int status(MvcResult r) {
         return r.getResponse().getStatus();
     }
@@ -128,6 +99,70 @@ class PhaseBReviewCounterexamplesMysqlIntegrationTest extends AbstractPhaseBMysq
         softly.assertThat(status(resolveA1)).as("A1 能形成处置结论（响应：%s）", describe(resolveA1)).isEqualTo(200);
         softly.assertThat(status(resolveA2)).as("A2 不得被永久卡在处置中（响应：%s）", describe(resolveA2)).isEqualTo(200);
         softly.assertAll();
+    }
+
+    // =========================================================================
+    // 评审修复的相邻情形：人工冻结 + 告警、批次最新的不相关不合格报告
+    // =========================================================================
+
+    @Test
+    @DisplayName("人工冻结 + 告警：告警的合格结论只解除告警风险事项，批次保持 FROZEN，直到质量管理员人工解除冻结")
+    void manualFreezeThenAlert_alertDecisionKeepsManualFreezeUntilManualRelease() throws Exception {
+        publishTransportRule(testProduct.getId(), "-25.00", "-15.00", LONG_AGO, null, 0);
+        Manifest m = inTransitManifest("D2", LocalDateTime.now(ZoneOffset.UTC).minusHours(2), "500");
+        Long b = m.batch(0);
+        freeze(senderQm(), b, "在途前质量抽检异常，待调查");
+        recordAt(m.shipmentId(), m.loadedAt().plusMinutes(5), "-10.00");
+        arriveAt(m.shipmentId(), m.loadedAt().plusMinutes(10));
+        Long a1 = onlyAlertId(m.shipmentId());
+        acknowledge(a1);
+        // 告警风险事项未解除时，人工接口不能绕过告警质量结论解除冻结
+        expectProblem(releaseRequest(senderQm(), b, "抽检合格", key("idem-risk-r1")), 409, "ALERT_DECISION_REQUIRED");
+
+        inspect(senderQm(), b, "SND-D2-PASS", "PASS", a1);
+        JsonNode released = expect(releaseReq(senderQm(), a1, b, null, key("idem-rel-a1")), 200).get("data");
+
+        JsonNode row = released.get("batches").get(0);
+        assertThat(row.get("released").asBoolean()).as("A1 已形成放行结论").isTrue();
+        assertThat(row.has("releaseTransitionId")).as("人工冻结仍未解除：本结论不写放行转换").isFalse();
+        assertThat(row.get("currentRiskStatus").asString()).isEqualTo("FROZEN");
+        assertThat(row.get("pendingHolds")).hasSize(1);
+        assertThat(row.get("pendingHolds").get(0).get("type").asString()).isEqualTo("MANUAL_FREEZE");
+        assertThat(riskStatus(b)).isEqualTo("FROZEN");
+        assertThat(count("SELECT count(*) FROM alert_action WHERE alert_id = ? AND batch_id = ? AND action = 'RELEASE_BATCH' "
+                + "AND risk_transition_id IS NULL", a1, b)).isEqualTo(1);
+        assertThat(status(perform(acceptRequest(receiverSession, m.transfer(0), new BigDecimal("500"), key("idem-acc")))))
+                .as("仍冻结的批次不能被接受").isNotEqualTo(200);
+
+        // 告警可以形成处置结论（结论已记录）；人工冻结只能由人工解除（此时不再有未处置告警风险事项）
+        expect(resolveReq(senderQm(), a1, "在途超温复检合格", key("idem-res-a1")), 200);
+        expect(releaseRequest(senderQm(), b, "人工抽检复核合格，解除冻结", key("idem-risk-r2")), 201);
+        assertThat(riskStatus(b)).isEqualTo("NORMAL");
+        assertThat(jdbcTemplate.queryForList("SELECT CONCAT(source_type, ':', from_status, '>', to_status) FROM batch_risk_transition "
+                + "WHERE batch_id = ? ORDER BY id", String.class, b)).containsExactly("MANUAL:NORMAL>FROZEN", "MANUAL:FROZEN>NORMAL");
+        assertLedgerConsistent(b);
+    }
+
+    @Test
+    @DisplayName("批次最新的检验报告为不相关（未关联本告警）的不合格报告时，不能依据较早的合格结论放行；之后新的合格结论可以放行")
+    void latestUnrelatedFailReport_blocksReleaseUntilNewerPass() throws Exception {
+        Manifest m = deliveredAlertManifest("D3", "500");
+        Long b = m.batch(0);
+        Long a1 = onlyAlertId(m.shipmentId());
+        acknowledge(a1);
+        inspect(senderQm(), b, "SND-D3-PASS", "PASS", a1);
+        inspect(senderQm(), b, "SND-D3-ROUTINE-FAIL", "FAIL", null);
+
+        expectProblem(releaseReq(senderQm(), a1, b, null, key("idem-rel-1")), 409, "INSPECTION_NOT_PASSED");
+        assertThat(riskStatus(b)).isEqualTo("FROZEN");
+        assertThat(count("SELECT count(*) FROM alert_action WHERE alert_id = ? AND action = 'RELEASE_BATCH'", a1)).isZero();
+
+        // 更新的合格复检（关联本告警）成为批次最新证据后可以放行；这是唯一的风险事项，因此写入放行转换
+        inspect(senderQm(), b, "SND-D3-RECHECK", "PASS", a1);
+        JsonNode released = expect(releaseReq(senderQm(), a1, b, null, key("idem-rel-2")), 200).get("data");
+        assertThat(released.get("batches").get(0).get("releaseTransitionId").asLong()).isPositive();
+        assertThat(riskStatus(b)).isEqualTo("NORMAL");
+        assertLedgerConsistent(b);
     }
 
     // =========================================================================

@@ -6,6 +6,7 @@ import com.example.traceability.batch.domain.BatchFlowStatus;
 import com.example.traceability.batch.domain.BatchRiskSourceType;
 import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.domain.BatchRiskTransition;
+import com.example.traceability.batch.domain.PendingAlertHold;
 import com.example.traceability.batch.dto.BatchRiskTransitionRequest;
 import com.example.traceability.batch.dto.BatchRiskTransitionResponse;
 import com.example.traceability.batch.mapper.BatchMapper;
@@ -54,8 +55,11 @@ import java.util.regex.Pattern;
  * <p>
  * PB3 系统路径 {@link #freezeForAlert}：在途持续超温告警创建时，在调用方（温度登记）同一事务内把 Shipment → Transfer → Batch
  * 确定的受影响批次 NORMAL → FROZEN（来源 ALERT、类型化来源外键 source_alert_id、无操作人、保留前缀 {@code SYS:} 系统幂等键）。
- * 已冻结或已召回的批次不重复转换。PB4 {@link #releaseForAlert}：告警归属组织的质量管理员依据检验结论放行受影响批次
- * FROZEN → NORMAL（来源 ALERT、有操作人）；处于未处置告警中的批次不能再经人工接口解除冻结（必须走告警放行）。
+ * 已冻结或已召回的批次不重复转换。PB4 {@link #releaseForAlert}：告警归属组织的质量管理员依据检验结论对受影响批次形成放行结论；
+ * 处于未处置告警中的批次不能再经人工接口解除冻结（必须走告警放行）。
+ * 独立评审修复：风险事项属于批次（{@link #openHolds}）——未解除的告警风险事项（批次所在的、尚未对该批次形成放行结论的未处置告警）
+ * 与尚未经人工解除的人工风险冻结。某个告警的放行结论只解除它自己的风险事项；只有解除了批次最后一个风险事项的结论才经风险核心
+ * FROZEN → NORMAL（来源 ALERT、有操作人），其余情况批次保持 FROZEN（契约 §4.2：FROZEN 表示等待调查或质量结论）。
  * PB5 {@link #recallForCase}：模拟召回把发起组织持有的批次 NORMAL / FROZEN → RECALLED（来源 RECALL、有操作人），
  * RECALLED 为风险终态，之后任何路径都不能再转换（CLOSED + RECALLED 允许，不重新打开批次）。
  * </p>
@@ -129,6 +133,31 @@ public class BatchRiskService {
      * @param transition       本次自动冻结写入的转换；快照时已非 NORMAL（已冻结 / 已召回）时为 null，未写入任何转换
      */
     public record AlertFreezeOutcome(Batch batch, String riskStatusBefore, BatchRiskTransition transition) {
+    }
+
+    /**
+     * 批次当前未解除的风险事项（统一读取模型；Phase B 独立评审修复）。
+     *
+     * @param alertHolds       未解除的告警风险事项（按告警 ID 升序）；批次已 RECALLED 时为空（召回解除全部风险事项）
+     * @param manualFreezeHold 批次处于 FROZEN 且当前冻结期由人工风险冻结开启、尚未人工解除
+     */
+    public record RiskHolds(List<PendingAlertHold> alertHolds, boolean manualFreezeHold) {
+
+        public boolean isEmpty() {
+            return alertHolds.isEmpty() && !manualFreezeHold;
+        }
+    }
+
+    /**
+     * 告警放行结论的结果（Phase B 独立评审修复）。
+     *
+     * @param batch               持锁读取的批次（放行前事实）
+     * @param transition          本结论解除了批次最后一个风险事项时写入的放行转换（FROZEN → NORMAL）；否则为 null，批次保持 FROZEN
+     * @param remainingAlertHolds 仍未解除的其他告警风险事项（按告警 ID 升序）
+     * @param manualFreezeHold    人工风险冻结仍未解除
+     */
+    public record AlertReleaseOutcome(Batch batch, BatchRiskTransition transition, List<PendingAlertHold> remainingAlertHolds,
+                                      boolean manualFreezeHold) {
     }
 
     private final BatchMapper batchMapper;
@@ -331,19 +360,39 @@ public class BatchRiskService {
     }
 
     /**
-     * 告警质量结论放行（PB4；契约 §10.2 步骤 7 / §13 步骤 10）：FROZEN → NORMAL，来源 ALERT、有操作人。
+     * 批次当前未解除的风险事项（统一读取模型）：告警放行判定（持有批次行锁后）、告警详情与批次风险事项查询（只读快照）共用。
+     * 调用方传入的风险状态必须与本次读取来自同一事务视图（持锁读取的批次，或只读快照中的批次）。
+     */
+    public RiskHolds openHolds(Long batchId, String riskStatus) {
+        if (BatchRiskStatus.RECALLED.name().equals(riskStatus)) {
+            return new RiskHolds(List.of(), false);
+        }
+        List<PendingAlertHold> alertHolds = transitionMapper.selectPendingAlertHolds(batchId);
+        boolean manual = BatchRiskStatus.FROZEN.name().equals(riskStatus)
+                && BatchRiskSourceType.MANUAL.name().equals(transitionMapper.selectLatestFreezeSourceType(batchId));
+        return new RiskHolds(alertHolds, manual);
+    }
+
+    /**
+     * 告警放行结论（PB4；Phase B 独立评审修复；契约 §4.2 / §10.2 步骤 7 / §13 步骤 10）。
      * <p>
      * 必须在调用方已开启的 READ COMMITTED 事务内调用（告警放行：已持有告警行锁）。锁定批次行后先校验当前责任组织，再执行
-     * 调用方的锁后守卫（例如依据检验结论的判定：检验报告提交同样先锁批次行，因此守卫读到的是放行时刻的最新结论），
-     * 最后经风险核心转换并写 RISK_RELEASE 审计。系统幂等键 {@code SYS:ALERT-RELEASE:{alertId}:BATCH:{batchId}}：
-     * 同一告警对同一批次只放行一次。锁顺序 alert → batch。
+     * 调用方的锁后守卫（依据检验结论的判定：检验报告提交同样先锁批次行，因此守卫读到的是放行时刻的最新结论），然后在同一批次行锁下
+     * 读取批次的其他未解除风险事项：
+     * <ul>
+     *   <li>仍有其他未处置告警未对该批次形成放行结论，或人工风险冻结尚未人工解除：只返回结论结果，不写任何转换，批次保持 FROZEN；</li>
+     *   <li>本结论解除了最后一个风险事项：经风险核心 FROZEN → NORMAL（来源 ALERT、有操作人）并写 RISK_RELEASE 审计，
+     *       系统幂等键 {@code SYS:ALERT-RELEASE:{alertId}:BATCH:{batchId}}。</li>
+     * </ul>
+     * 读取稳定：创建告警风险事项（告警冻结 / 快照）、形成其他告警的放行结论与召回都先锁同一批次行；仍有未解除风险事项的告警不能形成处置结论。
+     * 锁顺序 alert → batch，不获取任何其他锁。
      * </p>
      *
-     * @param guardAfterLock 批次行锁之后、转换之前执行的守卫（抛出业务异常即拒绝放行）
-     * @return 写入的放行转换
+     * @param guardAfterLock 批次行锁之后、判定之前执行的守卫（抛出业务异常即拒绝放行）
+     * @return 放行结论结果（{@code transition} 为 null 表示批次仍被其他风险事项保持 FROZEN）
      */
     @Transactional(propagation = Propagation.MANDATORY)
-    public BatchRiskTransition releaseForAlert(Long alertId, Long batchId, Long actorUserId, Long actorOrgId, String reason,
+    public AlertReleaseOutcome releaseForAlert(Long alertId, Long batchId, Long actorUserId, Long actorOrgId, String reason,
                                                Consumer<Batch> guardAfterLock, LocalDateTime nowUtc) {
         Objects.requireNonNull(alertId, "alertId 不能为空");
         Batch batch = batchMapper.selectByIdIgnoreTenantForUpdate(batchId);
@@ -355,6 +404,11 @@ public class BatchRiskService {
                     "只有批次当前责任组织的质量管理员可以放行");
         }
         guardAfterLock.accept(batch);
+        RiskHolds holds = openHolds(batch.getId(), batch.getRiskStatus());
+        List<PendingAlertHold> remaining = holds.alertHolds().stream().filter(h -> !alertId.equals(h.getAlertId())).toList();
+        if (!remaining.isEmpty() || holds.manualFreezeHold()) {
+            return new AlertReleaseOutcome(batch, null, remaining, holds.manualFreezeHold());
+        }
         String key = RESERVED_SYSTEM_KEY_PREFIX + "ALERT-RELEASE:" + alertId + ":BATCH:" + batchId;
         String hash = computeSystemRequestHash("ALERT_RELEASE", alertId, batchId);
         Applied applied = applyTransition(batch, RiskAction.RELEASE, BatchRiskSourceType.ALERT, actorUserId, alertId, null,
@@ -372,7 +426,7 @@ public class BatchRiskService {
         summary.put("sourceAlertId", alertId);
         auditService.recordAudit(actorUserId, actorOrgId, AUDIT_ACTION_RELEASE, AUDIT_OBJECT_TYPE, batch.getId(),
                 nowUtc, "SUCCESS", serializeSummary(summary));
-        return t;
+        return new AlertReleaseOutcome(batch, t, List.of(), false);
     }
 
     /**

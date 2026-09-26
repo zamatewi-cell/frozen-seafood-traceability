@@ -1,6 +1,7 @@
 package com.example.traceability.batch.mapper;
 
 import com.example.traceability.batch.domain.BatchRiskTransition;
+import com.example.traceability.batch.domain.PendingAlertHold;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Options;
@@ -86,4 +87,30 @@ public interface BatchRiskTransitionMapper {
             """)
     @Options(flushCache = Options.FlushCachePolicy.TRUE)
     int countPendingAlertDecisions(@Param("batchId") Long batchId);
+
+    /**
+     * 批次上的未解除告警风险事项（Phase B 独立评审修复；按告警 ID 升序），定义与 {@link #countPendingAlertDecisions} 相同。
+     * 告警放行在持有批次行锁后调用：创建风险事项（告警冻结 / 快照先锁批次行再插入 alert_batch）与解除风险事项（放行结论、召回）
+     * 同样先锁批次行，而仍有未解除风险事项的告警不能形成处置结论，因此 READ COMMITTED 下的这次读取稳定。
+     */
+    @Select("""
+            SELECT a.id AS alert_id, a.alert_no, a.status AS alert_status, a.shipment_id
+            FROM alert_batch ab
+            JOIN alert a ON a.id = ab.alert_id
+            WHERE ab.batch_id = #{batchId}
+              AND a.status <> 'RESOLVED'
+              AND NOT EXISTS (SELECT 1 FROM alert_action x
+                              WHERE x.alert_id = ab.alert_id AND x.action = 'RELEASE_BATCH' AND x.batch_id = ab.batch_id)
+            ORDER BY a.id ASC
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.TRUE)
+    List<PendingAlertHold> selectPendingAlertHolds(@Param("batchId") Long batchId);
+
+    /**
+     * 批次最近一次转入 FROZEN 的来源类型（Phase B 独立评审修复：人工风险冻结事项判定）。批次当前为 FROZEN 时，
+     * 这次转换开启了当前冻结期；来源为 MANUAL 表示质量管理员的人工冻结尚未经人工解除。
+     */
+    @Select("SELECT source_type FROM batch_risk_transition WHERE batch_id = #{batchId} AND to_status = 'FROZEN' ORDER BY id DESC LIMIT 1")
+    @Options(flushCache = Options.FlushCachePolicy.TRUE)
+    String selectLatestFreezeSourceType(@Param("batchId") Long batchId);
 }
