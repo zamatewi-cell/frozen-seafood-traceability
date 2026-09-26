@@ -288,3 +288,47 @@ describe('permission and wording helpers', () => {
     expect(formatTemperature(null)).toBe('未标明')
   })
 })
+
+describe('PB3 sustained-excursion alert on the shipment page', () => {
+  const alertSummary = {
+    id: 5001, alertNo: 'ALT-20260925011000-123456', alertType: 'TEMP_OVER_UPPER', severity: 'HIGH', status: 'OPEN',
+    reason: '在途温度连续高于上限', orgId: 30, shipmentId: 601, shipmentNo: 'SHP-PB2-0001', receiverOrgId: 60, carrierOrgId: 50,
+    stageCode: 'TRANSPORT', episodeStartRecordId: 100, sustainedRecordId: 101, episodeStartedAt: '2026-09-25T01:10:00Z',
+    sustainedAt: '2026-09-25T01:40:00Z', durationSeconds: 1800, rule: RULE, triggeredAt: '2026-09-25T01:40:01Z', version: 0
+  }
+
+  it('shows the alert card and a flash when the reading completes a sustained excursion', async () => {
+    let alerts: Json[] = []
+    backend({
+      overrides: {
+        'GET /api/v1/alerts': (call) => {
+          expect(call.search.get('shipmentId')).toBe('601')
+          return { status: 200, body: envelope(alerts) }
+        }
+      }
+    })
+    const view = await mountDetail()
+    expect(view.find('[data-testid="shipment-alerts"]').exists()).toBe(false)
+
+    alerts = [alertSummary]
+    await fill(view, { temperature: '-11' })
+    expect(view.find('[data-testid="shipment-alerts"]').exists()).toBe(true)
+    expect(view.find('[data-testid="shipment-alert-row"]').attributes('data-status')).toBe('OPEN')
+    expect(view.find('[data-testid="shipment-alert-link-5001"]').attributes('href')).toBe('/app/alerts/5001')
+    expect(view.find('[data-testid="shipment-flash"]').text()).toContain('系统已创建持续超温告警并冻结受影响批次')
+    expect(view.find('[data-testid="shipment-next-step"]').text()).toContain('受影响批次已冻结')
+    // 单点判定仍然只是单点
+    expect(panel(view).find('[data-testid="temperature-evaluation"]').text()).toBe('单点高于上限')
+  })
+
+  it('tells the receiver to quarantine or reject once a shipment with an alert has arrived', async () => {
+    backend({
+      user: receiverQm,
+      status: 'DELIVERED',
+      overrides: { 'GET /api/v1/alerts': () => ({ status: 200, body: envelope([{ ...alertSummary, status: 'ACKNOWLEDGED' }]) }) }
+    })
+    const view = await mountDetail()
+    expect(view.find('[data-testid="shipment-alerts"]').exists()).toBe(true)
+    expect(view.find('[data-testid="shipment-next-step"]').text()).toContain('隔离收货或拒收')
+  })
+})

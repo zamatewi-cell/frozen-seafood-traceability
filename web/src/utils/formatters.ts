@@ -337,9 +337,9 @@ export function formatTemperatureEvaluation(evaluation: string | null | undefine
     case 'NORMAL':
       return { label: '单点在范围内', tone: 'success', description: '本次测量落在测量时适用的运输温控规则范围内（含上下限）' }
     case 'HIGH':
-      return { label: '单点高于上限', tone: 'warning', description: '本次测量高于规则上限；单点越界不等于持续超温，不产生告警' }
+      return { label: '单点高于上限', tone: 'warning', description: '本次测量高于规则上限；单点越界不等于持续超温，单点本身不产生告警' }
     case 'LOW':
-      return { label: '单点低于下限', tone: 'warning', description: '本次测量低于规则下限；单点越界不等于持续超温，不产生告警' }
+      return { label: '单点低于下限', tone: 'warning', description: '本次测量低于规则下限；单点越界不等于持续超温，单点本身不产生告警' }
     case 'MISSING_CONTEXT':
       return { label: '缺少适用规则', tone: 'neutral', description: '测量时没有唯一适用的运输温控规则，未作判定' }
     default:
@@ -403,4 +403,47 @@ export function formatPublicTraceCodeStatus(status: string | null | undefined): 
     default:
       return { label: status || '未激活', tone: 'neutral', description: '尚未激活公开追溯码' }
   }
+}
+
+/** 告警类型（Phase B PB3：Shipment 级在途持续超温）。 */
+export function formatAlertType(type: string | null | undefined): string {
+  const map: Record<string, string> = {
+    TEMP_OVER_UPPER: '在途持续高于温度上限',
+    TEMP_UNDER_LOWER: '在途持续低于温度下限'
+  }
+  return (type && map[type]) || '未知告警类型'
+}
+
+/** 告警处置状态。 */
+export function formatAlertStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'OPEN':
+      return { label: '待确认', tone: 'danger', description: '系统已按持续超温规则创建告警，等待发货方质量管理员确认' }
+    case 'ACKNOWLEDGED':
+      return { label: '处置中', tone: 'warning', description: '质量管理员已确认异常并负责调查与处置' }
+    case 'RESOLVED':
+      return { label: '已处置', tone: 'success', description: '已形成处置结论' }
+    default:
+      return { label: '未知状态', tone: 'neutral', description: '未知告警状态' }
+  }
+}
+
+/** 告警处置动作。 */
+export function formatAlertAction(action: string | null | undefined): string {
+  const map: Record<string, string> = {
+    ACKNOWLEDGE: '确认异常'
+  }
+  return (action && map[action]) || '处置动作'
+}
+
+/** 持续时长（秒）→ 可读文字，例如 1800 → “30 分钟”，3725 → “1 小时 2 分 5 秒”。 */
+export function formatDurationSeconds(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return '—'
+  const total = Math.max(0, Math.floor(Number(seconds)))
+  if (total === 0) return '0 秒'
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  if (h === 0 && s === 0) return `${m} 分钟`
+  return [h ? `${h} 小时` : '', m ? `${m} 分` : '', s ? `${s} 秒` : ''].filter(Boolean).join(' ')
 }

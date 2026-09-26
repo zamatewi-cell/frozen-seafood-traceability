@@ -289,3 +289,21 @@ describe('consumer FROZEN wording', () => {
     expect(formatRiskStatus('FROZEN').label).toBe('冻结')
   })
 })
+
+describe('PB3 alert-sourced transitions in the risk history', () => {
+  it('labels a system alert freeze without an actor and links to the alert', async () => {
+    backend({
+      batch: { riskStatus: 'FROZEN' },
+      history: [transition(1, 'NORMAL', 'FROZEN', {
+        sourceType: 'ALERT', sourceAlertId: 5001, actorUserId: undefined, reason: '在途持续超温告警 ALT-1 系统自动风险冻结'
+      })]
+    })
+    const view = await mountDetail()
+    const row = view.find('[data-testid="risk-transition-row"]')
+    expect(row.text()).toContain('告警自动冻结')
+    const source = row.find('[data-testid="risk-transition-source"]')
+    expect(source.attributes('data-source-type')).toBe('ALERT')
+    expect(source.text()).toContain('在途持续超温告警（系统自动，无操作人）')
+    expect(row.find('[data-testid="risk-transition-alert-link"]').attributes('href')).toBe('/app/alerts/5001')
+  })
+})

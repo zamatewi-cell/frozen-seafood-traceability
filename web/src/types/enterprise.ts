@@ -169,8 +169,11 @@ export interface Sale {
  * 批次公开追溯码（企业端视图）。一批一码、跨交接不换码；DISABLED 为终态（消费者查询与未知码一致返回未找到）。
  * RECALLED 码状态属于 Phase B，当前切片不会写入。
  */
-/** 风险状态转换来源类型：PB1 只有人工（MANUAL）；ALERT / RECALL 随后续阶段的数据库约束同时加入。 */
-export type BatchRiskSourceType = 'MANUAL'
+/**
+ * 风险状态转换来源类型：MANUAL（PB1，质量管理员人工处置）、ALERT（PB3，在途持续超温告警系统自动冻结，无操作人）。
+ * RECALL 随后续阶段的数据库约束同时加入。
+ */
+export type BatchRiskSourceType = 'MANUAL' | 'ALERT'
 
 /**
  * 批次风险状态转换（PB1：人工 NORMAL ⇄ FROZEN）。orgId 为转换时的责任组织，flowStatus 为转换时的流转状态快照（转换不改变流转状态）。
@@ -183,8 +186,11 @@ export interface BatchRiskTransition {
   fromStatus: BatchRiskStatus
   toStatus: BatchRiskStatus
   sourceType: BatchRiskSourceType
+  /** 来源告警（sourceType = ALERT 时存在）。 */
+  sourceAlertId?: number
   reason: string
-  actorUserId: number | null
+  /** 系统路径（ALERT）没有操作人。 */
+  actorUserId?: number | null
   occurredAt: string
 }
 
@@ -299,7 +305,7 @@ export type ShipmentRole = 'SENDER' | 'CARRIER' | 'RECEIVER'
 
 /**
  * Shipment 在途温度记录的单点判定（Phase B PB2）：只说明这一次测量是否落在测量时适用的运输温控规则范围内，
- * 不等于持续超温，也不产生告警。MISSING_CONTEXT 表示测量时没有唯一适用的规则，未判定。
+ * 不等于持续超温，单点本身不产生告警（持续超温由服务端按连续越界时长判定，见 Alert）。MISSING_CONTEXT 表示测量时没有唯一适用的规则，未判定。
  */
 export type TemperatureEvaluation = 'NORMAL' | 'HIGH' | 'LOW' | 'MISSING_CONTEXT'
 /** PB2 开放的温度数据来源：人工登记与教学模拟数据（本系统未接入真实温度设备）。 */
@@ -407,4 +413,73 @@ export interface BatchOperation {
   updatedBy?: number
   items: BatchOperationItem[]
   relations: BatchRelation[]
+}
+
+/** Shipment 级在途持续超温告警类型（Phase B PB3）。 */
+export type AlertType = 'TEMP_OVER_UPPER' | 'TEMP_UNDER_LOWER'
+/** 告警处置状态：OPEN（待确认）→ ACKNOWLEDGED（质量管理员已确认、处置中）→ RESOLVED（已形成处置结论）。 */
+export type AlertStatus = 'OPEN' | 'ACKNOWLEDGED' | 'RESOLVED'
+export const ALERT_STATUSES: readonly AlertStatus[] = ['OPEN', 'ACKNOWLEDGED', 'RESOLVED']
+
+/** 告警创建时经 Shipment → Transfer → Batch 快照的受影响批次，附批次与交接的当前事实。 */
+export interface AlertAffectedBatch {
+  batchId: number
+  traceBatchNo: string
+  transferId: number
+  transferNo: string
+  transferStatus: string
+  /** 快照时风险状态；NORMAL 的批次由本告警自动冻结（autoFrozen）。 */
+  riskStatusBefore: BatchRiskStatus
+  autoFrozen: boolean
+  freezeTransitionId?: number
+  currentOrgId: number
+  currentFlowStatus: BatchFlowStatus
+  currentRiskStatus: BatchRiskStatus
+  quantity: number
+  unitCode: string
+}
+
+/** 告警处置动作（追加式历史）。 */
+export interface AlertActionItem {
+  id: number
+  action: 'ACKNOWLEDGE' | string
+  orgId: number
+  actorUserId: number
+  note?: string
+  occurredAt: string
+}
+
+/**
+ * Shipment 级在途持续超温告警（企业端）。判定依据（rule）全部来自告警创建时复制的温度记录快照；
+ * 列表不含 batches / actions，详情包含。
+ */
+export interface Alert {
+  id: number
+  alertNo: string
+  alertType: AlertType
+  severity: string
+  status: AlertStatus
+  reason: string
+  /** 归属组织：运输任务发货方（受影响批次当时的责任组织）。 */
+  orgId: number
+  shipmentId: number
+  shipmentNo: string
+  receiverOrgId: number
+  carrierOrgId: number
+  stageCode: 'TRANSPORT'
+  episodeStartRecordId: number
+  sustainedRecordId: number
+  episodeStartedAt: string
+  sustainedAt: string
+  durationSeconds: number
+  rule: TemperatureRuleBasis
+  triggeredAt: string
+  acknowledgedAt?: string
+  acknowledgedBy?: number
+  resolvedAt?: string
+  resolvedBy?: number
+  resolution?: string
+  version: number
+  batches?: AlertAffectedBatch[]
+  actions?: AlertActionItem[]
 }

@@ -1,4 +1,4 @@
-import type { Batch, CurrentUser, Shipment, Transfer } from '@/types/enterprise'
+import type { Alert, Batch, CurrentUser, Shipment, Transfer } from '@/types/enterprise'
 
 /**
  * 前端入口可见性判断，只用于隐藏不可执行的按钮；服务端仍独立校验全部权限。
@@ -138,4 +138,21 @@ export function canActivatePublicTraceCode(user: CurrentUser | null | undefined,
   return Boolean(canManagePublicTraceCode(user, batch)
     && batch?.flowStatus === 'ACTIVE'
     && batch.riskStatus === 'NORMAL')
+}
+
+/**
+ * 告警处置（Phase B PB3 起）：告警归属组织（运输任务发货方，即受影响批次的当前责任组织）的质量管理员
+ * （QUALITY_MANAGER，非平台 / 系统管理员）。接收方与承运方只读。服务端仍独立校验全部前提。
+ */
+export function canHandleAlert(user: CurrentUser | null | undefined, alert: Alert | null | undefined): boolean {
+  return Boolean(user && alert
+    && user.roles.includes('QUALITY_MANAGER')
+    && !user.roles.includes('SYSTEM_ADMIN')
+    && !user.scopes.includes('PLATFORM')
+    && alert.orgId === user.orgId)
+}
+
+/** 确认告警：OPEN → ACKNOWLEDGED。 */
+export function canAcknowledgeAlert(user: CurrentUser | null | undefined, alert: Alert | null | undefined): boolean {
+  return canHandleAlert(user, alert) && alert?.status === 'OPEN'
 }

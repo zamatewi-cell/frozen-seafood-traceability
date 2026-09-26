@@ -4,13 +4,17 @@ import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import ShipmentTemperaturePanel from '@/components/enterprise/ShipmentTemperaturePanel.vue'
 import { ApiError } from '@/api/client'
+import { listAlerts } from '@/api/alerts'
 import { arriveShipment, bindTransfer, cancelShipment, dispatchShipment, getShipment, unbindTransfer } from '@/api/shipments'
 import { listTransfers, submitTransfer } from '@/api/transfers'
 import { useIdempotentWrite } from '@/composables/useIdempotentWrite'
 import { useSession } from '@/stores/session'
-import type { Shipment, ShipmentTransferItem, Transfer } from '@/types/enterprise'
+import type { Alert, Shipment, ShipmentTransferItem, Transfer } from '@/types/enterprise'
 import { describeWriteError } from '@/utils/apiErrors'
 import {
+  formatAlertStatus,
+  formatAlertType,
+  formatDurationSeconds,
   formatIsoDateTime,
   formatOrgType,
   formatQuantity,
@@ -36,6 +40,8 @@ const cancelReason = ref('')
 const busy = ref<string | null>(null)
 const actionError = ref('')
 const flash = ref<PageFlash | null>(null)
+/** 运输任务的持续超温告警（PB3）；加载失败不影响运输任务本身的展示。 */
+const alerts = ref<Alert[]>([])
 
 const role = computed(() => shipmentRoleOf(user.value, shipment.value))
 const isOperator = computed(() => Boolean(user.value?.roles.includes('OPERATOR')))
@@ -67,10 +73,18 @@ const nextStep = computed<string | null>(() => {
         ? '全部交接已提交：请核对装载清单后“确认装载发运”。'
         : '全部交接已提交，等待承运商确认装载发运。'
     case 'IN_TRANSIT':
+      if (alerts.value.length > 0) {
+        return role.value === 'CARRIER'
+          ? '已形成持续超温告警，受影响批次已冻结；运输可按应急安排继续，货物到达后请“确认到达”。'
+          : '已形成持续超温告警，受影响批次已冻结，责任组织仍为发货方；等待承运商确认到达。'
+      }
       return role.value === 'CARRIER'
         ? '运输中：货物到达目的场所后请“确认到达”。'
         : '运输中：批次责任组织仍为发货方，等待承运商确认到达。'
     case 'DELIVERED':
+      if (alerts.value.length > 0 && role.value === 'RECEIVER') {
+        return '运输任务已到达但存在持续超温告警：受影响批次已冻结、不能直接接受，请前往“待接收交接”选择隔离收货或拒收。'
+      }
       return role.value === 'RECEIVER'
         ? '运输任务已到达：请前往“待接收交接”逐张接受或拒收。'
         : '运输任务已到达，等待接收方接受或拒收交接；到达本身不改变责任组织。'
@@ -99,6 +113,7 @@ async function load() {
     if (current.signal.aborted) return
     shipment.value = result
     loadState.value = 'loaded'
+    loadAlerts(result.id, current.signal)
     if (shipmentRoleOf(user.value, result) === 'SENDER' && result.status === 'PLANNED') {
       const page = await listTransfers({ direction: 'SENT', status: 'DRAFT', page: 1, size: 100 }, current.signal)
       if (current.signal.aborted) return
@@ -195,6 +210,28 @@ function cancel() {
     () => ({ reason, expectedVersion: s.version }),
     (body, key) => cancelShipment(s.id, body, key)
   ), '运输任务已取消，装载的交接草稿已解绑。')
+}
+
+async function loadAlerts(shipmentId: number, signal: AbortSignal) {
+  try {
+    const result = await listAlerts({ shipmentId }, signal)
+    if (!signal.aborted) alerts.value = result
+  } catch {
+    if (!signal.aborted) alerts.value = []
+  }
+}
+
+/** 登记温度后刷新告警：持续超温由服务端在同一次登记中判定，新告警与自动冻结立即可见。 */
+function onTemperatureRecorded() {
+  const s = shipment.value
+  if (!s) return
+  const current = new AbortController()
+  const previous = alerts.value.length
+  loadAlerts(s.id, current.signal).then(() => {
+    if (alerts.value.length > previous) {
+      flash.value = { tone: 'warning', message: '本次登记使运输途中温度连续越界达到规则允许时长：系统已创建持续超温告警并冻结受影响批次。' }
+    }
+  })
 }
 
 /** 在途温度登记 409（例如运输任务已被确认到达）：刷新运输任务，并以提示条保留原因。 */
@@ -305,10 +342,25 @@ onBeforeUnmount(() => controller?.abort())
         </section>
       </div>
 
+      <section v-if="alerts.length > 0" class="ent-card alert-card" aria-labelledby="shipment-alerts-title" data-testid="shipment-alerts">
+        <h2 id="shipment-alerts-title" class="ent-card-title">持续超温告警</h2>
+        <p class="section-note">
+          运输途中温度连续越界达到规则允许时长，系统已创建运输任务级告警并自动冻结受影响批次（教学演示中的模拟质量处置）。
+        </p>
+        <ul class="alert-links">
+          <li v-for="a in alerts" :key="a.id" data-testid="shipment-alert-row" :data-status="a.status">
+            <RouterLink :to="`/app/alerts/${a.id}`" class="mono" :data-testid="`shipment-alert-link-${a.id}`">{{ a.alertNo }}</RouterLink>
+            <StatusBadge :info="formatAlertStatus(a.status)" dimension="告警" />
+            <span>{{ formatAlertType(a.alertType) }}，已持续 {{ formatDurationSeconds(a.durationSeconds) }}</span>
+          </li>
+        </ul>
+      </section>
+
       <ShipmentTemperaturePanel
         v-if="shipment.status === 'IN_TRANSIT' || shipment.status === 'DELIVERED'"
         :shipment="shipment"
         :user="user"
+        @recorded="onTemperatureRecorded"
         @conflict="onTemperatureConflict"
       />
 
@@ -412,5 +464,22 @@ onBeforeUnmount(() => controller?.abort())
   margin: 0 0 12px;
   font-size: 12px;
   color: var(--color-text-muted);
+}
+.alert-card {
+  border-left: 4px solid var(--color-danger-border);
+}
+.alert-links {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+.alert-links li {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 </style>

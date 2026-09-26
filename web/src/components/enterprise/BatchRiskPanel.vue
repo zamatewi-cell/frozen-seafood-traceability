@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import StatusBadge from '@/components/enterprise/StatusBadge.vue'
 import { freezeBatch, listRiskTransitions, releaseBatch } from '@/api/batchRisk'
 import { ApiError } from '@/api/client'
@@ -117,7 +118,12 @@ async function submit() {
 }
 
 function transitionLabel(t: BatchRiskTransition): string {
+  if (t.sourceType === 'ALERT') return '告警自动冻结'
   return t.toStatus === 'FROZEN' ? '风险冻结' : '解除冻结'
+}
+
+function sourceLabel(t: BatchRiskTransition): string {
+  return t.sourceType === 'ALERT' ? '在途持续超温告警（系统自动，无操作人）' : '质量管理员人工处置'
 }
 
 watch(() => [props.batch.id, props.batch.version], () => {
@@ -213,8 +219,9 @@ onBeforeUnmount(() => controller?.abort())
           <span class="ent-muted">（流转状态：{{ formatFlowStatus(t.flowStatus).label }}，不变）</span>
         </div>
         <div data-testid="risk-transition-reason">原因：{{ t.reason }}</div>
-        <div class="ent-muted">
-          {{ orgLabel(t.orgId) }} · {{ t.sourceType === 'MANUAL' ? '质量管理员人工处置' : t.sourceType }}
+        <div class="ent-muted" data-testid="risk-transition-source" :data-source-type="t.sourceType">
+          {{ orgLabel(t.orgId) }} · {{ sourceLabel(t) }}
+          <RouterLink v-if="t.sourceAlertId" :to="`/app/alerts/${t.sourceAlertId}`" data-testid="risk-transition-alert-link">查看告警</RouterLink>
         </div>
       </li>
     </ol>
