@@ -279,6 +279,11 @@ abstract class AbstractTransferShipmentMysqlIT {
         clean("DELETE FROM batch_operation_item WHERE operation_id IN (SELECT id FROM batch_operation WHERE org_id = ?)", createdOrgIds);
         clean("DELETE FROM batch_operation WHERE org_id = ?", createdOrgIds);
 
+        // V13：temperature_record → shipment(id, carrier_org_id) / organization / temperature_rule_stage，追加式，先于运输任务、组织与规则清理
+        clean("DELETE FROM temperature_record WHERE org_id = ?", createdOrgIds);
+        clean("DELETE FROM temperature_record WHERE shipment_id IN (SELECT id FROM shipment WHERE sender_org_id = ? OR carrier_org_id = ?)", createdOrgIds, 2);
+        clean("DELETE FROM temperature_record WHERE shipment_id = ?", createdShipmentIds);
+
         // transfer.shipment_id 外键指向 shipment：先删交接，再删运输任务
         clean("DELETE FROM transfer WHERE batch_id = ?", createdBatchIds);
         clean("DELETE FROM transfer WHERE id = ?", createdTransferIds);
@@ -286,6 +291,8 @@ abstract class AbstractTransferShipmentMysqlIT {
         clean("DELETE FROM shipment WHERE id = ?", createdShipmentIds);
         clean("DELETE FROM batch WHERE id = ?", createdBatchIds);
         clean("DELETE FROM batch WHERE creation_org_id = ?", createdOrgIds);
+        clean("DELETE FROM temperature_rule_stage WHERE rule_id IN (SELECT id FROM temperature_rule WHERE product_id = ?)", createdProductIds);
+        clean("DELETE FROM temperature_rule WHERE product_id = ?", createdProductIds);
         clean("DELETE FROM product WHERE id = ?", createdProductIds);
 
         clean("DELETE FROM user_role WHERE user_id = ?", createdUserIds);
@@ -304,6 +311,7 @@ abstract class AbstractTransferShipmentMysqlIT {
             assertThat(count("SELECT count(*) FROM audit_log WHERE actor_org_id = ?", orgId)).isZero();
             assertThat(count("SELECT count(*) FROM sale WHERE org_id = ?", orgId)).isZero();
             assertThat(count("SELECT count(*) FROM batch_risk_transition WHERE org_id = ?", orgId)).isZero();
+            assertThat(count("SELECT count(*) FROM temperature_record WHERE org_id = ?", orgId)).isZero();
         }
         for (Long batchId : createdBatchIds) {
             assertThat(count("SELECT count(*) FROM batch WHERE id = ?", batchId)).isZero();
@@ -449,6 +457,63 @@ abstract class AbstractTransferShipmentMysqlIT {
         dispatch(h.shipmentId());
         arrive(h.shipmentId());
         return h;
+    }
+
+    /**
+     * 在 {@link #preparePendingHandover(Long)} 基础上由承运商确认发运：运输任务 IN_TRANSIT，交接仍为 PENDING（PB2 在途温度）。
+     */
+    protected Handover prepareInTransitHandover(Long batchId) throws Exception {
+        Handover h = preparePendingHandover(batchId);
+        dispatch(h.shipmentId());
+        return h;
+    }
+
+    /**
+     * 以 JDBC 写入一条已发布（ACTIVE）的产品运输温控规则（基础资料夹具，等价于平台管理员创建并发布），
+     * 生效区间 [effectiveFrom, effectiveTo)，允许越界时长 1800 秒，返回其 TRANSPORT 环节 ID。版本号按产品自增。
+     */
+    protected Long publishTransportRule(Long productId, String lower, String upper, LocalDateTime effectiveFrom, LocalDateTime effectiveTo) {
+        return publishTransportRule(productId, lower, upper, effectiveFrom, effectiveTo, 1800);
+    }
+
+    /**
+     * 同上，显式指定 TRANSPORT 环节的允许越界时长（秒）。
+     */
+    protected Long publishTransportRule(Long productId, String lower, String upper, LocalDateTime effectiveFrom, LocalDateTime effectiveTo,
+                                        int allowedDurationSeconds) {
+        Integer next = jdbcTemplate.queryForObject("SELECT COALESCE(MAX(version_no), 0) + 1 FROM temperature_rule WHERE product_id = ?",
+                Integer.class, productId);
+        jdbcTemplate.update("INSERT INTO temperature_rule (product_id, version_no, name, effective_from, effective_to, status) "
+                + "VALUES (?, ?, ?, ?, ?, 'ACTIVE')", productId, next, "运输规则 v" + next + "-" + suffix, effectiveFrom, effectiveTo);
+        Long ruleId = jdbcTemplate.queryForObject("SELECT id FROM temperature_rule WHERE product_id = ? AND version_no = ?",
+                Long.class, productId, next);
+        jdbcTemplate.update("INSERT INTO temperature_rule_stage (rule_id, stage_code, lower_limit, upper_limit, unit_code, "
+                + "allowed_duration_seconds, sequence_no) VALUES (?, 'TRANSPORT', ?, ?, 'CELSIUS', ?, 1)",
+                ruleId, new BigDecimal(lower), new BigDecimal(upper), allowedDurationSeconds);
+        return jdbcTemplate.queryForObject("SELECT id FROM temperature_rule_stage WHERE rule_id = ? AND stage_code = 'TRANSPORT'",
+                Long.class, ruleId);
+    }
+
+    /**
+     * 登记在途温度请求；measuredAt 以 ISO-8601 字符串原样发送（保留调用方给定的小数秒位数）。
+     */
+    protected MockHttpServletRequestBuilder temperatureRequest(MockHttpSession session, Long shipmentId, String idemKey,
+                                                               String measuredAt, String temperature, String dataSource, String deviceNo) throws Exception {
+        java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("measuredAt", measuredAt);
+        body.put("temperature", new BigDecimal(temperature));
+        body.put("dataSource", dataSource);
+        if (deviceNo != null) {
+            body.put("deviceNo", deviceNo);
+        }
+        return postJson(session, "/api/v1/shipments/" + shipmentId + "/temperature-records", idemKey, body);
+    }
+
+    /**
+     * 运输任务装载发运业务时间（UTC）。
+     */
+    protected LocalDateTime shipmentLoadedAt(Long shipmentId) {
+        return jdbcTemplate.queryForObject("SELECT loaded_at FROM shipment WHERE id = ?", LocalDateTime.class, shipmentId);
     }
 
     /**
