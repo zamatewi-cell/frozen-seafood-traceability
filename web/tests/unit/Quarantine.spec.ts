@@ -227,7 +227,7 @@ describe('AlertDetailView quality decisions (PB4)', () => {
     const { calls } = alertBackend(receiverQm, [])
     const view = await mountAt('/app/alerts/5001')
     const block = view.get('[data-testid="alert-quality-batch"]')
-    expect(block.get('[data-testid="inspection-empty"]').exists()).toBe(true)
+    expect(block.find('[data-testid="inspection-empty"]').exists()).toBe(true)
     expect(block.find('[data-testid="alert-release-open-21"]').exists()).toBe(false)
     expect(view.get('[data-testid="alert-batch-disposition"]').text()).toBe('待提交检验证据')
 
