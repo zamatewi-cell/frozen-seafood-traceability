@@ -45,7 +45,11 @@ class OrgScopedReadTransactionContractTest {
                 Arguments.of(com.example.traceability.quality.application.AlertApplicationService.class
                         .getMethod("getAlert", Long.class, TraceSecurityPrincipal.class)),
                 Arguments.of(com.example.traceability.quality.application.InspectionReportService.class
-                        .getMethod("listReports", Long.class, TraceSecurityPrincipal.class))
+                        .getMethod("listReports", Long.class, TraceSecurityPrincipal.class)),
+                Arguments.of(com.example.traceability.quality.application.RecallService.class
+                        .getMethod("listRecalls", TraceSecurityPrincipal.class)),
+                Arguments.of(com.example.traceability.quality.application.RecallService.class
+                        .getMethod("getRecall", Long.class, TraceSecurityPrincipal.class))
         );
     }
 

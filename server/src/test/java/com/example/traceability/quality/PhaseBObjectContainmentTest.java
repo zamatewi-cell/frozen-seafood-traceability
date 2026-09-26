@@ -5,6 +5,8 @@ import com.example.traceability.quality.mapper.AlertActionMapper;
 import com.example.traceability.quality.mapper.AlertBatchMapper;
 import com.example.traceability.quality.mapper.AlertMapper;
 import com.example.traceability.quality.mapper.InspectionReportMapper;
+import com.example.traceability.quality.mapper.RecallBatchMapper;
+import com.example.traceability.quality.mapper.RecallMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -47,12 +49,13 @@ class PhaseBObjectContainmentTest {
     private static final Path MIGRATIONS = MAIN_RESOURCES.resolve("db/migration");
 
     /** 追加式表：任何修改都不允许。 */
-    private static final List<String> APPEND_ONLY_TABLES = List.of("alert_batch", "alert_action", "inspection_report");
+    private static final List<String> APPEND_ONLY_TABLES = List.of("alert_batch", "alert_action", "inspection_report", "recall_batch");
     /** 追加式表与唯一允许 INSERT 的 mapper 文件。 */
     private static final Map<String, String> APPEND_ONLY_OWNERS = Map.of(
             "alert_batch", "AlertBatchMapper.java",
             "alert_action", "AlertActionMapper.java",
-            "inspection_report", "InspectionReportMapper.java");
+            "inspection_report", "InspectionReportMapper.java",
+            "recall_batch", "RecallBatchMapper.java");
     /** alert 允许由 AlertMapper 推进的生命周期列。 */
     private static final List<String> ALERT_LIFECYCLE_COLUMNS = List.of("status", "acknowledged_at", "acknowledged_by",
             "resolved_at", "resolved_by", "resolution", "version", "updated_at", "updated_by");
@@ -163,9 +166,47 @@ class PhaseBObjectContainmentTest {
     }
 
     @Test
+    @DisplayName("recall 从不删除；INSERT / UPDATE 只在 RecallMapper，UPDATE 只推进关闭生命周期列，不改写发起事实")
+    void recallWritesAreConfined() throws IOException {
+        Pattern delete = Pattern.compile("(?is)\\bDELETE\\s+FROM\\s+`?recall`?\\b");
+        Pattern insert = Pattern.compile("(?is)\\bINSERT\\s+INTO\\s+`?recall`?\\s*\\(");
+        Pattern update = Pattern.compile("(?is)\\bUPDATE\\s+`?recall`?\\s+SET\\s+(.*?)\\bWHERE\\b");
+        List<String> lifecycle = List.of("status", "closed_at", "closed_by", "public_disposition", "result_summary",
+                "close_idempotency_key", "close_request_hash", "version", "updated_at");
+        List<String> violations = new ArrayList<>();
+        int updates = 0;
+        for (Map.Entry<Path, String> e : productionSources().entrySet()) {
+            String rel = SERVER.relativize(e.getKey()).toString();
+            boolean owner = e.getKey().getFileName().toString().equals("RecallMapper.java");
+            if (delete.matcher(e.getValue()).find()) {
+                violations.add(rel + ": DELETE FROM recall");
+            }
+            if (!owner && insert.matcher(e.getValue()).find()) {
+                violations.add(rel + ": INSERT INTO recall outside RecallMapper");
+            }
+            Matcher m = update.matcher(e.getValue());
+            while (m.find()) {
+                if (!owner) {
+                    violations.add(rel + ": UPDATE recall outside RecallMapper");
+                }
+                updates++;
+                Matcher col = Pattern.compile("(?i)`?([a-z_]+)`?\\s*=").matcher(m.group(1));
+                while (col.find()) {
+                    if (!lifecycle.contains(col.group(1).toLowerCase(java.util.Locale.ROOT))) {
+                        violations.add(rel + ": UPDATE recall SET " + col.group(1));
+                    }
+                }
+            }
+        }
+        assertThat(violations).isEmpty();
+        assertThat(updates).as("the close update exists and was inspected").isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("告警相关 mapper 不继承 BaseMapper，只声明 insert / select / 生命周期推进方法")
     void mappersAreConfined() {
-        for (Class<?> mapper : List.of(AlertMapper.class, AlertBatchMapper.class, AlertActionMapper.class, InspectionReportMapper.class)) {
+        for (Class<?> mapper : List.of(AlertMapper.class, AlertBatchMapper.class, AlertActionMapper.class, InspectionReportMapper.class,
+                RecallMapper.class, RecallBatchMapper.class)) {
             assertThat(BaseMapper.class.isAssignableFrom(mapper)).as("%s must not inherit generic BaseMapper writes", mapper.getSimpleName())
                     .isFalse();
         }
@@ -175,6 +216,10 @@ class PhaseBObjectContainmentTest {
                 .allMatch(n -> n.equals("insert") || n.startsWith("select") || n.startsWith("count"));
         assertThat(Arrays.stream(InspectionReportMapper.class.getDeclaredMethods()).map(Method::getName))
                 .allMatch(n -> n.equals("insert") || n.startsWith("select") || n.startsWith("count"));
+        assertThat(Arrays.stream(RecallBatchMapper.class.getDeclaredMethods()).map(Method::getName))
+                .allMatch(n -> n.equals("insert") || n.startsWith("select") || n.startsWith("count"));
+        assertThat(Arrays.stream(RecallMapper.class.getDeclaredMethods()).map(Method::getName))
+                .allMatch(n -> n.equals("insert") || n.startsWith("select") || n.equals("close"));
         assertThat(Arrays.stream(AlertMapper.class.getDeclaredMethods()).map(Method::getName))
                 .allMatch(n -> n.equals("insert") || n.startsWith("select") || List.of("acknowledge", "resolve").contains(n));
     }

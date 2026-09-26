@@ -74,4 +74,11 @@ public interface InspectionReportMapper {
     @Select("SELECT * FROM inspection_report WHERE alert_id = #{alertId} AND batch_id = #{batchId} ORDER BY id DESC LIMIT 1")
     @Options(flushCache = Options.FlushCachePolicy.TRUE)
     InspectionReport selectLatestByAlertIdAndBatchId(@Param("alertId") Long alertId, @Param("batchId") Long batchId);
+
+    /**
+     * 批次最新检验报告（任意关联；PB5 紧急召回证据）。只在已持有批次行锁后调用。
+     */
+    @Select("SELECT * FROM inspection_report WHERE batch_id = #{batchId} ORDER BY id DESC LIMIT 1")
+    @Options(flushCache = Options.FlushCachePolicy.TRUE)
+    InspectionReport selectLatestByBatchId(@Param("batchId") Long batchId);
 }
