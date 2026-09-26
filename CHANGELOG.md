@@ -6,6 +6,14 @@
 
 ### Added
 
+- Phase B PB3 在途持续超温 → Shipment 级告警 → 受影响批次自动冻结（契约 v1.1 §2.11 / §10.1 / §10.2 步骤 2–4 / §13 步骤 2–4 / §14）：
+  - Flyway V14：前置条件要求 V1 占位表 `alert` 为空（fail-fast，在任何 DDL 之前失败），以契约对象重建 `alert`（只承载 Shipment 级 `TEMP_OVER_UPPER` / `TEMP_UNDER_LOWER`；归属组织经复合外键必须是运输任务发货方；片段首条记录与达到时长记录经复合外键必须属于同一运输任务；判定依据快照；`OPEN → ACKNOWLEDGED → RESOLVED` 生命周期形状；同一片段唯一；不可删除）；新建受影响批次快照 `alert_batch`（冻结转换经复合外键必须来源于同一告警）与追加式处置台账 `alert_action`；`batch_risk_transition` 新增类型化来源外键 `source_alert_id` 与 `ALERT` 来源（只允许系统 NORMAL → FROZEN、无操作人），不回填。不修改 V1–V13。
+  - 持续超温判定（纯函数）：只使用温度记录持久化的判定依据快照，按 (measuredAt, id) 排序，连续、同方向、同一判定依据的越界记录构成片段，已测区间 ≥ 允许时长（或允许时长为 0）即构成持续超温；单点、被范围内 / 无规则记录打断、方向改变、依据改变都不构成；乱序补登可补全片段；同一片段只告警一次。
+  - 温度登记在同一 READ COMMITTED 事务内（持有运输任务行锁）创建告警并经风险核心 `BatchRiskService.freezeForAlert` 按批次 ID 升序锁定并冻结受影响批次（`SYS:ALERT:{alertId}:BATCH:{batchId}`，审计 `ALERT_TRIGGER` / 系统 `RISK_FREEZE`）；已冻结批次只快照。锁顺序 shipment → temperature_record → alert → batch；不改变数量、责任组织、流转状态、公开追溯码，不生成 TraceEvent，不修改运输任务 / 交接。
+  - 告警接口：`GET /api/v1/alerts`、`GET /api/v1/alerts/{alertId}`（归属组织、运输任务接收方 / 承运方与平台只读）、`POST /api/v1/alerts/{alertId}/acknowledge`（归属组织 QUALITY_MANAGER，幂等预读 → 告警行锁 → 锁后复读 → 追加动作 → 条件推进）。
+  - 确定性竞态（真实 MySQL）：并发补全同一片段只产生一条告警；补全片段的登记与确认到达任一顺序结果确定；自动冻结与人工冻结 / 解除任一顺序不重复转换且告警提交后批次一定冻结；并发确认只产生一条动作。
+  - 生产 Vue：告警列表 / 详情（持续超温依据、受影响批次与自动冻结结果、二次确认“确认异常”、处置历史、模拟处置声明）；运输任务详情告警卡片与登记后即时提示；批次风险历史标注“告警自动冻结”并链接告警；在途温度面板文案改为“单点越界本身不产生告警”。
+
 - Phase B PB2 Shipment 在途温度记录（单点登记与单点判定，契约 v1.1 §2.9 / §10.1 / §10.2 步骤 1 / §13 步骤 1 / §14）：
   - Flyway V13：前置条件要求 `temperature_record` 为空（V1 以来无任何写入代码，fail-fast，在任何 DDL 之前失败）；把该表收敛为 Shipment 在途形状（绑定 `shipment_id`、`batch_id` 为空、`stage_code` 固定 `TRANSPORT`、温标 `CELSIUS`、来源仅 `MANUAL` / `SIMULATED`、温度 [-80.00, 60.00]、测量时间不晚于登记时间 5 分钟、不可软删除）；新增登记组织 / 操作人、判定依据快照（上下限与允许越界时长，历史判定不随规则环节后续改动漂移）与组织内幂等键 + 请求哈希；删除伪造合规结论的 `evaluation DEFAULT 'NORMAL'`；`MISSING_CONTEXT` 时规则环节、上下限与允许越界时长快照均为空，`NORMAL` / `HIGH` / `LOW` 时四者均非空且必须与快照上下限一致；复合外键保证登记组织是运输任务承运组织、匹配环节确为 TRANSPORT。不建立测量时间唯一约束（同一时间点可有多条测量），不修改 V1–V12。
   - `POST /api/v1/shipments/{shipmentId}/temperature-records`：运输任务指定承运组织的 OPERATOR 在 IN_TRANSIT 期间登记；`measuredAt` 只规范化一次（UTC、截断到 `DATETIME(6)` 微秒），同一值用于请求哈希、时间窗口校验、规则匹配、持久化、审计与响应；按装载批次产品、TRANSPORT 环节与测量业务时间匹配已发布规则版本（左闭右开），单点判定 `NORMAL`（含上下限）/ `HIGH` / `LOW`，无适用规则为 `MISSING_CONTEXT`，规则区间重叠失败关闭；READ COMMITTED 下幂等预读 → 运输任务行锁 → 锁后复读 → 插入 → `TEMPERATURE_RECORD` 审计，锁顺序 shipment → temperature_record。登记不修改运输任务 / 交接 / 批次，不生成 TraceEvent，不判定持续超温，不创建 Alert，不调用风险核心、不写批次风险状态，判定结果登记后不追溯改写。

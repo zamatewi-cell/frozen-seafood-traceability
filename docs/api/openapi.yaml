@@ -5,9 +5,8 @@ info:
   description: |
     教学演练原型接口，不代表真实物联网、防伪或第三方认证能力。
 
-    本文档仅描述当前仓库中已真实实现的接口（Phase 0 + Phase A Slice 1/2/3 基线），业务语义以
-    `docs/BUSINESS_CONTRACT_V1.1.md` 为准。Sale、温度记录、告警、冻结、隔离 (QUARANTINED)、召回、
-    检验报告及企业端谱系图等尚未实现的能力不在本文档中声明。
+    本文档仅描述当前仓库中已真实实现的接口，业务语义以 `docs/BUSINESS_CONTRACT_V1.1.md` 为准；
+    企业端谱系图等尚未实现的能力不在本文档中声明。
 
     ## Transfer 与 Shipment（Phase A Slice 2）
 
@@ -84,7 +83,9 @@ tags:
   - name: Risk
     description: 批次风险状态（Phase B PB1：人工风险冻结 / 解除冻结，教学实训中的模拟质量处置）
   - name: ShipmentTemperature
-    description: Shipment 在途温度记录（Phase B PB2：承运商单点登记与单点判定；不判定持续超温、不产生告警、不对消费者公开）
+    description: Shipment 在途温度记录（Phase B PB2：承运商单点登记与单点判定；单点不等于持续超温、不对消费者公开）
+  - name: Alerts
+    description: 在途持续超温告警（Phase B PB3：系统按持续超温规则创建 Shipment 级告警并经风险核心自动冻结受影响批次；质量管理员确认处置）
   - name: Organizations
     description: 企业端最小只读组织目录
   - name: Products
@@ -1508,8 +1509,12 @@ paths:
            （生效区间左闭右开）；单点判定 `NORMAL`（含上下限）/ `HIGH` / `LOW`；没有适用规则（或历史混装清单）为 `MISSING_CONTEXT`，
            从不猜测；多于一条匹配视为规则数据完整性错误，500 `TEMPERATURE_RULE_AMBIGUOUS`。
         成功时同一事务（READ COMMITTED）内：锁定运输任务行 → 追加一条温度记录（固定规则环节、上下限与允许越界时长快照，登记后不追溯改写）→
-        审计 `TEMPERATURE_RECORD`。不修改运输任务（版本不变）、交接或批次，不生成 TraceEvent，不判定持续超温，不创建 Alert，
-        不写批次风险状态。同一测量时间允许多条记录（不按测量时间去重）。
+        审计 `TEMPERATURE_RECORD` →（PB3）按该运输任务全部记录的持久化判定依据快照判定持续超温：形成尚未告警的持续超温片段时，
+        同一事务内创建 Shipment 级告警（OPEN、HIGH，见 `Alert`）、经 Shipment → Transfer → Batch 快照受影响批次，并经风险核心把其中
+        NORMAL 的批次自动冻结（来源 ALERT、无操作人、系统幂等键 `SYS:ALERT:{alertId}:BATCH:{batchId}`，审计 `ALERT_TRIGGER` /
+        `RISK_FREEZE`）；已冻结 / 已召回批次只快照。锁顺序 shipment → temperature_record → alert → batch（按 ID 升序）。
+        不修改运输任务（版本不变）或交接，不改变批次数量、责任组织与流转状态，不生成 TraceEvent。响应仍只是本条记录的单点判定。
+        同一测量时间允许多条记录（不按测量时间去重）。
         同键并发冲突在极端情况下可能返回可重试的 409 `TEMPERATURE_RECORD_CONCURRENT_CONFLICT`（用同一幂等键重试即得确定结果）。
       operationId: recordShipmentTemperature
       parameters:
@@ -1549,6 +1554,78 @@ paths:
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
+  /alerts:
+    get:
+      tags: [Alerts]
+      summary: 可见告警列表（Phase B PB3：Shipment 级在途持续超温）
+      description: |
+        按主键倒序，最多 200 条。告警归属组织（运输任务发货方，任意角色）、运输任务接收方与承运方（任意角色，只读）、
+        PLATFORM 只读角色可见；其他组织得到空列表。`status` 只能为 OPEN / ACKNOWLEDGED / RESOLVED（大小写不敏感），
+        否则 400 `INVALID_REQUEST`。列表项不含受影响批次与处置历史。只读 REPEATABLE READ 快照。
+      operationId: listAlerts
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [OPEN, ACKNOWLEDGED, RESOLVED]}}
+        - {name: shipmentId, in: query, schema: {type: integer, format: int64}}
+      responses:
+        '200':
+          description: 告警列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertListEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+  /alerts/{alertId}:
+    parameters:
+      - {$ref: '#/components/parameters/AlertId'}
+    get:
+      tags: [Alerts]
+      summary: 告警详情（受影响批次快照与处置历史）
+      description: |
+        可见范围同列表；其他组织 403 `ORG_SCOPE_DENIED`；不存在 404；匿名 401。受影响批次为告警创建时经
+        Shipment → Transfer → Batch 确定的快照，附批次与交接的当前事实。
+      operationId: getAlert
+      responses:
+        '200':
+          description: 告警详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /alerts/{alertId}/acknowledge:
+    parameters:
+      - {$ref: '#/components/parameters/AlertId'}
+    post:
+      tags: [Alerts]
+      summary: 确认告警（OPEN → ACKNOWLEDGED，确认人即处置负责人）
+      description: |
+        契约 v1.1 §2.11 / §10.2 步骤 7 / §13 步骤 7。校验顺序：未认证 401；平台 / 系统管理员 403 `ADMIN_RESTRICTED`；
+        非 `QUALITY_MANAGER` 403 `ACCESS_DENIED`；幂等键缺失 / 格式错误 / 使用保留前缀 `SYS:`、说明超过 500 字符、夹带未声明字段：
+        400 `INVALID_REQUEST`；同组织同键同语义重放当前告警（先于一切状态校验），语义不同 409 `IDEMPOTENCY_CONFLICT`；
+        告警不存在 404；不是告警归属组织（接收方、承运方、其他组织）403 `ORG_SCOPE_DENIED`；状态不是 OPEN 409 `INVALID_STATE_TRANSITION`。
+        成功时同一事务（READ COMMITTED）内：锁定告警行 → 追加一条 `ACKNOWLEDGE` 处置动作 → 条件推进告警状态（版本 +1）→
+        审计 `ALERT_ACKNOWLEDGE`。不改变任何批次、交接或运输任务，不生成 TraceEvent。
+      operationId: acknowledgeAlert
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfHeader'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AlertAcknowledgeRequest'}
+      responses:
+        '200':
+          description: 确认后（或幂等重放）的告警详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertEnvelope'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
   /public/traces/{publicTraceId}:
     servers:
       - url: /api/public/v1
@@ -1610,6 +1687,11 @@ components:
       schema: {type: integer, format: int64}
     ShipmentId:
       name: shipmentId
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    AlertId:
+      name: alertId
       in: path
       required: true
       schema: {type: integer, format: int64}
@@ -2349,7 +2431,7 @@ components:
     BatchRiskTransition:
       type: object
       additionalProperties: false
-      description: 风险状态转换白名单投影（不含幂等键、请求哈希与登记时间）。PB1 只有人工 NORMAL ⇄ FROZEN。
+      description: 风险状态转换白名单投影（不含幂等键、请求哈希与登记时间）。人工 NORMAL ⇄ FROZEN（MANUAL）与告警系统自动冻结 NORMAL → FROZEN（ALERT，无操作人）。
       required: [id, batchId, orgId, flowStatus, fromStatus, toStatus, sourceType, reason, occurredAt]
       properties:
         id: {type: integer, format: int64}
@@ -2358,9 +2440,10 @@ components:
         flowStatus: {type: string, enum: [ACTIVE, CLOSED], description: 转换时流转状态快照（转换不改变流转状态）}
         fromStatus: {type: string, enum: [NORMAL, FROZEN]}
         toStatus: {type: string, enum: [NORMAL, FROZEN]}
-        sourceType: {type: string, enum: [MANUAL], description: 来源类型；ALERT（PB3）/ RECALL（PB5）随对应迁移同时加入}
+        sourceType: {type: string, enum: [MANUAL, ALERT], description: 来源类型；RECALL（PB5）随对应迁移同时加入}
+        sourceAlertId: {type: integer, format: int64, description: 来源告警（sourceType = ALERT 时输出）}
         reason: {type: string}
-        actorUserId: {type: [integer, "null"], format: int64, description: 人工转换操作人}
+        actorUserId: {type: integer, format: int64, description: 人工转换操作人（系统路径 ALERT 没有操作人，不输出）}
         occurredAt: {type: string, format: date-time, description: 'UTC，微秒精度，服务端生成'}
     BatchRiskTransitionEnvelope:
       allOf:
@@ -2379,7 +2462,7 @@ components:
     TemperatureEvaluation:
       type: string
       enum: [NORMAL, HIGH, LOW, MISSING_CONTEXT]
-      description: 单点判定：只说明这一次测量是否落在测量时适用的运输温控规则范围内（NORMAL 含上下限），不等于持续超温，不产生告警
+      description: 单点判定：只说明这一次测量是否落在测量时适用的运输温控规则范围内（NORMAL 含上下限），不等于持续超温；单点本身不产生告警（持续超温见 Alert）
     ShipmentTemperatureRecordRequest:
       type: object
       additionalProperties: false
@@ -2418,7 +2501,7 @@ components:
             ruleStageId: {type: integer, format: int64}
             lowerLimit: {type: number}
             upperLimit: {type: number}
-            allowedDurationSeconds: {type: integer, minimum: 0, description: 登记时匹配环节允许越界时长快照（秒）；PB2 不做持续超温判定}
+            allowedDurationSeconds: {type: integer, minimum: 0, description: 登记时匹配环节允许越界时长快照（秒）；持续超温判定（PB3）只使用该快照}
         orgId: {type: integer, format: int64, description: 登记组织（运输任务承运组织）}
         actorUserId: {type: integer, format: int64}
     TemperatureRecordEnvelope:
@@ -2435,6 +2518,110 @@ components:
             data:
               type: array
               items: {$ref: '#/components/schemas/TemperatureRecord'}
+    AlertAcknowledgeRequest:
+      type: object
+      additionalProperties: false
+      description: 确认告警请求；确认人、时间与状态由服务端决定。夹带任何未声明字段返回 400。
+      properties:
+        note: {type: string, maxLength: 500, description: 可选说明（去除首尾空白；空白视为未填写）}
+    AlertRuleBasis:
+      type: object
+      additionalProperties: false
+      description: 判定依据：告警创建时从片段温度记录复制的规则环节、上下限与允许越界时长快照；规则名称与版本只经规则环节关联用于展示
+      required: [ruleStageId, lowerLimit, upperLimit, allowedDurationSeconds]
+      properties:
+        ruleId: {type: integer, format: int64}
+        name: {type: string}
+        versionNo: {type: integer}
+        ruleStageId: {type: integer, format: int64}
+        lowerLimit: {type: number}
+        upperLimit: {type: number}
+        allowedDurationSeconds: {type: integer, minimum: 0}
+    AlertAffectedBatch:
+      type: object
+      additionalProperties: false
+      required: [batchId, traceBatchNo, transferId, transferNo, transferStatus, riskStatusBefore, autoFrozen, currentOrgId, currentFlowStatus, currentRiskStatus, quantity, unitCode]
+      properties:
+        batchId: {type: integer, format: int64}
+        traceBatchNo: {type: string}
+        transferId: {type: integer, format: int64}
+        transferNo: {type: string}
+        transferStatus: {type: string, description: 交接当前状态}
+        riskStatusBefore: {type: string, enum: [NORMAL, FROZEN, RECALLED], description: 告警创建时批次风险状态}
+        autoFrozen: {type: boolean, description: 本告警是否自动冻结了该批次（告警创建时为 NORMAL）}
+        freezeTransitionId: {type: integer, format: int64, description: 本告警自动冻结产生的风险转换}
+        currentOrgId: {type: integer, format: int64}
+        currentFlowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
+        currentRiskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
+        quantity: {type: number}
+        unitCode: {type: string}
+    AlertAction:
+      type: object
+      additionalProperties: false
+      required: [id, action, orgId, actorUserId, occurredAt]
+      properties:
+        id: {type: integer, format: int64}
+        action: {type: string, enum: [ACKNOWLEDGE]}
+        orgId: {type: integer, format: int64}
+        actorUserId: {type: integer, format: int64}
+        note: {type: string}
+        occurredAt: {type: string, format: date-time, description: 'UTC，微秒精度，服务端生成'}
+    Alert:
+      type: object
+      additionalProperties: false
+      description: |
+        Shipment 级在途持续超温告警（企业端白名单投影，不含幂等键与请求哈希）。只由系统在温度登记事务内创建：
+        同一运输任务按 (measuredAt, id) 排序的温度记录中，连续、同方向（全部 HIGH 或全部 LOW）且判定依据快照完全相同的越界记录构成片段，
+        NORMAL / MISSING_CONTEXT / 方向改变 / 依据改变都会结束片段；片段内某条记录与首条记录的测量时间差 ≥ 快照允许越界时长
+        （允许时长为 0 时首条越界记录即满足）时构成持续超温。只统计已测得区间，不外推；单条越界在允许时长大于 0 时永不构成持续超温。
+        同一片段只告警一次。列表项不含 `batches` / `actions`。
+      required: [id, alertNo, alertType, severity, status, reason, orgId, shipmentId, shipmentNo, receiverOrgId, carrierOrgId, stageCode, episodeStartRecordId, sustainedRecordId, episodeStartedAt, sustainedAt, durationSeconds, rule, triggeredAt, version]
+      properties:
+        id: {type: integer, format: int64}
+        alertNo: {type: string}
+        alertType: {type: string, enum: [TEMP_OVER_UPPER, TEMP_UNDER_LOWER]}
+        severity: {type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL], description: 持续超温告警为 HIGH}
+        status: {type: string, enum: [OPEN, ACKNOWLEDGED, RESOLVED]}
+        reason: {type: string, description: 服务端生成的告警原因}
+        orgId: {type: integer, format: int64, description: 归属组织（运输任务发货方，受影响批次当时的责任组织，负责处置）}
+        shipmentId: {type: integer, format: int64}
+        shipmentNo: {type: string}
+        receiverOrgId: {type: integer, format: int64}
+        carrierOrgId: {type: integer, format: int64}
+        stageCode: {type: string, enum: [TRANSPORT]}
+        episodeStartRecordId: {type: integer, format: int64, description: 越界片段首条温度记录}
+        sustainedRecordId: {type: integer, format: int64, description: 片段内首条达到允许越界时长的温度记录}
+        episodeStartedAt: {type: string, format: date-time}
+        sustainedAt: {type: string, format: date-time}
+        durationSeconds: {type: integer, minimum: 0, description: 达到条件时已持续越界整秒数}
+        rule: {$ref: '#/components/schemas/AlertRuleBasis'}
+        triggeredAt: {type: string, format: date-time, description: 告警创建系统时间}
+        acknowledgedAt: {type: string, format: date-time}
+        acknowledgedBy: {type: integer, format: int64, description: 确认人（处置负责人）}
+        resolvedAt: {type: string, format: date-time}
+        resolvedBy: {type: integer, format: int64}
+        resolution: {type: string}
+        version: {type: integer, format: int64}
+        batches:
+          type: array
+          items: {$ref: '#/components/schemas/AlertAffectedBatch'}
+        actions:
+          type: array
+          items: {$ref: '#/components/schemas/AlertAction'}
+    AlertEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Alert'}
+    AlertListEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/Alert'}
     TransferStatus:
       type: string
       enum: [DRAFT, PENDING, ACCEPTED, REJECTED]
