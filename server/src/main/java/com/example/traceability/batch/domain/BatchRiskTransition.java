@@ -22,6 +22,7 @@ public class BatchRiskTransition {
     private String toStatus;
     private String sourceType;
     private Long sourceAlertId;
+    private Long sourceRecallId;
     private Long actorUserId;
     private String reason;
     private String idempotencyKey;
@@ -131,6 +132,14 @@ public class BatchRiskTransition {
 
     public void setSourceAlertId(Long sourceAlertId) {
         this.sourceAlertId = sourceAlertId;
+    }
+
+    public Long getSourceRecallId() {
+        return sourceRecallId;
+    }
+
+    public void setSourceRecallId(Long sourceRecallId) {
+        this.sourceRecallId = sourceRecallId;
     }
 
     public LocalDateTime getCreatedAt() {

@@ -98,7 +98,7 @@ class BatchRiskControllerTest {
     }
 
     private static BatchRiskTransitionResponse response(String from, String to) {
-        return new BatchRiskTransitionResponse(7001L, 3000L, 30L, "ACTIVE", from, to, "MANUAL", null, "来料抽检异常，等待复检", 801L,
+        return new BatchRiskTransitionResponse(7001L, 3000L, 30L, "ACTIVE", from, to, "MANUAL", null, null, "来料抽检异常，等待复检", 801L,
                 OffsetDateTime.of(2026, 9, 23, 1, 30, 15, 123456000, ZoneOffset.UTC));
     }
 

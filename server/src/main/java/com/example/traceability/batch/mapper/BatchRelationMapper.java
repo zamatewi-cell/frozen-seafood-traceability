@@ -88,4 +88,31 @@ public interface BatchRelationMapper extends BaseMapper<BatchRelation> {
             "LEFT JOIN batch_operation op ON op.id = r.operation_id " +
             "ORDER BY r.child_batch_id ASC, r.parent_batch_id ASC")
     List<BatchLineageEdge> selectAncestorEdges(@Param("targetBatchId") Long targetBatchId);
+
+    /**
+     * 基于 recursive CTE 的正向影响范围（Phase B PB5 模拟召回）：返回从起点批次沿 parent → child 向下可达的全部谱系边。
+     * <p>
+     * 递归部分使用 UNION（DISTINCT），DAG 自然去重、异常环也会终止。与反向溯源一致地左连接批次操作并返回其状态，
+     * 由调用方只采用已提交且未删除的批次操作产生的边（草稿操作的产出尚未生效，不是真实后续批次）。
+     * </p>
+     *
+     * @param seedIds 起点批次 ID（召回种子批次）
+     * @return 向下可达的谱系边（按父、子批次 ID 升序）
+     */
+    @Select("<script>WITH RECURSIVE downstream (batch_id) AS ( " +
+            "    SELECT b.id FROM batch b WHERE b.id IN " +
+            "    <foreach collection='seedIds' item='id' open='(' separator=',' close=')'>#{id}</foreach> " +
+            "    UNION " +
+            "    SELECT r.child_batch_id " +
+            "    FROM batch_relation r " +
+            "    JOIN downstream d ON r.parent_batch_id = d.batch_id " +
+            ") " +
+            "SELECT r.parent_batch_id, r.child_batch_id, r.relation_type, " +
+            "       op.id AS operation_id, op.operation_type, op.status AS operation_status, " +
+            "       op.is_deleted AS operation_deleted, op.occurred_at AS operation_occurred_at " +
+            "FROM batch_relation r " +
+            "JOIN downstream d ON r.parent_batch_id = d.batch_id " +
+            "LEFT JOIN batch_operation op ON op.id = r.operation_id " +
+            "ORDER BY r.parent_batch_id ASC, r.child_batch_id ASC</script>")
+    List<BatchLineageEdge> selectDescendantEdges(@Param("seedIds") java.util.Collection<Long> seedIds);
 }

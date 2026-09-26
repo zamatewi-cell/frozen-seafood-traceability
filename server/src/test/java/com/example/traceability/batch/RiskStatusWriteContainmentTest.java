@@ -251,7 +251,7 @@ class RiskStatusWriteContainmentTest {
     }
 
     @Test
-    @DisplayName("Java 来源类型与最新迁移中的 chk_brt_source_type 严格一致（V12 MANUAL → V14 加入 ALERT）")
+    @DisplayName("Java 来源类型与最新迁移中的 chk_brt_source_type 严格一致（V12 MANUAL → V14 加入 ALERT → V16 加入 RECALL）")
     void sourceTypesAlignedWithLatestMigration() throws IOException {
         Pattern check = Pattern.compile("chk_brt_source_type`\\s+CHECK\\s*\\(\\s*`source_type`\\s+IN\\s*\\(([^)]*)\\)");
         Map<Integer, String> definitions = new java.util.TreeMap<>();
@@ -271,12 +271,12 @@ class RiskStatusWriteContainmentTest {
                 }
             }
         }
-        assertThat(definitions).as("chk_brt_source_type defined in V12 and redefined in V14").containsKeys(12, 14);
+        assertThat(definitions).as("chk_brt_source_type defined in V12 and redefined in V14 / V16").containsKeys(12, 14, 16);
         String latest = definitions.values().stream().reduce((first, second) -> second).orElseThrow();
         List<String> dbValues = Arrays.stream(latest.split(","))
                 .map(s -> s.trim().replace("'", ""))
                 .toList();
         List<String> javaValues = Arrays.stream(BatchRiskSourceType.values()).map(Enum::name).toList();
-        assertThat(javaValues).containsExactlyElementsOf(dbValues).containsExactly("MANUAL", "ALERT");
+        assertThat(javaValues).containsExactlyElementsOf(dbValues).containsExactly("MANUAL", "ALERT", "RECALL");
     }
 }

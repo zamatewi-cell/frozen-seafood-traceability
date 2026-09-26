@@ -24,6 +24,7 @@ public record BatchRiskTransitionResponse(
         String toStatus,
         String sourceType,
         Long sourceAlertId,
+        Long sourceRecallId,
         String reason,
         Long actorUserId,
         @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX", timezone = "UTC")
@@ -40,6 +41,7 @@ public record BatchRiskTransitionResponse(
                 t.getToStatus(),
                 t.getSourceType(),
                 t.getSourceAlertId(),
+                t.getSourceRecallId(),
                 t.getReason(),
                 t.getActorUserId(),
                 t.getOccurredAt() != null ? t.getOccurredAt().atOffset(ZoneOffset.UTC) : null
