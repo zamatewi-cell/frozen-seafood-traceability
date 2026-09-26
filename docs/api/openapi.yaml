@@ -1005,6 +1005,8 @@ paths:
       description: |
         与风险冻结相同的权限、幂等与事务规则（审计 `RISK_RELEASE`）。状态矩阵：`ACTIVE / FROZEN` → `ACTIVE / NORMAL`；
         `CLOSED / FROZEN` → `CLOSED / NORMAL`；`DRAFT`、未冻结、`RECALLED`：409 `INVALID_STATE_TRANSITION`。
+        批次处于尚未对其形成放行结论的未处置告警中时 409 `ALERT_DECISION_REQUIRED`（必须先在告警中依据检验结论形成放行结论）。
+        人工风险冻结是批次的一个风险事项：告警的放行结论不会解除它，只能由本接口人工解除（独立评审修复）。
       operationId: releaseBatchRisk
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -1043,6 +1045,29 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/BatchRiskTransitionListEnvelope'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /batches/{batchId}/risk-holds:
+    parameters:
+      - {$ref: '#/components/parameters/BatchId'}
+    get:
+      tags: [Risk]
+      summary: 批次当前未解除的风险事项与上游召回通知（独立评审修复）
+      description: |
+        契约 v1.1 §2.12 / §4.2 / §14。风险事项与召回通知属于批次：只对批次的当前责任组织（任意角色）与 PLATFORM 只读角色输出；
+        其他组织（含已转出批次的历史持有方）403 `ORG_SCOPE_DENIED`；批次不存在 404；匿名 401。
+        - `alertHolds`：批次所在的、尚未对该批次形成放行结论的未处置告警（批次 RECALLED 时为空）；
+        - `manualFreezeHold`：批次处于 FROZEN 且当前冻结期由人工风险冻结开启、尚未人工解除；
+        - `recallNotices`：其他组织召回影响范围中对该批次的通知（NOTIFY_HOLDER）——批次交接后通知随批次转给新的当前责任组织。
+        批次只有在全部风险事项都形成结论后才恢复 NORMAL。只读 REPEATABLE READ 快照，不加锁、不产生写入。
+      operationId: getBatchRiskHolds
+      responses:
+        '200':
+          description: 风险事项与召回通知
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BatchRiskHoldsEnvelope'}
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
@@ -1722,14 +1747,20 @@ paths:
       - {$ref: '#/components/parameters/BatchId'}
     post:
       tags: [Alerts]
-      summary: 依据检验结论放行受影响批次（FROZEN → NORMAL，Phase B PB4）
+      summary: 依据检验结论对受影响批次形成放行结论（Phase B PB4；独立评审修复）
       description: |
-        契约 v1.1 §10.2 步骤 7 / §13 步骤 10。告警归属组织的 QUALITY_MANAGER；告警必须已确认（OPEN 409 `ALERT_NOT_ACKNOWLEDGED`，
-        RESOLVED 409 `INVALID_STATE_TRANSITION`）；批次必须是本告警的受影响批次（404）且尚未放行（409）；批次当前责任组织必须是本组织（403）。
-        在批次行锁之后读取关联本告警的该批次**最新**检验报告：没有 409 `INSPECTION_REQUIRED`，不合格 409 `INSPECTION_NOT_PASSED`；
-        批次必须仍冻结。成功时经风险核心 FROZEN → NORMAL（来源 ALERT、操作人为该质量管理员、系统键 `SYS:ALERT-RELEASE:{alertId}:BATCH:{batchId}`），
-        追加 `RELEASE_BATCH` 处置动作（引用放行转换与依据报告），审计 `ALERT_RELEASE_BATCH` / `RISK_RELEASE`。交接保持原状态，
-        接收方随后决定接受。处于未处置告警中的批次不能再经人工接口解除冻结（409 `ALERT_DECISION_REQUIRED`）。锁顺序 alert → batch。
+        契约 v1.1 §4.2 / §10.2 步骤 7 / §13 步骤 10。告警归属组织的 QUALITY_MANAGER；告警必须已确认（OPEN 409 `ALERT_NOT_ACKNOWLEDGED`，
+        RESOLVED 409 `INVALID_STATE_TRANSITION`）；批次必须是本告警的受影响批次（404）且本告警尚未对其形成放行结论（409）；
+        批次当前责任组织必须是本组织（403）。在批次行锁之后读取证据：关联本告警的该批次**最新**检验报告没有 409 `INSPECTION_REQUIRED`、
+        不合格 409 `INSPECTION_NOT_PASSED`；该批次最新的检验报告（不论关联哪个告警或未关联告警）为不合格时同样 409 `INSPECTION_NOT_PASSED`；
+        批次必须仍冻结。
+
+        风险事项属于批次：本结论只解除本告警对该批次的风险事项。同一批次仍有其他未处置告警尚未形成放行结论，或当前冻结期由人工风险冻结开启且
+        尚未人工解除时，只追加 `RELEASE_BATCH` 动作（不引用转换），批次保持 FROZEN，响应的批次行给出 `pendingHolds`；只有解除了批次最后一个
+        风险事项的结论才经风险核心 FROZEN → NORMAL（来源 ALERT、操作人为该质量管理员、系统键 `SYS:ALERT-RELEASE:{alertId}:BATCH:{batchId}`），
+        动作引用该转换并审计 `RISK_RELEASE`；审计 `ALERT_RELEASE_BATCH` 总是写入。交接保持原状态，接收方在批次恢复正常后才能接受。
+        处于未处置告警中的批次不能再经人工接口解除冻结（409 `ALERT_DECISION_REQUIRED`）。锁顺序 alert → batch，
+        风险事项在批次行锁下读取（创建与解除风险事项的路径都先锁批次行）。
       operationId: releaseAlertBatch
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -1741,7 +1772,7 @@ paths:
             schema: {$ref: '#/components/schemas/AlertReleaseRequest'}
       responses:
         '200':
-          description: 放行后（或幂等重放）的告警详情
+          description: 形成放行结论后（或幂等重放）的告警详情；批次仍被其他风险事项冻结时 `currentRiskStatus = FROZEN` 且给出 `pendingHolds`
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AlertEnvelope'}
@@ -1757,8 +1788,8 @@ paths:
       tags: [Alerts]
       summary: 形成告警处置结论（ACKNOWLEDGED → RESOLVED，Phase B PB4）
       description: |
-        告警归属组织的 QUALITY_MANAGER；告警必须处于 ACKNOWLEDGED；每个受影响批次都必须已依据本告警放行或已进入模拟召回（RECALLED），
-        否则 409 `ALERT_BATCHES_PENDING`。处置结论去除首尾空白后 1..500 个字符。追加 `RESOLVE` 动作并审计 `ALERT_RESOLVE`；不改变任何批次。
+        告警归属组织的 QUALITY_MANAGER；告警必须处于 ACKNOWLEDGED；每个受影响批次都必须已由本告警形成放行结论（不论当时是否恢复正常）
+        或已进入模拟召回（RECALLED，召回同时解除该批次在全部告警中的风险事项），否则 409 `ALERT_BATCHES_PENDING`。处置结论去除首尾空白后 1..500 个字符。追加 `RESOLVE` 动作并审计 `ALERT_RESOLVE`；不改变任何批次。
       operationId: resolveAlert
       parameters:
         - {$ref: '#/components/parameters/IdempotencyKey'}
@@ -1832,8 +1863,10 @@ paths:
       tags: [Recalls]
       summary: 可见模拟召回列表
       description: |
-        按主键倒序。发起组织（任意角色）、影响范围批次的持有组织（任意角色，上游召回通知 / 溯源协查）与 PLATFORM 只读角色可见；
-        其他组织得到空列表。列表项不含影响范围与汇总；非发起组织看不到内部处置总结。只读 REPEATABLE READ 快照。
+        按主键倒序。可见范围（独立评审修复：召回通知属于批次）：发起组织（任意角色）、影响范围批次的当前责任组织（任意角色；
+        通知随批次交接转给新的当前责任组织）、召回发起时的持有组织（历史记录，只读）与 PLATFORM 只读角色；其他组织得到空列表。
+        列表项带 `viewerRelation`（OWNER / CURRENT_HOLDER / HISTORICAL_HOLDER / PLATFORM），不含影响范围与汇总；非发起组织看不到内部处置总结。
+        只读 REPEATABLE READ 快照。
       operationId: listRecalls
       responses:
         '200':
@@ -1849,8 +1882,10 @@ paths:
       tags: [Recalls]
       summary: 模拟召回详情（影响范围按查看组织过滤）
       description: |
-        发起组织与 PLATFORM 只读角色看到完整影响范围、汇总与内部处置总结；范围批次持有组织只看到案件概要与本组织持有的范围行
-        （汇总只统计这些行，不含 `resultSummary`）；其他组织 403 `ORG_SCOPE_DENIED`；不存在 404；匿名 401。
+        发起组织与 PLATFORM 只读角色看到完整影响范围（含各范围批次的当前流转 / 风险状态）、汇总与内部处置总结。其他可见组织只看到案件概要与
+        自己的范围行（汇总只统计这些行，不含 `resultSummary`）：范围批次的当前责任组织看到该批次的发起时快照与当前状态（`heldByViewer = true`）；
+        召回发起时的持有组织在批次转出后只看到发起时快照，不输出新责任组织的任何当前事实（`currentFlowStatus` / `currentRiskStatus` 省略）。
+        其他组织 403 `ORG_SCOPE_DENIED`；不存在 404；匿名 401。
       operationId: getRecall
       responses:
         '200':
@@ -2734,6 +2769,43 @@ components:
         - type: object
           properties:
             data: {$ref: '#/components/schemas/BatchRiskTransition'}
+    BatchRiskHolds:
+      type: object
+      additionalProperties: false
+      required: [batchId, riskStatus, alertHolds, manualFreezeHold, recallNotices]
+      properties:
+        batchId: {type: integer, format: int64}
+        riskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
+        alertHolds:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [alertId, alertNo, alertStatus]
+            properties:
+              alertId: {type: integer, format: int64}
+              alertNo: {type: string}
+              alertStatus: {type: string, enum: [OPEN, ACKNOWLEDGED]}
+        manualFreezeHold: {type: boolean}
+        recallNotices:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [recallId, recallNo, recallStatus, ownerOrgId, notifiedAt, depth]
+            properties:
+              recallId: {type: integer, format: int64}
+              recallNo: {type: string}
+              recallStatus: {type: string, enum: [IN_PROGRESS, CLOSED]}
+              ownerOrgId: {type: integer, format: int64}
+              notifiedAt: {type: string, format: date-time, description: 召回发起时间}
+              depth: {type: integer, minimum: 1, description: 批次在该召回正向范围中的谱系距离}
+    BatchRiskHoldsEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/SuccessEnvelope'}
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/BatchRiskHolds'}
     BatchRiskTransitionListEnvelope:
       allOf:
         - {$ref: '#/components/schemas/SuccessEnvelope'}
@@ -2838,10 +2910,21 @@ components:
         currentRiskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
         quantity: {type: number}
         unitCode: {type: string}
-        released: {type: boolean, description: 是否已依据检验结论放行（PB4）}
-        releaseTransitionId: {type: integer, format: int64}
+        released: {type: boolean, description: 本告警是否已依据检验结论对该批次形成放行结论（PB4）}
+        releaseTransitionId: {type: integer, format: int64, description: 放行结论解除了批次最后一个风险事项时的放行转换；形成结论时仍有其他风险事项则不输出}
         latestInspectionConclusion: {type: string, enum: [PASS, FAIL], description: 关联本告警的最新检验结论；没有报告时不输出}
         inspectionCount: {type: integer, minimum: 0}
+        pendingHolds:
+          type: array
+          description: 批次仍处于 FROZEN 时，除本告警外仍未解除的风险事项（只对批次当前责任组织与平台输出）
+          items:
+            type: object
+            additionalProperties: false
+            required: [type]
+            properties:
+              type: {type: string, enum: [ALERT, MANUAL_FREEZE]}
+              alertId: {type: integer, format: int64}
+              alertNo: {type: string}
     AlertAction:
       type: object
       additionalProperties: false
@@ -2851,7 +2934,7 @@ components:
         action: {type: string, enum: [ACKNOWLEDGE, RELEASE_BATCH, RESOLVE]}
         orgId: {type: integer, format: int64}
         batchId: {type: integer, format: int64, description: RELEASE_BATCH 的放行批次}
-        riskTransitionId: {type: integer, format: int64, description: RELEASE_BATCH 的放行风险转换}
+        riskTransitionId: {type: integer, format: int64, description: RELEASE_BATCH 解除批次最后一个风险事项时的放行风险转换（V17 起可空）}
         inspectionReportId: {type: integer, format: int64, description: RELEASE_BATCH 的依据检验报告}
         actorUserId: {type: integer, format: int64}
         note: {type: string}
@@ -3020,7 +3103,7 @@ components:
     RecallScopeItem:
       type: object
       additionalProperties: false
-      description: 影响范围行：发起时快照 + 批次当前流转 / 风险状态
+      description: 影响范围行：发起时快照；当前流转 / 风险状态只对发起组织、平台与该批次的当前责任组织输出
       required: [batchId, traceBatchNo, scopeRole, depth, holderOrgId, flowStatus, riskStatusBefore, action, declaredQuantity, remainingQuantity, soldQuantity, unitCode, publicCodeActive]
       properties:
         batchId: {type: integer, format: int64}
@@ -3031,8 +3114,14 @@ components:
         holderOrgId: {type: integer, format: int64, description: 发起时的持有（责任）组织}
         flowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
         riskStatusBefore: {$ref: '#/components/schemas/BatchRiskStatus'}
-        currentFlowStatus: {$ref: '#/components/schemas/BatchFlowStatus'}
-        currentRiskStatus: {$ref: '#/components/schemas/BatchRiskStatus'}
+        currentFlowStatus:
+          allOf:
+            - {$ref: '#/components/schemas/BatchFlowStatus'}
+          description: 当前流转状态；历史持有方查看已转出批次时省略
+        currentRiskStatus:
+          allOf:
+            - {$ref: '#/components/schemas/BatchRiskStatus'}
+          description: 当前风险状态；历史持有方查看已转出批次时省略
         action: {type: string, enum: [RECALLED, NOTIFY_HOLDER, ALREADY_RECALLED, TRACE_ONLY]}
         riskTransitionId: {type: integer, format: int64, description: action = RECALLED 时的召回风险转换}
         declaredQuantity: {type: number}
@@ -3044,6 +3133,7 @@ components:
         openTransferStatus: {type: string, enum: [DRAFT, PENDING, QUARANTINED]}
         shipmentStatus: {type: string}
         publicCodeActive: {type: boolean}
+        heldByViewer: {type: boolean, description: 查看组织当前负责该批次（召回通知需要由它处置）}
     Recall:
       type: object
       additionalProperties: false
@@ -3063,6 +3153,7 @@ components:
         publicDisposition: {type: string, enum: [DESTROYED, RETURNED]}
         resultSummary: {type: string, description: 内部处置总结，只对发起组织与平台输出}
         version: {type: integer, format: int64}
+        viewerRelation: {type: string, enum: [OWNER, CURRENT_HOLDER, HISTORICAL_HOLDER, PLATFORM], description: 查看组织与召回的关系}
         summary: {$ref: '#/components/schemas/RecallSummary'}
         scope:
           type: array
