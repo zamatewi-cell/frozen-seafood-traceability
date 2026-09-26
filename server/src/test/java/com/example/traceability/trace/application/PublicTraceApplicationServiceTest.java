@@ -585,6 +585,10 @@ class PublicTraceApplicationServiceTest {
             assertThat(resp.riskStatus()).isEqualTo("NORMAL");
             assertThat(resp.recallNotice()).isNull();
             assertThat(resp.temperatureSummary().result()).isEqualTo("INSUFFICIENT_DATA");
+            // PB2 之后企业端可能已有在途温度登记：说明只声明公开页面不展示测量明细、不构成合规依据，不再断言“暂无记录”
+            assertThat(resp.temperatureSummary().ruleNote())
+                    .isEqualTo("公开页面不展示冷链温度测量明细；本项目未接入实时温控采集，不构成本项目温控合规依据。")
+                    .doesNotContain("暂无有效温控监测记录");
             assertThat(resp.timeline()).hasSize(1);
             // 单批次（无上游）：谱系恰好一个 TARGET 节点、零条边
             assertThat(resp.lineage().nodes()).hasSize(1);
