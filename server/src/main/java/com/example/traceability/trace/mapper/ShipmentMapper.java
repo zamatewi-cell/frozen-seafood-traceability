@@ -3,10 +3,12 @@ package com.example.traceability.trace.mapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.example.traceability.trace.domain.Shipment;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Options;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
 
@@ -34,6 +36,19 @@ public interface ShipmentMapper extends BaseMapper<Shipment> {
      */
     @Select("SELECT * FROM `shipment` WHERE id = #{id} AND is_deleted = 0 FOR SHARE")
     Shipment selectByIdForShare(@Param("id") Long id);
+
+    /**
+     * 当前读（FOR SHARE）运输任务最新一条在途温度记录的测量时间；没有记录时返回 null（Phase B PB2）。
+     * <p>
+     * 只能在已持有该运输任务行锁（FOR UPDATE）之后调用，保持 shipment → temperature_record 的锁顺序：温度登记同样先锁
+     * 运输任务行再插入记录，因此持锁后读到的最新测量时间稳定。必须是锁定 / 当前读而不是普通一致性读：确认到达在取锁之前的
+     * 幂等预读已在 REPEATABLE READ 下建立读视图，普通读会看不到等待行锁期间已提交的温度记录。
+     * </p>
+     */
+    @Select("SELECT measured_at FROM temperature_record WHERE shipment_id = #{shipmentId} AND is_deleted = 0 "
+            + "ORDER BY measured_at DESC, id DESC LIMIT 1 FOR SHARE")
+    @Options(flushCache = Options.FlushCachePolicy.TRUE)
+    LocalDateTime selectLatestTemperatureMeasuredAtForShare(@Param("shipmentId") Long shipmentId);
 
     /**
      * 在发送方、承运方或接收方组织范围内查询运输任务；第三方组织返回 null。

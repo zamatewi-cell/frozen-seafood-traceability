@@ -5,6 +5,7 @@ import com.example.traceability.quality.application.ShipmentTemperatureService;
 import com.example.traceability.quality.domain.TemperatureEvaluation;
 import com.example.traceability.quality.mapper.TemperatureRecordMapper;
 import com.example.traceability.trace.domain.DataSource;
+import com.example.traceability.trace.mapper.ShipmentMapper;
 import org.apache.ibatis.annotations.Options;
 import org.apache.ibatis.annotations.Select;
 import org.junit.jupiter.api.DisplayName;
@@ -34,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 扫描全部生产 SQL 所在位置（{@code src/main/java} 与 {@code src/main/resources} 中的非迁移 XML / SQL）：
  * 任何对 {@code temperature_record} 的 UPDATE / DELETE、条件构造器写入或越权注入温度记录 mapper 都会让本测试失败。
  * 同时固定 PB2 的范围：温度服务不调用风险核心、不写批次风险状态、不生成 TraceEvent、不引用 Alert；
- * Java 侧开放的数据来源与判定取值与 V13 的 CHECK 约束严格一致；幂等复读真正访问数据库，
+ * Java 侧开放的数据来源与判定取值与 V13 的 CHECK 约束严格一致；幂等复读与到达的最新测量时间读取都真正访问数据库，
  * 且唯一的锁定读只锁温度记录行，不锁规则表。
  * </p>
  */
@@ -183,7 +184,7 @@ class TemperatureRecordAppendOnlyContainmentTest {
     }
 
     @Test
-    @DisplayName("幂等复读清空会话缓存；锁定读只锁温度记录行（FOR UPDATE OF tr）")
+    @DisplayName("幂等复读与到达的最新测量时间读取都清空会话缓存；锁定读只锁温度记录行（FOR UPDATE OF tr / FOR SHARE）")
     void lockingReadsAreScopedAndUncached() throws NoSuchMethodException {
         Method reRead = TemperatureRecordMapper.class.getDeclaredMethod("selectByOrgIdAndIdempotencyKey", Long.class, String.class);
         assertThat(reRead.getAnnotation(Options.class).flushCache()).isEqualTo(Options.FlushCachePolicy.TRUE);
@@ -191,5 +192,10 @@ class TemperatureRecordAppendOnlyContainmentTest {
         Method forUpdate = TemperatureRecordMapper.class.getDeclaredMethod("selectByOrgIdAndIdempotencyKeyForUpdate", Long.class, String.class);
         String forUpdateSql = String.join(" ", forUpdate.getAnnotation(Select.class).value());
         assertThat(forUpdateSql).contains("FOR UPDATE OF tr").doesNotContain("FOR SHARE");
+
+        Method latest = ShipmentMapper.class.getDeclaredMethod("selectLatestTemperatureMeasuredAtForShare", Long.class);
+        String latestSql = String.join(" ", latest.getAnnotation(Select.class).value());
+        assertThat(latestSql).contains("FROM temperature_record").contains("ORDER BY measured_at DESC, id DESC").endsWith("FOR SHARE");
+        assertThat(latest.getAnnotation(Options.class).flushCache()).isEqualTo(Options.FlushCachePolicy.TRUE);
     }
 }

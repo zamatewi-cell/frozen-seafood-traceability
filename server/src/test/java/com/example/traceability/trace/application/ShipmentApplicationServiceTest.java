@@ -37,6 +37,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -368,6 +369,45 @@ class ShipmentApplicationServiceTest {
         verify(traceEventService).appendShipmentArrivalEvent(any(), eq(1009L), eq("TB-1009"), eq(5009L), eq(301L), any());
         verify(transferMapper, never()).updateByIdAndVersion(any(), any(), any(), any(), any());
         verify(batchMapper, never()).updateOrgIdByIdAndVersion(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("到达（PB2）：到达时间早于最新在途温度测量时间时 422 INVALID_BUSINESS_TIME；先锁运输任务再当前读，不更新、不生成事件")
+    void arrive_rejectsUnloadedBeforeLatestTemperatureMeasurement() {
+        LocalDateTime latest = LocalDateTime.now(ZoneOffset.UTC).minusMinutes(10).truncatedTo(ChronoUnit.SECONDS);
+        when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.IN_TRANSIT));
+        when(shipmentMapper.selectLatestTemperatureMeasuredAtForShare(SHIPMENT_ID)).thenReturn(latest);
+
+        assertThatThrownBy(() -> service.arriveShipment(SHIPMENT_ID,
+                new ShipmentArriveRequest(latest.minusNanos(1_000_000).atOffset(ZoneOffset.UTC), 3L), "idem-arrive-00000010", carrier))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(e -> {
+                    BusinessException be = (BusinessException) e;
+                    assertThat(be.getCode()).isEqualTo("INVALID_BUSINESS_TIME");
+                    assertThat(be.getStatus().value()).isEqualTo(422);
+                });
+
+        InOrder order = inOrder(shipmentMapper);
+        order.verify(shipmentMapper).selectByIdForUpdate(SHIPMENT_ID);
+        order.verify(shipmentMapper).selectLatestTemperatureMeasuredAtForShare(SHIPMENT_ID);
+        verify(shipmentMapper, never()).updateLifecycleByIdAndVersion(any(), any(), any());
+        verify(traceEventService, never()).appendShipmentArrivalEvent(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("到达（PB2）：到达时间等于最新在途温度测量时间时允许确认到达")
+    void arrive_allowsUnloadedEqualToLatestTemperatureMeasurement() {
+        LocalDateTime latest = LocalDateTime.now(ZoneOffset.UTC).minusMinutes(10).truncatedTo(ChronoUnit.SECONDS);
+        when(shipmentMapper.selectByIdForUpdate(SHIPMENT_ID)).thenReturn(shipment(ShipmentStatus.IN_TRANSIT));
+        when(shipmentMapper.selectLatestTemperatureMeasuredAtForShare(SHIPMENT_ID)).thenReturn(latest);
+        when(transferMapper.selectByShipmentId(SHIPMENT_ID)).thenReturn(List.of(transfer(5012L, 1012L, TransferStatus.PENDING)));
+        when(batchMapper.selectByIdsIgnoreTenant(any())).thenReturn(List.of(batch(1012L)));
+        when(shipmentMapper.updateLifecycleByIdAndVersion(any(Shipment.class), eq("IN_TRANSIT"), eq(3L))).thenReturn(1);
+
+        service.arriveShipment(SHIPMENT_ID, new ShipmentArriveRequest(latest.atOffset(ZoneOffset.UTC), 3L), "idem-arrive-00000011", carrier);
+
+        verify(shipmentMapper).updateLifecycleByIdAndVersion(any(Shipment.class), eq("IN_TRANSIT"), eq(3L));
+        verify(traceEventService).appendShipmentArrivalEvent(any(), eq(1012L), eq("TB-1012"), eq(5012L), eq(301L), any());
     }
 
     @Test

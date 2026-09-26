@@ -575,6 +575,8 @@ public class ShipmentApplicationService {
      * 承运商确认物理到达 (POST /api/v1/shipments/{id}/arrive)，IN_TRANSIT → DELIVERED。
      * <p>
      * 为每个 Batch 在同一事务内自动生成且仅生成一条 ARRIVAL；不修改任何交接状态，不改变 Batch 当前责任组织。
+     * 到达时间不能早于装载发运时间，也不能早于已登记的最新在途温度测量时间（Phase B PB2，相等允许）。
+     * 锁顺序：shipment → temperature_record（当前读）。
      * </p>
      */
     @Transactional
@@ -614,6 +616,17 @@ public class ShipmentApplicationService {
                     "INVALID_BUSINESS_TIME",
                     "业务时间不合法",
                     "到达时间不能早于装载发运时间 (" + shipment.getLoadedAt().atOffset(ZoneOffset.UTC) + ")"
+            );
+        }
+        // PB2：到达时间不能早于已登记的最新在途温度测量时间（相等允许）。已持有运输任务行锁，温度登记同样先锁运输任务，
+        // 因此以当前读（FOR SHARE）读取的最新测量时间稳定；取锁前的幂等预读已建立 REPEATABLE READ 读视图，不能用普通读
+        LocalDateTime latestMeasuredAt = shipmentMapper.selectLatestTemperatureMeasuredAtForShare(shipmentId);
+        if (latestMeasuredAt != null && unloadedAtUtc.isBefore(latestMeasuredAt)) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "INVALID_BUSINESS_TIME",
+                    "业务时间不合法",
+                    "到达时间不能早于已登记的最新在途温度测量时间 (" + latestMeasuredAt.atOffset(ZoneOffset.UTC) + ")"
             );
         }
 
