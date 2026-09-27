@@ -266,7 +266,7 @@ describe('AlertDetailView quality decisions (PB4)', () => {
       }
     })
     const view = await mountAt('/app/alerts/5001')
-    expect(view.get('[data-testid="alert-batch-disposition"]').text()).toBe('最新检验合格：可放行')
+    expect(view.get('[data-testid="alert-batch-disposition"]').text()).toBe('本告警关联检验合格：放行时还将核对批次最新检验报告')
     expect(view.find('[data-testid="alert-resolve"]').exists()).toBe(false)
     await view.get('[data-testid="alert-release-open-21"]').trigger('click')
     await view.get('[data-testid="field-alert-release-note"]').setValue('复检合格')

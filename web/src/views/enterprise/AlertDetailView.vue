@@ -99,7 +99,8 @@ function dispositionOf(b: AlertAffectedBatch): string {
   if (b.released && b.currentRiskStatus === 'FROZEN') return `已记录本告警的放行结论；批次仍被${holdsText(b)}冻结`
   if (b.released) return '已依据检验结论放行'
   if (b.latestInspectionConclusion === 'FAIL') return '最新检验不合格：可拒收或发起模拟召回'
-  if (b.latestInspectionConclusion === 'PASS') return '最新检验合格：可放行'
+  // 这里只有关联本告警的最新检验结论；放行时服务端还要求批次的最新检验报告（不论是否关联本告警）不是不合格
+  if (b.latestInspectionConclusion === 'PASS') return '本告警关联检验合格：放行时还将核对批次最新检验报告'
   return '待提交检验证据'
 }
 
@@ -123,7 +124,7 @@ const nextStep = computed<string | null>(() => {
     case 'ACKNOWLEDGED':
       if (canResolve.value) return '全部受影响批次已放行或已进入召回：请填写处置结论。'
       return isOwner.value
-        ? '异常已确认：请为受影响批次提交检验证据；最新检验合格的批次可放行，不合格的可由接收方拒收或发起模拟召回。'
+        ? '异常已确认：请为受影响批次提交检验证据；关联本告警的检验合格、且批次最新检验报告不是不合格时可放行，不合格的可由接收方拒收或发起模拟召回。'
         : '发货方质量管理员已确认异常并负责调查处置；隔离收货方可以为隔离批次提交检验证据。'
     case 'RESOLVED':
       return '告警已形成处置结论。'

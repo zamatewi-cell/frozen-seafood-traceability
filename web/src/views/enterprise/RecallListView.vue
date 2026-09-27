@@ -35,13 +35,16 @@ async function load() {
   }
 }
 
-/** 与本组织的关系（服务端按批次当前责任组织与发起时快照计算）。 */
+/**
+ * 与本组织的关系（服务端按批次当前责任组织与发起时快照计算）。当前负责方只标明关系、不断言“待处置”：
+ * 本组织负责的可能只是追溯祖先行，案件也可能已结案；具体处置以召回详情为准。
+ */
 function relationLabel(r: Recall): string {
   switch (r.viewerRelation) {
     case 'OWNER':
       return '本组织发起'
     case 'CURRENT_HOLDER':
-      return '本组织当前负责范围批次（召回通知，待处置）'
+      return '本组织当前负责范围批次'
     case 'HISTORICAL_HOLDER':
       return '本组织曾持有范围批次（历史快照，只读）'
     case 'PLATFORM':

@@ -17,7 +17,8 @@ import RecallStartForm from '@/components/enterprise/RecallStartForm.vue'
  * 风险转换只改变风险状态：不改变数量、当前责任组织与流转状态，不生成追溯事件；冻结期间的业务阻断由服务端既有守卫执行。
  * 这是教学实训中的模拟质量处置，不代表真实的产品扣留、安全判定或监管措施。服务端是最终权限边界。
  * 独立评审修复：风险事项与召回通知属于批次——当前责任组织看到仍未解除的告警风险事项、人工风险冻结与上游召回通知；
- * 仍有未处置告警时人工解除冻结入口隐藏（需先在告警中依据检验结论形成放行结论）。
+ * 仍有未处置告警时人工解除冻结入口隐藏（需先在告警中依据检验结论形成放行结论）；风险事项尚未读取成功时同样不提供该入口，
+ * 并显示读取失败与重试（不把未知当作“没有未处置告警”）。
  */
 type Action = 'FREEZE' | 'RELEASE'
 
@@ -50,6 +51,8 @@ const writeError = ref('')
 const writer = useIdempotentWrite()
 let controller: AbortController | null = null
 const holds = ref<BatchRiskHolds | null>(null)
+type HoldsState = 'idle' | 'loading' | 'loaded' | 'error'
+const holdsState = ref<HoldsState>('idle')
 
 /** 当前责任组织与平台只读角色可以查看批次的风险事项与召回通知。 */
 const canSeeHolds = computed(() => Boolean(props.user
@@ -58,7 +61,10 @@ const pendingAlertHolds = computed(() => holds.value?.alertHolds ?? [])
 const openRecallNotices = computed(() => (props.batch.riskStatus === 'RECALLED' ? [] : holds.value?.recallNotices ?? []))
 const canFreeze = computed(() => canFreezeBatch(props.user, props.batch))
 const canRecall = computed(() => canStartRecall(props.user, props.batch))
-const canRelease = computed(() => canReleaseBatch(props.user, props.batch) && pendingAlertHolds.value.length === 0)
+/** 只有成功读取到本批次的风险事项、且没有未处置告警时，才提供人工解除冻结入口（服务端仍是最终守卫）。 */
+const holdsLoadedForBatch = computed(() => holdsState.value === 'loaded' && holds.value?.batchId === props.batch.id)
+const canRelease = computed(() => canReleaseBatch(props.user, props.batch)
+  && holdsLoadedForBatch.value && pendingAlertHolds.value.length === 0)
 const confirmText = computed(() => mode.value === 'FREEZE'
   ? '确认风险冻结？冻结后本批次暂停加工 / 拆分、交接、终端销售、冷库仓储登记与首次激活公开追溯码；数量、当前责任组织与流转状态保持不变。'
   : props.batch.flowStatus === 'CLOSED'
@@ -70,6 +76,8 @@ async function load() {
   const current = new AbortController()
   controller = current
   loadState.value = 'loading'
+  holds.value = null
+  holdsState.value = canSeeHolds.value ? 'loading' : 'idle'
   try {
     const result = await listRiskTransitions(props.batch.id, current.signal)
     if (current.signal.aborted) return
@@ -81,18 +89,17 @@ async function load() {
     transitions.value = []
     loadState.value = err instanceof ApiError && err.status === 403 ? 'forbidden' : 'error'
   }
-  if (!canSeeHolds.value) {
-    holds.value = null
-    return
-  }
+  if (!canSeeHolds.value) return
   try {
     const result = await getBatchRiskHolds(props.batch.id, current.signal)
     if (current.signal.aborted) return
     holds.value = result
+    holdsState.value = 'loaded'
     props.resolveOrgs?.(result.recallNotices.map((n) => n.ownerOrgId))
-  } catch {
-    // 风险事项只是提示：读取失败时不影响风险面板其余功能，服务端仍是最终的放行守卫
-    if (!current.signal.aborted) holds.value = null
+  } catch (err: unknown) {
+    if (current.signal.aborted || (err instanceof ApiError && err.status === 401)) return
+    // 读取失败时不能确认是否仍有未处置告警：不提供人工解除冻结入口，其余功能不受影响；服务端仍是最终的放行守卫
+    holdsState.value = 'error'
   }
 }
 
@@ -201,6 +208,11 @@ onBeforeUnmount(() => controller?.abort())
         </li>
       </ul>
       <p class="ent-muted">批次只有在全部风险事项都形成结论后才恢复正常；任何一个事项的结论都不会单独解除其他事项。</p>
+    </div>
+
+    <div v-if="holdsState === 'error'" class="ent-state error" data-testid="risk-holds-error">
+      风险事项与召回通知加载失败{{ canReleaseBatch(user, batch) ? '：确认没有未处置告警前暂不提供人工解除冻结' : '' }}
+      <button type="button" class="ent-button" data-testid="risk-holds-retry" @click="load">重试</button>
     </div>
 
     <div v-if="openRecallNotices.length > 0" class="ent-flash warning" role="status" data-testid="risk-recall-notices">

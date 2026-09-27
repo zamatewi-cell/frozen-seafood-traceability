@@ -98,6 +98,33 @@ describe('BatchRiskPanel risk holds (review fix)', () => {
     expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(true)
   })
 
+  it('does not offer manual release while the risk holds cannot be read, and offers it after a successful retry', async () => {
+    let failures = 1
+    const holds = { batchId: 21, riskStatus: 'FROZEN', alertHolds: [], manualFreezeHold: true, recallNotices: [] }
+    const { calls } = batchBackend(processorQm, batch(), holds, {
+      'GET /api/v1/batches/21/risk-holds': () => (failures-- > 0
+        ? { status: 500, body: { status: 500, code: 'INTERNAL_ERROR', title: '服务器错误' } }
+        : { status: 200, body: envelope(holds) })
+    })
+    const view = await mountAt('/app/batches/21')
+    expect(view.get('[data-testid="risk-holds-error"]').text()).toContain('确认没有未处置告警前暂不提供人工解除冻结')
+    expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(false)
+    expect(view.find('[data-testid="risk-history-empty"]').exists()).toBe(true)
+
+    await view.get('[data-testid="risk-holds-retry"]').trigger('click')
+    await flushPromises()
+    expect(calls.filter((c) => c.path.endsWith('/risk-holds'))).toHaveLength(2)
+    expect(view.find('[data-testid="risk-holds-error"]').exists()).toBe(false)
+    expect(view.get('[data-testid="risk-hold-manual"]').text()).toContain('人工解除')
+    expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(true)
+  })
+
+  it('does not offer manual release when the holds answer belongs to another batch', async () => {
+    batchBackend(processorQm, batch(), { batchId: 22, riskStatus: 'FROZEN', alertHolds: [], manualFreezeHold: true, recallNotices: [] })
+    const view = await mountAt('/app/batches/21')
+    expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(false)
+  })
+
   it('shows upstream recall notices to the current responsible organization with the next step', async () => {
     batchBackend(processorQm, batch({ riskStatus: 'NORMAL' }), {
       batchId: 21, riskStatus: 'NORMAL', alertHolds: [], manualFreezeHold: false,
@@ -230,6 +257,6 @@ describe('recall notices follow the batch (review fix)', () => {
     ])
     const view = await mountAt('/app/recalls')
     const labels = view.findAll('[data-testid="recall-relation"]').map((c) => c.text())
-    expect(labels).toEqual(['本组织当前负责范围批次（召回通知，待处置）', '本组织曾持有范围批次（历史快照，只读）'])
+    expect(labels).toEqual(['本组织当前负责范围批次', '本组织曾持有范围批次（历史快照，只读）'])
   })
 })

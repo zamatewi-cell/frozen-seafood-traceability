@@ -50,6 +50,11 @@ async function installFakeAuthBackend(page: Page, currentUser: typeof user = use
   })
   // PB1 风险状态面板：未单独声明时，批次详情的风险转换历史为空
   await page.route('**/api/v1/batches/*/risk-transitions', (route) => json(route, 200, { data: [], meta }))
+  // 独立评审修复：批次风险事项（当前责任组织可见）；未单独声明时没有未解除的告警事项、人工冻结事项与召回通知
+  await page.route('**/api/v1/batches/*/risk-holds', (route) => {
+    const batchId = Number(/\/batches\/(\d+)\/risk-holds/.exec(route.request().url())?.[1])
+    return json(route, 200, { data: { batchId, riskStatus: 'FROZEN', alertHolds: [], manualFreezeHold: false, recallNotices: [] }, meta })
+  })
   // PB4：批次详情的检验报告面板（当前责任组织可见）
   await page.route('**/api/v1/batches/*/inspection-reports', (route) => json(route, 200, { data: [], meta }))
   return state
