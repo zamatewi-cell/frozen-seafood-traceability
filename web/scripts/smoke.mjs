@@ -17,7 +17,13 @@
  *    零售企业接受后在批次详情把 B2 售 200 + 400、B3 售 360 至售罄；B2 首次销售后在同一会话内经真实 API 探测
  *    交接 / 批次操作 / 非门店 / 停用门店 / 他组织门店 / 超卖 / 人工 SALE 均被拒绝；结束后查询 MySQL 验证
  *    责任组织、售罄关闭、Sale 行与 SALE 事件一一对应、无超卖、无重复事件、探测零写入；
- * 10. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
+ * 10. Phase B 异常闭环（PB3 → PB6）：来源企业经真实 API 把 X1 / X2 装入运输任务 SX 发往加工企业（装载时间回溯 100 分钟），
+ *     浏览器中承运商登记在途温度，两个持续超温片段形成告警 A1（自动冻结）与 A2（快照），加工企业隔离收货、提交检验证据，
+ *     来源质量管理员依据 A1 放行 X1 后 X1 仍被 A2 冻结、依据 A2 放行后才恢复正常，对 X2 发起模拟召回，加工企业接受 X1 / 拒收 X2，
+ *     两个告警形成处置结论、召回以“退回”关闭，匿名消费者看到模拟召回处置进展；结束后查询 MySQL 验证全部 Phase B 事实，
+ *     并确认 Phase A 批次完全不受影响；随后加工企业把 X1 加工为 X1P 交给零售企业 RA，召回 X1（通知 RA），RA 再把 X1P 交给零售企业 RB：
+ *     浏览器中 RB 看到并处置召回通知，RA 只看到发起时快照，结束后查询 MySQL 验证召回通知事实；
+ * 11. 无论成功失败都停止后端、删除 schema 并撤销授权，验证残留为 0。
  *
  * 密码、pepper、Cookie 与 CSRF 凭据只在进程环境与内存中传递，从不打印。
  * 例外：SMOKE_KEEP=true 手工验收模式只准备 Slice 2 / Slice 5 基础资料，打印一次四个临时账号供人工在真实浏览器中操作，
@@ -274,7 +280,8 @@ async function seedBusinessData(suffix, master, passwordA, passwordB, passwordQm
       AND to_status = 'FROZEN' AND source_type = 'MANUAL' AND org_id = ${master.orgA};`, { database: schema })
   if (frozenLedger !== '1') throw new Error(`Phase 0 冻结夹具未经 PB1 接口写入风险转换台账: ${frozenLedger}`)
 
-  // 召回（PB5）与“关闭”夹具仍无对应业务接口：仅在隔离 schema 中直接写入以验证展示与筛选
+  // Phase 0 展示 / 筛选回归夹具：来源批次无法单独关闭，CLOSED + RECALLED 仅在隔离 schema 中直接写入；
+  // 真实的模拟召回写入（PB5 接口经风险核心）由 Phase B 异常闭环验收覆盖
   mysql(`
     UPDATE batch SET flow_status = 'CLOSED', risk_status = 'RECALLED' WHERE id = ${recalled.id};
     UPDATE batch SET flow_status = 'CLOSED' WHERE id = ${closed.id};
@@ -969,6 +976,308 @@ function slice6Snapshot(ids) {
       (SELECT COUNT(*) FROM batch_risk_transition), (SELECT COUNT(*) FROM temperature_record), (SELECT COUNT(*) FROM alert);`, { database: schema })
 }
 
+/**
+ * Phase B 基础资料：来源企业质量管理员账号（告警归属组织 = 运输任务发货方，负责确认、放行、召回与关闭）；
+ * 只准备账号，不预造任何告警 / 检验 / 召回。
+ */
+function seedPhaseBMasterData(suffix, password, slice2) {
+  mysql(`
+    START TRANSACTION;
+    SET @qm = (SELECT id FROM role WHERE role_code = 'QUALITY_MANAGER');
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (${slice2.sourceOrgId}, 'pb_src_qm_${suffix}', 'PhaseB来源质量管理员', ${sqlText(springPbkdf2(password))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @qm);
+    COMMIT;
+  `, { database: schema })
+  const [sourcePortSiteId, processorFactorySiteId] = mysql(`SELECT
+      (SELECT id FROM site WHERE org_id = ${slice2.sourceOrgId} AND site_no = 'S2-PORT'),
+      (SELECT id FROM site WHERE org_id = ${slice2.processorOrgId} AND site_no = 'S2-FACTORY');`, { database: schema }).split('\t').map(Number)
+  return { sourceQmUsername: `pb_src_qm_${suffix}`, sourcePortSiteId, processorFactorySiteId }
+}
+
+/**
+ * Phase B 夹具（全部经真实 API：Session + CSRF + 幂等键）：来源企业创建并激活 X1 300kg / X2 200kg 来源批次并激活公开追溯码，
+ * 发起到加工企业的交接 T1 / T2，装入同一运输任务 SX 并提交；承运商以 100 分钟前的装载时间确认发运
+ * （界面发运按钮固定使用当前时间；两个持续超温片段各需要已测区间达到夹具规则允许的 1800 秒）。之后的异常闭环全部在浏览器中完成。
+ */
+async function seedPhaseBFixture(productId, slice2, phaseB, passwords) {
+  const idem = () => ({ 'Idempotency-Key': randomUUID() })
+  const source = new ApiSession()
+  await source.login(slice2.usernames.source, passwords.source)
+  const base = { productId, unitCode: 'kg', originType: 'DOMESTIC_CAPTURE', originText: '东海舟山渔场（Phase B 异常闭环验收）', captureDate: '2026-09-24', shelfLifeDays: 365 }
+  const x1 = await createBatch(source, { ...base, externalBatchNo: 'PB-X1', quantity: 300 }, true)
+  const x2 = await createBatch(source, { ...base, externalBatchNo: 'PB-X2', quantity: 200 }, true)
+  const x1Code = await source.write('POST', `/api/v1/batches/${x1.id}/public-trace-code/activate`, undefined, idem())
+  const x2Code = await source.write('POST', `/api/v1/batches/${x2.id}/public-trace-code/activate`, undefined, idem())
+  const t1 = await source.write('POST', '/api/v1/transfers', { batchId: x1.id, receiverOrgId: slice2.processorOrgId }, idem())
+  const t2 = await source.write('POST', '/api/v1/transfers', { batchId: x2.id, receiverOrgId: slice2.processorOrgId }, idem())
+  const shipment = await source.write('POST', '/api/v1/shipments', {
+    carrierOrgId: slice2.carrierOrgId, originSiteId: phaseB.sourcePortSiteId, destinationSiteId: phaseB.processorFactorySiteId,
+    vehicleOrContainerNo: '浙L·冷PB001'
+  }, idem())
+  for (const t of [t1, t2]) {
+    const current = await source.call('GET', `/api/v1/transfers/${t.id}`)
+    await source.write('POST', `/api/v1/shipments/${shipment.id}/transfers`, { transferId: t.id, expectedTransferVersion: current.version }, idem())
+    const bound = await source.call('GET', `/api/v1/transfers/${t.id}`)
+    await source.write('POST', `/api/v1/transfers/${t.id}/submit`, { expectedVersion: bound.version }, idem())
+  }
+  const carrier = new ApiSession()
+  await carrier.login(slice2.usernames.carrier, passwords.carrier)
+  const planned = await carrier.call('GET', `/api/v1/shipments/${shipment.id}`)
+  const loadedAt = new Date(Math.floor((Date.now() - 100 * 60_000) / 1000) * 1000).toISOString()
+  const dispatched = await carrier.write('POST', `/api/v1/shipments/${shipment.id}/dispatch`, { loadedAt, expectedVersion: planned.version }, idem())
+  if (dispatched.status !== 'IN_TRANSIT') throw new Error(`Phase B 运输任务未进入在途: ${dispatched.status}`)
+  return {
+    shipmentId: shipment.id, loadedAt: dispatched.loadedAt, x1Id: x1.id, x2Id: x2.id, x1TraceBatchNo: x1.traceBatchNo, x2TraceBatchNo: x2.traceBatchNo,
+    x1PublicId: x1Code.publicId, x2PublicId: x2Code.publicId, t1Id: t1.id, t2Id: t2.id
+  }
+}
+
+/** Phase B 前快照：Phase A 批次行、全部追溯事件行数与 Phase B 批次的追溯事件行数。 */
+function phaseBSnapshot(phaseAIds, fixture) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const phaseA = [phaseAIds.b0Id, phaseAIds.b1Id, phaseAIds.b2Id, phaseAIds.b3Id].join(',')
+  return q(`SELECT
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', id, version, org_id, quantity, flow_status, risk_status) ORDER BY id) FROM batch WHERE id IN (${phaseA})),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', id, status, version, org_id) ORDER BY id) FROM public_trace_code WHERE batch_id IN (${phaseA})),
+      (SELECT COUNT(*) FROM trace_event),
+      (SELECT COUNT(*) FROM trace_event WHERE batch_id IN (${fixture.x1Id}, ${fixture.x2Id}));`).split('\t')
+}
+
+/**
+ * Phase B 数据库事实（PB3 → PB6，含独立评审修复）：
+ * - SX 恰好 7 条温度记录（NORMAL / HIGH / HIGH / HIGH / NORMAL / HIGH / HIGH），恰好 2 条 TEMP_OVER_UPPER 告警（来源企业归属，
+ *   各自的片段首条 / 达到时长记录正确，已持续 1860 秒，规则快照 1800 秒），最终都 RESOLVED，确认 / 处置人为来源质量管理员；
+ * - 受影响批次快照：A1 自动冻结 X1 / X2，A2 创建时 X1 / X2 已冻结只快照；
+ * - 处置动作：A1 = ACKNOWLEDGE → RELEASE_BATCH(X1，依据合格报告，无放行转换：A2 仍未解除) → RESOLVE；
+ *   A2 = ACKNOWLEDGE → RELEASE_BATCH(X1，依据合格报告，引用放行转换：解除了最后一个风险事项) → RESOLVE；
+ * - 风险台账：X1 = A1 系统冻结 → 质量管理员放行（来源 A2）；X2 = A1 系统冻结 → 模拟召回 RECALLED；
+ * - T1 经隔离后 ACCEPTED（实收 300，隔离场所为加工企业冷库），X1 转为加工企业负责、ACTIVE + NORMAL；
+ *   T2 经隔离后 REJECTED，X2 仍由来源企业负责、ACTIVE + RECALLED、数量不变；
+ * - 检验报告 3 条（隔离接收方、加工企业、关联告警与隔离交接）：A1 X1 PASS、A1 X2 FAIL、A2 X1 PASS；
+ * - 召回 1 条（来源企业、来源告警 A1、CLOSED、公开处置 RETURNED），范围快照 1 行（SEED X2 RECALLED，隔离中交接与已到达运输、公开码启用）；
+ * - 公开追溯码不变更为 RECALLED 码状态、交接不换码；Phase B 动作只产生到达事件（X1 / X2 各 SOURCE / TRANSPORT / ARRIVAL 一条）；
+ * - Phase A 批次与公开码完全不受影响。
+ */
+function verifyPhaseBDatabase(slice2, phaseB, fixture, before) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const qmId = userIdOf(phaseB.sourceQmUsername)
+  const processorQmId = userIdOf(slice2.usernames.processorQm)
+  const { shipmentId, x1Id, x2Id, t1Id, t2Id } = fixture
+  const [a1, a2] = q(`SELECT id FROM alert WHERE shipment_id = ${shipmentId} ORDER BY id;`).split('\n')
+  const alertRow = (alertId) => q(`SELECT CONCAT_WS(':', a.alert_type, a.status, a.org_id = ${slice2.sourceOrgId}, a.duration_seconds,
+      a.rule_allowed_duration_seconds, a.acknowledged_by = ${qmId}, a.resolved_by = ${qmId},
+      (SELECT CONCAT(s.temperature, '>', t.temperature) FROM temperature_record s, temperature_record t
+         WHERE s.id = a.episode_start_record_id AND t.id = a.sustained_record_id))
+    FROM alert a WHERE a.id = ${alertId};`)
+  const snapshot = (alertId) => q(`SELECT GROUP_CONCAT(CONCAT_WS(':', batch_id, risk_status_before, freeze_transition_id IS NOT NULL) ORDER BY batch_id)
+    FROM alert_batch WHERE alert_id = ${alertId};`)
+  const actions = (alertId) => q(`SELECT GROUP_CONCAT(CONCAT_WS(':', x.action, IFNULL(x.batch_id, '-'), x.actor_user_id = ${qmId},
+      IFNULL((SELECT r.conclusion FROM inspection_report r WHERE r.id = x.inspection_report_id), '-'),
+      CASE WHEN x.action = 'RELEASE_BATCH' THEN IF(x.risk_transition_id IS NULL, 'no-transition', 'transition') ELSE '-' END) ORDER BY x.id)
+    FROM alert_action x WHERE x.alert_id = ${alertId};`)
+  const ledger = (batchId) => q(`SELECT GROUP_CONCAT(CONCAT_WS(':', t.source_type, t.from_status, t.to_status, IFNULL(t.actor_user_id = ${qmId}, 'system'),
+      t.org_id = ${slice2.sourceOrgId}, IFNULL(CASE t.source_alert_id WHEN ${a1} THEN 'A1' WHEN ${a2} THEN 'A2' END, '-'),
+      t.source_recall_id IS NOT NULL) ORDER BY t.id)
+    FROM batch_risk_transition t WHERE t.batch_id = ${batchId};`)
+  const batchRow = (batchId) => q(`SELECT CONCAT_WS(':', org_id, flow_status, risk_status, quantity) FROM batch WHERE id = ${batchId};`)
+  const transferRow = (transferId) => q(`SELECT CONCAT_WS(':', status, quarantine_site_id = ${slice2.coldStoreSiteId}, quarantined_by IS NOT NULL,
+      IFNULL(received_quantity, '-')) FROM transfer WHERE id = ${transferId};`)
+  const [readings, alertCount, reports, recallRow, scopeRows, codes, events, audits] = q(`SELECT
+      (SELECT GROUP_CONCAT(CONCAT(evaluation, ':', temperature) ORDER BY measured_at, id SEPARATOR ',') FROM temperature_record WHERE shipment_id = ${shipmentId}),
+      (SELECT COUNT(*) FROM alert WHERE shipment_id = ${shipmentId}),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', IF(alert_id = ${a1}, 'A1', 'A2'), batch_id, submitter_role, org_id = ${slice2.processorOrgId},
+           actor_user_id = ${processorQmId}, transfer_id, conclusion) ORDER BY id) FROM inspection_report WHERE batch_id IN (${x1Id}, ${x2Id})),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', r.owner_org_id = ${slice2.sourceOrgId}, r.source_alert_id = ${a1}, r.status, r.public_disposition,
+           r.started_by = ${qmId}, r.closed_by = ${qmId}, CHAR_LENGTH(r.result_summary) > 0))
+         FROM recall r WHERE r.source_alert_id IN (${a1}, ${a2})),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', rb.batch_id, rb.scope_role, rb.action, rb.risk_status_before, rb.open_transfer_id = ${t2Id},
+           rb.open_transfer_status, rb.shipment_status, rb.public_code_active, rb.remaining_quantity, rb.sold_quantity,
+           rb.risk_transition_id = (SELECT MAX(t.id) FROM batch_risk_transition t WHERE t.batch_id = rb.batch_id AND t.to_status = 'RECALLED')) ORDER BY rb.id)
+         FROM recall_batch rb JOIN recall r ON r.id = rb.recall_id WHERE r.source_alert_id = ${a1}),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', batch_id, status, org_id) ORDER BY batch_id) FROM public_trace_code WHERE batch_id IN (${x1Id}, ${x2Id})),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', batch_id, event_type) ORDER BY batch_id, event_type) FROM trace_event WHERE batch_id IN (${x1Id}, ${x2Id})),
+      (SELECT CONCAT_WS(':',
+           (SELECT COUNT(*) FROM audit_log WHERE action = 'ALERT_TRIGGER' AND object_id IN (${a1}, ${a2})),
+           (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id IN (${x1Id}, ${x2Id}) AND action = 'RISK_FREEZE'),
+           (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id = ${x1Id} AND action = 'RISK_RELEASE' AND actor_user_id = ${qmId}),
+           (SELECT COUNT(*) FROM audit_log WHERE object_type = 'BATCH' AND object_id = ${x2Id} AND action = 'RISK_RECALL' AND actor_user_id = ${qmId}),
+           (SELECT COUNT(*) FROM audit_log WHERE action = 'ALERT_RELEASE_BATCH' AND actor_user_id = ${qmId}),
+           (SELECT COUNT(*) FROM audit_log WHERE action IN ('RECALL_START', 'RECALL_CLOSE') AND actor_user_id = ${qmId}),
+           (SELECT COUNT(*) FROM audit_log WHERE action = 'INSPECTION_REPORT_SUBMIT' AND actor_user_id = ${processorQmId})));`).split('\t')
+  const after = phaseBSnapshot(before.phaseAIds, fixture)
+  const [phaseABefore, phaseACodesBefore, eventsBefore] = before.snapshot
+  const [phaseAAfter, phaseACodesAfter, eventsAfter] = after
+  const x1Ledger = ledger(x1Id)
+  const x2Ledger = ledger(x2Id)
+  assertFacts('Phase B', {
+    'SX 在途温度 7 条：-18.00 NORMAL、-12.00 / -11.50 / -10.80 HIGH、-18.50 NORMAL、-11.00 / -10.50 HIGH（按测量时间）':
+      readings === 'NORMAL:-18.00,HIGH:-12.00,HIGH:-11.50,HIGH:-10.80,NORMAL:-18.50,HIGH:-11.00,HIGH:-10.50',
+    'SX 恰好 2 条告警：A1 片段 -12.00 → -10.80、A2 片段 -11.00 → -10.50，均 TEMP_OVER_UPPER、来源企业归属、已持续 1860 秒（规则快照 1800 秒）、确认与处置人为来源质量管理员、最终 RESOLVED':
+      alertCount === '2' && alertRow(a1) === 'TEMP_OVER_UPPER:RESOLVED:1:1860:1800:1:1:-12.00>-10.80'
+      && alertRow(a2) === 'TEMP_OVER_UPPER:RESOLVED:1:1860:1800:1:1:-11.00>-10.50',
+    '受影响批次快照：A1 自动冻结 X1 / X2（告警时 NORMAL）；A2 创建时 X1 / X2 已冻结只快照':
+      snapshot(a1) === `${x1Id}:NORMAL:1,${x2Id}:NORMAL:1` && snapshot(a2) === `${x1Id}:FROZEN:0,${x2Id}:FROZEN:0`,
+    'A1 处置动作：确认 → X1 放行结论（依据合格报告，无放行转换：A2 仍未解除）→ 处置结论':
+      actions(a1) === `ACKNOWLEDGE:-:1:-:-,RELEASE_BATCH:${x1Id}:1:PASS:no-transition,RESOLVE:-:1:-:-`,
+    'A2 处置动作：确认 → X1 放行结论（依据合格报告，引用放行转换：解除最后一个风险事项）→ 处置结论':
+      actions(a2) === `ACKNOWLEDGE:-:1:-:-,RELEASE_BATCH:${x1Id}:1:PASS:transition,RESOLVE:-:1:-:-`,
+    'X1 风险台账：A1 系统自动冻结（无操作人）→ 质量管理员放行（来源 A2），恰好一条放行转换': x1Ledger === 'ALERT:NORMAL:FROZEN:system:1:A1:0,ALERT:FROZEN:NORMAL:1:1:A2:0',
+    'X2 风险台账：A1 系统自动冻结 → 模拟召回 RECALLED（RECALL，来源质量管理员）': x2Ledger === 'ALERT:NORMAL:FROZEN:system:1:A1:0,RECALL:FROZEN:RECALLED:1:1:-:1',
+    'T1 经隔离后 ACCEPTED（隔离场所为加工企业冷库，实收 300）；X1 转为加工企业负责，ACTIVE + NORMAL 300kg':
+      transferRow(t1Id) === 'ACCEPTED:1:1:300.000' && batchRow(x1Id) === `${slice2.processorOrgId}:ACTIVE:NORMAL:300.000`,
+    'T2 经隔离后 REJECTED；X2 仍由来源企业负责，ACTIVE + RECALLED，数量 200kg 不变':
+      transferRow(t2Id) === 'REJECTED:1:1:200.000' && batchRow(x2Id) === `${slice2.sourceOrgId}:ACTIVE:RECALLED:200.000`,
+    '检验报告 3 条：隔离接收方（加工企业质量管理员）关联告警与隔离交接，A1 X1 PASS、A1 X2 FAIL、A2 X1 PASS':
+      reports === `A1:${x1Id}:QUARANTINE_RECEIVER:1:1:${t1Id}:PASS,A1:${x2Id}:QUARANTINE_RECEIVER:1:1:${t2Id}:FAIL,A2:${x1Id}:QUARANTINE_RECEIVER:1:1:${t1Id}:PASS`,
+    '模拟召回 1 条：来源企业发起、关联来源告警 A1、CLOSED、公开处置 RETURNED、处置总结完整': recallRow === '1:1:CLOSED:RETURNED:1:1:1',
+    '召回范围快照 1 行：SEED X2 RECALLED（冻结 → 召回），隔离中交接 T2、运输已到达、公开码启用、剩余 200 已售 0，引用本次召回转换':
+      scopeRows === `${x2Id}:SEED:RECALLED:FROZEN:1:QUARANTINED:DELIVERED:1:200.000:0.000:1`,
+    '公开追溯码：X1 随接受转给加工企业、X2 仍属来源企业，均 ACTIVE（码状态不写 RECALLED，不换码）':
+      codes === `${x1Id}:ACTIVE:${slice2.processorOrgId},${x2Id}:ACTIVE:${slice2.sourceOrgId}`,
+    'X1 / X2 追溯事件只有 SOURCE / TRANSPORT / ARRIVAL 各 1 条（告警 / 冻结 / 隔离 / 检验 / 放行 / 召回 / 拒收不产生追溯事件）':
+      events === `${x1Id}:ARRIVAL,${x1Id}:SOURCE,${x1Id}:TRANSPORT,${x2Id}:ARRIVAL,${x2Id}:SOURCE,${x2Id}:TRANSPORT`,
+    '浏览器异常闭环期间全库只新增 2 条追溯事件（X1 / X2 到达）': Number(eventsAfter) === Number(eventsBefore) + 2,
+    '审计：告警触发 2、系统冻结 2、X1 放行转换 1、X2 召回 1、放行结论 2、召回发起 + 关闭 2、检验报告 3': audits === '2:2:1:1:2:2:3',
+    'Phase A 批次（B0 ~ B3）与其公开追溯码完全不受 Phase B 影响': phaseAAfter === phaseABefore && phaseACodesAfter === phaseACodesBefore
+  }, `readings=${readings} alerts=${alertCount}/${alertRow(a1)}/${alertRow(a2)} snapshots=${snapshot(a1)}|${snapshot(a2)} actions=${actions(a1)}|${actions(a2)} `
+    + `x1=${x1Ledger} x2=${x2Ledger} t1=${transferRow(t1Id)} t2=${transferRow(t2Id)} b1=${batchRow(x1Id)} b2=${batchRow(x2Id)} reports=${reports} `
+    + `recall=${recallRow} scope=${scopeRows} codes=${codes} events=${events} audits=${audits} before=${JSON.stringify(before.snapshot)} after=${JSON.stringify(after)}`)
+  console.log('[smoke] MySQL batch_risk_transition（X1 / X2，Phase B）:')
+  console.log(q(`SELECT id, batch_id, org_id, flow_status, from_status, to_status, source_type, IFNULL(actor_user_id, '-'), IFNULL(source_alert_id, '-'),
+      IFNULL(source_recall_id, '-') FROM batch_risk_transition WHERE batch_id IN (${x1Id}, ${x2Id}) ORDER BY id;`).split('\n').map((line) => `  ${line}`).join('\n'))
+  console.log('[smoke] MySQL alert_action（A1 / A2，Phase B）:')
+  console.log(q(`SELECT alert_id, action, IFNULL(batch_id, '-'), IFNULL(risk_transition_id, '-'), IFNULL(inspection_report_id, '-') FROM alert_action
+      WHERE alert_id IN (${a1}, ${a2}) ORDER BY id;`).split('\n').map((line) => `  ${line}`).join('\n'))
+  console.log('[smoke] MySQL alert / recall（Phase B）:')
+  console.log(q(`SELECT a.alert_no, a.status, a.duration_seconds, IFNULL(r.recall_no, '-'), IFNULL(r.status, '-'), IFNULL(r.public_disposition, '-') FROM alert a
+      LEFT JOIN recall r ON r.source_alert_id = a.id WHERE a.shipment_id = ${shipmentId} ORDER BY a.id;`).split('\n').map((line) => `  ${line}`).join('\n'))
+}
+
+/** 召回通知验收基础资料：零售企业 RB（OPERATOR / QUALITY_MANAGER 账号与启用门店）。只准备基础资料，不预造任何单据。 */
+function seedPhaseBNoticeMasterData(suffix, password) {
+  mysql(`
+    START TRANSACTION;
+    SET @role = (SELECT id FROM role WHERE role_code = 'OPERATOR');
+    SET @qm = (SELECT id FROM role WHERE role_code = 'QUALITY_MANAGER');
+    INSERT INTO organization (org_no, name, org_type, status) VALUES ('PB_RB_${suffix}', 'PhaseB新鲜到家零售_${suffix}', 'RETAILER', 'ACTIVE');
+    SET @rb = LAST_INSERT_ID();
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@rb, 'pb_rb_${suffix}', 'PhaseB零售RB操作员', ${sqlText(springPbkdf2(password))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @role);
+    INSERT INTO app_user (org_id, username, display_name, password_hash, status)
+      VALUES (@rb, 'pb_rb_qm_${suffix}', 'PhaseB零售RB质量管理员', ${sqlText(springPbkdf2(password))}, 'ACTIVE');
+    INSERT INTO user_role (user_id, role_id) VALUES (LAST_INSERT_ID(), @qm);
+    INSERT INTO site (org_id, site_no, name, site_type, status) VALUES (@rb, 'PB-RB-STORE', 'PhaseB新鲜到家门店', 'STORE', 'ACTIVE');
+    COMMIT;
+  `, { database: schema })
+  const [orgId, storeSiteId] = mysql(`SELECT
+      (SELECT id FROM organization WHERE org_no = 'PB_RB_${suffix}'),
+      (SELECT s.id FROM site s JOIN organization o ON o.id = s.org_id WHERE o.org_no = 'PB_RB_${suffix}' AND s.site_no = 'PB-RB-STORE');`,
+  { database: schema }).split('\t').map(Number)
+  return { orgId, storeSiteId, orgName: `PhaseB新鲜到家零售_${suffix}`, username: `pb_rb_${suffix}`, qmUsername: `pb_rb_qm_${suffix}` }
+}
+
+/** 经真实 API 把批次整批交给接收方：交接 → 运输任务 → 绑定 → 提交 → 承运商发运 / 到达 → 接收方接受。 */
+async function handOverViaApi({ sender, carrier, receiver }, { batchId, quantity, receiverOrgId, carrierOrgId, originSiteId, destinationSiteId, vehicle }) {
+  const idem = () => ({ 'Idempotency-Key': randomUUID() })
+  const transfer = await sender.write('POST', '/api/v1/transfers', { batchId, receiverOrgId }, idem())
+  const shipment = await sender.write('POST', '/api/v1/shipments', { carrierOrgId, originSiteId, destinationSiteId, vehicleOrContainerNo: vehicle }, idem())
+  const draft = await sender.call('GET', `/api/v1/transfers/${transfer.id}`)
+  await sender.write('POST', `/api/v1/shipments/${shipment.id}/transfers`, { transferId: transfer.id, expectedTransferVersion: draft.version }, idem())
+  const bound = await sender.call('GET', `/api/v1/transfers/${transfer.id}`)
+  await sender.write('POST', `/api/v1/transfers/${transfer.id}/submit`, { expectedVersion: bound.version }, idem())
+  const t0 = Math.floor(Date.now() / 1000) * 1000
+  const planned = await carrier.call('GET', `/api/v1/shipments/${shipment.id}`)
+  const dispatched = await carrier.write('POST', `/api/v1/shipments/${shipment.id}/dispatch`,
+    { loadedAt: new Date(t0 - 4000).toISOString(), expectedVersion: planned.version }, idem())
+  await carrier.write('POST', `/api/v1/shipments/${shipment.id}/arrive`, { unloadedAt: new Date(t0 - 3000).toISOString(), expectedVersion: dispatched.version }, idem())
+  const pending = await receiver.call('GET', `/api/v1/transfers/${transfer.id}`)
+  const accepted = await receiver.write('POST', `/api/v1/transfers/${transfer.id}/accept`,
+    { receivedQuantity: quantity, unitCode: 'kg', occurredAt: new Date(t0 - 2000).toISOString(), expectedVersion: pending.version }, idem())
+  if (accepted.status !== 'ACCEPTED') throw new Error(`召回通知夹具交接未被接受: ${accepted.status}`)
+  return transfer.id
+}
+
+/**
+ * 召回通知夹具（全部经真实 API）：加工企业把 X1（Phase B 中接受、正常）加工为 X1P 290kg（损耗 10kg）并交给零售企业 RA；
+ * 加工企业质量管理员提交 X1 的不合格检验报告后召回 X1（已加工关闭 + 正常 + 不合格证据）——X1P 由 RA 持有，只通知持有方；
+ * 通知期间 X1P 仍为正常，RA 再把 X1P 整批交给零售企业 RB 并被接受。
+ */
+async function seedPhaseBNoticeFixture(slice2, phaseB, fixture, retail, rbOrg, passwords) {
+  const idem = () => ({ 'Idempotency-Key': randomUUID() })
+  const login = async (username, password) => {
+    const session = new ApiSession()
+    await session.login(username, password)
+    return session
+  }
+  const processor = await login(slice2.usernames.processor, passwords.processor)
+  const processorQm = await login(slice2.usernames.processorQm, passwords.processorQm)
+  const carrier = await login(slice2.usernames.carrier, passwords.carrier)
+  const ra = await login(retail.username, passwords.retailer)
+  const rb = await login(rbOrg.username, passwords.rb)
+
+  const operation = await processor.write('POST', '/api/v1/batch-operations', {
+    operationType: 'PROCESS', occurredAt: new Date(Math.floor(Date.now() / 1000) * 1000 - 10_000).toISOString(), note: '召回通知验收：分切加工',
+    items: [
+      { role: 'INPUT', batchId: fixture.x1Id, quantity: 300, unitCode: 'kg' },
+      { role: 'OUTPUT', quantity: 290, unitCode: 'kg' },
+      { role: 'LOSS', quantity: 10, unitCode: 'kg' }
+    ]
+  }, idem())
+  const submitted = await processor.write('POST', `/api/v1/batch-operations/${operation.id}/submit`, { version: operation.version }, idem())
+  const x1pId = submitted.items.find((item) => item.role === 'OUTPUT').batchId
+  await handOverViaApi({ sender: processor, carrier, receiver: ra }, {
+    batchId: x1pId, quantity: 290, receiverOrgId: retail.retailerOrgId, carrierOrgId: slice2.carrierOrgId,
+    originSiteId: phaseB.processorFactorySiteId, destinationSiteId: retail.storeSiteId, vehicle: '浙L·冷PB002'
+  })
+  await processorQm.write('POST', `/api/v1/batches/${fixture.x1Id}/inspection-reports`, {
+    reportNo: 'PB-PRC-X1-RETEST-FAIL', institutionName: '教学演示检测中心（模拟）', inspectedAt: new Date(Date.now() - 60_000).toISOString(),
+    itemsSummary: '加工留样复检（模拟数据）', conclusion: 'FAIL', dataSource: 'SIMULATED'
+  }, idem())
+  const recall = await processorQm.write('POST', '/api/v1/recalls', { batchIds: [fixture.x1Id], reason: '加工留样复检不合格，模拟召回' }, idem())
+  const notified = recall.scope.find((row) => row.batchId === x1pId)
+  if (!notified || notified.action !== 'NOTIFY_HOLDER') throw new Error(`召回通知夹具：X1P 未被通知持有方 ${JSON.stringify(recall.scope)}`)
+  await handOverViaApi({ sender: ra, carrier, receiver: rb }, {
+    batchId: x1pId, quantity: 290, receiverOrgId: rbOrg.orgId, carrierOrgId: slice2.carrierOrgId,
+    originSiteId: retail.storeSiteId, destinationSiteId: rbOrg.storeSiteId, vehicle: '浙L·冷PB003'
+  })
+  const x1pTraceBatchNo = mysql(`SELECT trace_batch_no FROM batch WHERE id = ${x1pId};`, { database: schema })
+  return { recallId: recall.id, recallNo: recall.recallNo, x1pId, x1pTraceBatchNo }
+}
+
+/**
+ * 召回通知数据库事实：召回 X1（加工企业发起、处置中）；范围快照 SEED X1 RECALLED（已关闭、召回前正常）与 DESCENDANT X1P NOTIFY_HOLDER
+ * （快照持有方 RA、剩余 290）；X1P 当前由 RB 负责，ACTIVE + FROZEN，唯一风险台账为 RB 质量管理员的人工冻结；
+ * X1P 两次交接均 ACCEPTED；RA / RB 没有发起任何召回（通知不代为召回）。
+ */
+function verifyPhaseBNoticeDatabase(slice2, retail, rbOrg, notice) {
+  const q = (sql) => mysql(sql, { database: schema })
+  const rbQmId = userIdOf(rbOrg.qmUsername)
+  const [recallRow, scopeRows, x1Row, x1pRow, x1pLedger, x1pTransfers, holderRecalls] = q(`SELECT
+      (SELECT CONCAT_WS(':', owner_org_id = ${slice2.processorOrgId}, status, source_alert_id IS NULL) FROM recall WHERE id = ${notice.recallId}),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', batch_id, scope_role, action, flow_status, risk_status_before, holder_org_id, remaining_quantity) ORDER BY id)
+         FROM recall_batch WHERE recall_id = ${notice.recallId}),
+      (SELECT CONCAT_WS(':', b.org_id, b.flow_status, b.risk_status) FROM batch b JOIN recall_batch rb ON rb.batch_id = b.id
+         WHERE rb.recall_id = ${notice.recallId} AND rb.scope_role = 'SEED'),
+      (SELECT CONCAT_WS(':', org_id, flow_status, risk_status, quantity) FROM batch WHERE id = ${notice.x1pId}),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', source_type, from_status, to_status, org_id = ${rbOrg.orgId}, actor_user_id = ${rbQmId}) ORDER BY id)
+         FROM batch_risk_transition WHERE batch_id = ${notice.x1pId}),
+      (SELECT GROUP_CONCAT(CONCAT_WS(':', sender_org_id, receiver_org_id, status) ORDER BY id) FROM transfer WHERE batch_id = ${notice.x1pId}),
+      (SELECT COUNT(*) FROM recall WHERE owner_org_id IN (${retail.retailerOrgId}, ${rbOrg.orgId}));`).split('\t')
+  const [seedRow, descendantRow] = scopeRows.split(',')
+  assertFacts('Phase B 召回通知', {
+    '召回 X1：加工企业发起、处置中、未关联告警': recallRow === '1:IN_PROGRESS:1',
+    '范围快照：SEED X1 RECALLED（已关闭、召回前正常）': seedRow?.split(':').slice(1, 5).join(':') === 'SEED:RECALLED:CLOSED:NORMAL',
+    '范围快照：DESCENDANT X1P NOTIFY_HOLDER，快照持有方 RA，剩余 290': descendantRow === `${notice.x1pId}:DESCENDANT:NOTIFY_HOLDER:ACTIVE:NORMAL:${retail.retailerOrgId}:290.000`,
+    'X1 已加工关闭且 RECALLED，仍由加工企业负责': x1Row === `${slice2.processorOrgId}:CLOSED:RECALLED`,
+    'X1P 当前由 RB 负责，ACTIVE + FROZEN，290kg（通知不代为冻结 / 召回，也不阻止交接）': x1pRow === `${rbOrg.orgId}:ACTIVE:FROZEN:290.000`,
+    'X1P 唯一风险台账：RB 质量管理员依据通知的人工冻结': x1pLedger === 'MANUAL:NORMAL:FROZEN:1:1',
+    'X1P 两次交接均 ACCEPTED：加工企业 → RA → RB': x1pTransfers === `${slice2.processorOrgId}:${retail.retailerOrgId}:ACCEPTED,${retail.retailerOrgId}:${rbOrg.orgId}:ACCEPTED`,
+    'RA / RB 没有发起任何召回': holderRecalls === '0'
+  }, `recall=${recallRow} scope=${scopeRows} x1=${x1Row} x1p=${x1pRow} ledger=${x1pLedger} transfers=${x1pTransfers} holderRecalls=${holderRecalls}`)
+}
+
 let backend
 let viteServer
 let schemaCreated = false
@@ -1224,6 +1533,61 @@ try {
   }, 'tests/e2e/real-pb1-closed.spec.ts')
   verifyPb1ClosedDatabase(retail, slice3Ids, pb1bBefore)
   console.log('[smoke] PB1-B 真实零售质量管理员冻结 / 解除已售罄 CLOSED 的 B2 与匿名消费者模拟冻结投影浏览器验收与 MySQL 事实校验通过')
+
+  // ---------------------------------------------------------------- Phase B 异常闭环（PB3 → PB6）
+  const phaseBQmPassword = `PB!${randomBytes(18).toString('base64url')}`
+  const phaseB = seedPhaseBMasterData(suffix, phaseBQmPassword, slice2)
+  const phaseBFixture = await seedPhaseBFixture(master.productFish, slice2, phaseB, slice2Passwords)
+  console.log(`[smoke] Phase B 夹具已经真实 API 准备：X1 / X2 装入运输任务 SX（装载时间 ${phaseBFixture.loadedAt}，在途）`)
+  const phaseBBefore = { phaseAIds: slice3Ids, snapshot: phaseBSnapshot(slice3Ids, phaseBFixture) }
+  await runBrowserSmoke({
+    PHASEB_SOURCE_USERNAME: slice2.usernames.source,
+    PHASEB_SOURCE_PASSWORD: slice2Passwords.source,
+    PHASEB_SOURCE_QM_USERNAME: phaseB.sourceQmUsername,
+    PHASEB_SOURCE_QM_PASSWORD: phaseBQmPassword,
+    PHASEB_CARRIER_USERNAME: slice2.usernames.carrier,
+    PHASEB_CARRIER_PASSWORD: slice2Passwords.carrier,
+    PHASEB_PROCESSOR_USERNAME: slice2.usernames.processor,
+    PHASEB_PROCESSOR_PASSWORD: slice2Passwords.processor,
+    PHASEB_PROCESSOR_QM_USERNAME: slice2.usernames.processorQm,
+    PHASEB_PROCESSOR_QM_PASSWORD: slice2Passwords.processorQm,
+    PHASEB_EXPECTED: JSON.stringify({
+      ...phaseBFixture,
+      sourceOrgName: slice2.sourceOrgName,
+      processorOrgId: slice2.processorOrgId,
+      processorOrgName: slice2.processorOrgName,
+      quarantineSiteName: slice2.coldStoreName,
+      // 这些内部 / 企业信息绝不能出现在匿名消费者页面或响应中
+      forbidden: [
+        phaseBFixture.x1TraceBatchNo, phaseBFixture.x2TraceBatchNo, 'PB-X1', 'PB-X2', '东海舟山渔场（Phase B 异常闭环验收）',
+        slice2.sourceOrgName, slice2.carrierOrgName, slice2.processorOrgName, slice2.sourceSiteName, slice2.processorSiteName, slice2.coldStoreName,
+        slice2.usernames.source, slice2.usernames.carrier, slice2.usernames.processor, slice2.usernames.processorQm, phaseB.sourceQmUsername,
+        '浙L·冷PB001', 'SYS:', 'detailsJson', 'summary', 'resultSummary', 'reason'
+      ]
+    })
+  }, 'tests/e2e/real-phase-b.spec.ts')
+  verifyPhaseBDatabase(slice2, phaseB, phaseBFixture, phaseBBefore)
+  console.log('[smoke] Phase B 真实异常闭环（两个持续超温告警 → 自动冻结 → 隔离收货 → 检验证据 → 逐告警放行结论 / 模拟召回 → 接受 / 拒收 → 处置结论 → 召回关闭 → 消费者模拟召回处置进展）浏览器验收与 MySQL 事实校验通过')
+
+  // ---------------------------------------------------------------- 独立评审修复：召回通知随批次交接
+  const rbPassword = `PB!${randomBytes(18).toString('base64url')}`
+  const rbOrg = seedPhaseBNoticeMasterData(suffix, rbPassword)
+  const notice = await seedPhaseBNoticeFixture(slice2, phaseB, phaseBFixture, retail, rbOrg, {
+    processor: slice2Passwords.processor, processorQm: slice2Passwords.processorQm, carrier: slice2Passwords.carrier,
+    retailer: slice5Password, rb: rbPassword
+  })
+  console.log(`[smoke] 召回通知夹具已经真实 API 准备：X1 → X1P（RA）→ 召回 ${notice.recallNo} 通知 RA → X1P 交给 RB`)
+  await runBrowserSmoke({
+    PHASEB_NOTICE_RB_QM_USERNAME: rbOrg.qmUsername,
+    PHASEB_NOTICE_RB_QM_PASSWORD: rbPassword,
+    PHASEB_NOTICE_RA_QM_USERNAME: retail.qmUsername,
+    PHASEB_NOTICE_RA_QM_PASSWORD: slice5QmPassword,
+    PHASEB_NOTICE_OWNER_QM_USERNAME: slice2.usernames.processorQm,
+    PHASEB_NOTICE_OWNER_QM_PASSWORD: slice2Passwords.processorQm,
+    PHASEB_NOTICE_EXPECTED: JSON.stringify({ ...notice, processorOrgName: slice2.processorOrgName })
+  }, 'tests/e2e/real-phase-b-notice.spec.ts')
+  verifyPhaseBNoticeDatabase(slice2, retail, rbOrg, notice)
+  console.log('[smoke] 召回通知随批次交接（新责任组织看到并处置通知、历史持有方只见发起时快照、发起组织跟踪当前状态）浏览器验收与 MySQL 事实校验通过')
   }
 } catch (error) {
   primaryError = error

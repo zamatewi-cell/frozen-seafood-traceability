@@ -124,6 +124,16 @@ public interface BatchMapper extends BaseMapper<Batch> {
     Batch selectByIdIgnoreTenantForUpdate(@Param("id") Long id);
 
     /**
+     * 忽略组织范围根据批次 ID 执行共享锁定读 (SELECT ... FOR SHARE)：模拟召回对只快照、不转换的范围批次按批次 ID 升序预先加共享锁，
+     * 使之后插入范围快照时的外键检查不再等待批次行锁。
+     *
+     * @param id 批次 ID
+     * @return 批次实体；若不存在则返回 null
+     */
+    @Select("SELECT * FROM batch WHERE id = #{id} AND is_deleted = 0 FOR SHARE")
+    Batch selectByIdIgnoreTenantForShare(@Param("id") Long id);
+
+    /**
      * 单条 SQL 条件更新草稿批次。
      * <p>
      * 同时约束 id + org_id + flow_status='DRAFT' + risk_status='NORMAL' + version，

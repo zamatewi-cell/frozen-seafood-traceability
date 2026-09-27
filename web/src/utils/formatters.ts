@@ -229,6 +229,8 @@ export function formatTransferStatus(status: string | null | undefined): StatusB
       return { label: '草稿', tone: 'neutral', description: '尚未提交；提交前必须绑定计划中的运输任务' }
     case 'PENDING':
       return { label: '待接收', tone: 'warning', description: '已提交，等待运输任务到达后由接收方接受或拒收；责任组织仍为发送方' }
+    case 'QUARANTINED':
+      return { label: '隔离收货', tone: 'danger', description: '货物已到达并隔离，责任组织仍为发送方；依据质量结论接受或拒收' }
     case 'ACCEPTED':
       return { label: '已接受', tone: 'success', description: '接收方已接受，批次当前责任组织已转为接收方' }
     case 'REJECTED':
@@ -337,9 +339,9 @@ export function formatTemperatureEvaluation(evaluation: string | null | undefine
     case 'NORMAL':
       return { label: '单点在范围内', tone: 'success', description: '本次测量落在测量时适用的运输温控规则范围内（含上下限）' }
     case 'HIGH':
-      return { label: '单点高于上限', tone: 'warning', description: '本次测量高于规则上限；单点越界不等于持续超温，不产生告警' }
+      return { label: '单点高于上限', tone: 'warning', description: '本次测量高于规则上限；单点越界不等于持续超温，单点本身不产生告警' }
     case 'LOW':
-      return { label: '单点低于下限', tone: 'warning', description: '本次测量低于规则下限；单点越界不等于持续超温，不产生告警' }
+      return { label: '单点低于下限', tone: 'warning', description: '本次测量低于规则下限；单点越界不等于持续超温，单点本身不产生告警' }
     case 'MISSING_CONTEXT':
       return { label: '缺少适用规则', tone: 'neutral', description: '测量时没有唯一适用的运输温控规则，未作判定' }
     default:
@@ -403,4 +405,101 @@ export function formatPublicTraceCodeStatus(status: string | null | undefined): 
     default:
       return { label: status || '未激活', tone: 'neutral', description: '尚未激活公开追溯码' }
   }
+}
+
+/** 告警类型（Phase B PB3：Shipment 级在途持续超温）。 */
+export function formatAlertType(type: string | null | undefined): string {
+  const map: Record<string, string> = {
+    TEMP_OVER_UPPER: '在途持续高于温度上限',
+    TEMP_UNDER_LOWER: '在途持续低于温度下限'
+  }
+  return (type && map[type]) || '未知告警类型'
+}
+
+/** 告警处置状态。 */
+export function formatAlertStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'OPEN':
+      return { label: '待确认', tone: 'danger', description: '系统已按持续超温规则创建告警，等待发货方质量管理员确认' }
+    case 'ACKNOWLEDGED':
+      return { label: '处置中', tone: 'warning', description: '质量管理员已确认异常并负责调查与处置' }
+    case 'RESOLVED':
+      return { label: '已处置', tone: 'success', description: '已形成处置结论' }
+    default:
+      return { label: '未知状态', tone: 'neutral', description: '未知告警状态' }
+  }
+}
+
+/** 告警处置动作。 */
+export function formatAlertAction(action: string | null | undefined): string {
+  const map: Record<string, string> = {
+    ACKNOWLEDGE: '确认异常',
+    RELEASE_BATCH: '依据检验结论放行批次',
+    RESOLVE: '形成处置结论'
+  }
+  return (action && map[action]) || '处置动作'
+}
+
+/** 持续时长（秒）→ 可读文字，例如 1800 → “30 分钟”，3725 → “1 小时 2 分 5 秒”。 */
+export function formatDurationSeconds(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return '—'
+  const total = Math.max(0, Math.floor(Number(seconds)))
+  if (total === 0) return '0 秒'
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  if (h === 0 && s === 0) return `${m} 分钟`
+  return [h ? `${h} 小时` : '', m ? `${m} 分` : '', s ? `${s} 秒` : ''].filter(Boolean).join(' ')
+}
+
+/** 检验结论（PB4）：合格 / 不合格只是证据，不代表真实检测机构或监管结论。 */
+export function formatInspectionConclusion(conclusion: string | null | undefined): StatusBadgeInfo {
+  switch (conclusion) {
+    case 'PASS':
+      return { label: '检验合格', tone: 'success', description: '检验报告结论为合格（教学演示证据）' }
+    case 'FAIL':
+      return { label: '检验不合格', tone: 'danger', description: '检验报告结论为不合格（教学演示证据）' }
+    default:
+      return { label: '暂无检验结论', tone: 'neutral', description: '尚无关联的检验报告' }
+  }
+}
+
+/** 检验报告提交身份。 */
+export function formatInspectionSubmitter(role: string | null | undefined): string {
+  return role === 'QUARANTINE_RECEIVER' ? '隔离收货方提交' : role === 'CURRENT_ORG' ? '当前责任组织提交' : '提交方'
+}
+
+/** 模拟召回状态（PB5）。 */
+export function formatRecallStatus(status: string | null | undefined): StatusBadgeInfo {
+  switch (status) {
+    case 'IN_PROGRESS':
+      return { label: '模拟召回处置中', tone: 'danger', description: '教学演练中的模拟召回正在处置' }
+    case 'CLOSED':
+      return { label: '模拟召回已关闭', tone: 'neutral', description: '处置已完成；批次仍保留模拟召回风险终态' }
+    default:
+      return { label: '未知状态', tone: 'neutral', description: '未知召回状态' }
+  }
+}
+
+/** 召回范围角色。 */
+export function formatRecallScopeRole(role: string | null | undefined): string {
+  const map: Record<string, string> = { SEED: '召回批次', DESCENDANT: '正向后续批次', ANCESTOR: '反向上游批次' }
+  return (role && map[role]) || '范围批次'
+}
+
+/** 召回范围处置动作。 */
+export function formatRecallScopeAction(action: string | null | undefined): string {
+  const map: Record<string, string> = {
+    RECALLED: '本次转为模拟召回',
+    ALREADY_RECALLED: '此前已进入模拟召回',
+    NOTIFY_HOLDER: '已通知持有方（由持有方发起召回）',
+    TRACE_ONLY: '溯源调查（不召回）'
+  }
+  return (action && map[action]) || '—'
+}
+
+/** 召回关闭的公开处置结论（消费者页面显示对应固定文案）。 */
+export function formatRecallDisposition(disposition: string | null | undefined): string {
+  const map: Record<string, string> = { DESTROYED: '按演练流程销毁处置', RETURNED: '按演练流程退回处置' }
+  return (disposition && map[disposition]) || '—'
 }

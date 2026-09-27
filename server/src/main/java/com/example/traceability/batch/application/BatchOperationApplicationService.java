@@ -685,7 +685,7 @@ public class BatchOperationApplicationService {
         BatchSaleGuard.rejectIfSaleStarted(input, "加工、拆分、合并或分装");
         if (transferMapper.countActiveTransfersByBatchId(input.getId()) > 0) {
             throw new BusinessException(HttpStatus.CONFLICT, "BATCH_TRANSFER_OPEN", "批次存在未结束交接",
-                    "输入批次 " + input.getTraceBatchNo() + " 存在草稿(DRAFT)或待接收(PENDING)交接，请先删除草稿或等待交接结束");
+                    "输入批次 " + input.getTraceBatchNo() + " 存在草稿(DRAFT)、待接收(PENDING)或隔离中(QUARANTINED)的交接，请先删除草稿或等待交接结束");
         }
         BigDecimal remaining = batchQuantityService.remainingOf(input);
         if (requestedQuantity.compareTo(remaining) != 0) {

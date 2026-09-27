@@ -51,19 +51,21 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * Shipment 在途温度记录应用服务（Phase B PB2；统一业务契约 v1.1 §2.9 / §10.1 / §10.2 步骤 1 / §13 步骤 1 / §14）。
+ * Shipment 在途温度记录应用服务（Phase B PB2 / PB3；统一业务契约 v1.1 §2.9 / §10.1 / §10.2 步骤 1–4 / §13 步骤 1–4 / §14）。
  * <p>
  * 运输任务指定的承运组织操作员在运输途中（IN_TRANSIT）逐条登记温度测量：记录绑定运输任务而不是复制到各个批次；
  * 服务端按装载批次的产品、TRANSPORT 环节与测量业务时间匹配当时生效的已发布规则版本，得出<b>单点</b>判定
  * NORMAL / HIGH / LOW，或在没有唯一适用规则时记为 MISSING_CONTEXT，并把规则环节、上下限与允许越界时长快照随记录一起固定、
- * 之后不追溯改写（ADR-006）。单点越界不等于持续超温：本服务不判定持续超温、不创建 Alert、不调用风险核心、
- * 不写批次风险状态、不生成 TraceEvent，也不修改运输任务、交接或批次的任何字段（运输任务版本号不变）。
+ * 之后不追溯改写（ADR-006）。单点越界不等于持续超温：持续超温只由 {@link TemperatureExcursionAlertService}
+ * 在同一事务内、按全部记录的持久化判定依据快照判定（PB3），达到条件时创建 Shipment 级告警并经风险核心自动冻结受影响批次；
+ * 本服务自身不写批次风险状态、不生成 TraceEvent，也不修改运输任务或交接的任何字段（运输任务版本号不变）。
  * </p>
  * <p>
  * 锁顺序：幂等预读（非锁定）→ 运输任务行锁（FOR UPDATE）→ 锁后幂等复读 → 插入温度记录（唯一索引与外键检查的锁只在
- * 取得运输任务行锁之后获取）。确认到达同样先锁运输任务行、再以当前读读取最新测量时间，因此不存在
- * temperature_record → shipment 的反向锁边；本服务从不锁交接、批次或规则表（规则、交接与批次产品均为非锁定读：
- * IN_TRANSIT 后装载清单冻结，批次产品不可变，已发布规则不可修改）。
+ * 取得运输任务行锁之后获取）→（仅在形成新的持续超温片段时）插入告警 → 按批次 ID 升序锁定受影响批次并写入风险转换。
+ * 确认到达同样先锁运输任务行、再以当前读读取最新测量时间，因此不存在 temperature_record → shipment 的反向锁边；
+ * 交接、规则与批次产品均为非锁定读（IN_TRANSIT 后装载清单冻结，批次产品不可变，已发布规则不可修改），
+ * 批次只在运输任务行锁之后加锁，任何路径都不存在 batch → shipment 的反向锁边。
  * 唯一的残余等待环是 InnoDB 自身的同键插入模式（三个事务插入同一 (org_id, idempotency_key) 且先插入者回滚），
  * 数据库回滚其中一个事务，本服务把它映射为可重试的 409。
  * </p>
@@ -106,6 +108,7 @@ public class ShipmentTemperatureService {
     private final BatchMapper batchMapper;
     private final TemperatureRecordMapper recordMapper;
     private final TemperatureRuleStageMapper ruleStageMapper;
+    private final TemperatureExcursionAlertService excursionAlertService;
     private final AuditApplicationService auditService;
     private final ObjectMapper objectMapper;
 
@@ -115,6 +118,7 @@ public class ShipmentTemperatureService {
             BatchMapper batchMapper,
             TemperatureRecordMapper recordMapper,
             TemperatureRuleStageMapper ruleStageMapper,
+            TemperatureExcursionAlertService excursionAlertService,
             AuditApplicationService auditService,
             ObjectMapper objectMapper
     ) {
@@ -123,6 +127,7 @@ public class ShipmentTemperatureService {
         this.batchMapper = Objects.requireNonNull(batchMapper, "batchMapper 不能为空");
         this.recordMapper = Objects.requireNonNull(recordMapper, "recordMapper 不能为空");
         this.ruleStageMapper = Objects.requireNonNull(ruleStageMapper, "ruleStageMapper 不能为空");
+        this.excursionAlertService = Objects.requireNonNull(excursionAlertService, "excursionAlertService 不能为空");
         this.auditService = Objects.requireNonNull(auditService, "auditService 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
     }
@@ -131,7 +136,7 @@ public class ShipmentTemperatureService {
      * 承运商登记一条在途温度测量 (POST /api/v1/shipments/{shipmentId}/temperature-records)。
      * <p>
      * 校验顺序：认证 / 平台代办 / OPERATOR → 幂等键 → 请求规范化 → 幂等预读 → 运输任务行锁 → 锁后幂等复读 →
-     * 运输任务存在 → 承运组织 → IN_TRANSIT → 测量时间窗口 → 规则匹配与单点判定 → 插入 → 审计。
+     * 运输任务存在 → 承运组织 → IN_TRANSIT → 测量时间窗口 → 规则匹配与单点判定 → 插入 → 审计 → 持续超温判定（PB3）。
      * 幂等重放先于一切可变状态校验：同组织同键同语义的重试（包括运输任务之后已到达）返回原记录，不产生新写入。
      * </p>
      */
@@ -239,6 +244,10 @@ public class ShipmentTemperatureService {
         summary.put("ruleStageId", record.getRuleStageId());
         auditService.recordAudit(principal.getUserId(), orgId, AUDIT_ACTION, AUDIT_OBJECT_TYPE, shipment.getId(),
                 nowUtc, "SUCCESS", serializeSummary(summary));
+
+        // 8. 持续超温判定（PB3）：按该运输任务全部记录的持久化判定依据快照判定，同一事务内创建告警并自动冻结受影响批次；
+        //    幂等重放在第 1 / 2 步已返回，不会重复判定
+        excursionAlertService.raiseSustainedExcursionAlerts(shipment, recordMapper.selectByShipmentId(shipment.getId()), nowUtc);
 
         return TemperatureRecordResponse.fromEntity(record);
     }

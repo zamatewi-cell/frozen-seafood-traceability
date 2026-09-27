@@ -86,6 +86,8 @@ export interface PublicTrace {
   flowStatus: BatchFlowStatus
   riskStatus: BatchRiskStatus
   recallNotice?: string | null
+  /** PB6：模拟召回处置进展（仅 RECALLED 时出现；受控状态、固定文案与关闭日期）。 */
+  recallDisposition?: PublicRecallDisposition | null
   queriedAt: string
   disclosure: string
 }
@@ -96,3 +98,10 @@ export type TraceViewState =
   | 'SUCCESS'
   | 'NOT_FOUND'
   | 'ERROR'
+
+/** 公开的模拟召回处置进展（白名单：受控状态、固定文案与处置完成日期）。 */
+export interface PublicRecallDisposition {
+  status: 'IN_PROGRESS' | 'CLOSED'
+  label: string
+  closedDate?: string | null
+}

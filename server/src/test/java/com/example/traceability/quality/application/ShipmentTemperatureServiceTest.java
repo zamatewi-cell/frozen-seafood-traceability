@@ -71,6 +71,8 @@ class ShipmentTemperatureServiceTest {
     @Mock
     private TemperatureRuleStageMapper ruleStageMapper;
     @Mock
+    private TemperatureExcursionAlertService excursionAlertService;
+    @Mock
     private AuditApplicationService auditService;
 
     private ShipmentTemperatureService service;
@@ -80,7 +82,7 @@ class ShipmentTemperatureServiceTest {
     @BeforeEach
     void setUp() {
         service = new ShipmentTemperatureService(shipmentMapper, transferMapper, batchMapper, recordMapper, ruleStageMapper,
-                auditService, new ObjectMapper());
+                excursionAlertService, auditService, new ObjectMapper());
         carrier = principal(901L, CARRIER_ORG, List.of("OPERATOR"), List.of("ORG_ONLY"));
         loadedAt = LocalDateTime.now(ZoneOffset.UTC).minusHours(2).truncatedTo(ChronoUnit.SECONDS);
     }
@@ -202,7 +204,7 @@ class ShipmentTemperatureServiceTest {
         assertThat(resp.rule().name()).isEqualTo("冷冻大黄鱼运输规则");
         assertThat(resp.rule().allowedDurationSeconds()).isEqualTo(1800);
 
-        InOrder order = inOrder(recordMapper, shipmentMapper, ruleStageMapper, auditService);
+        InOrder order = inOrder(recordMapper, shipmentMapper, ruleStageMapper, auditService, excursionAlertService);
         order.verify(recordMapper).selectByOrgIdAndIdempotencyKey(CARRIER_ORG, KEY);
         order.verify(shipmentMapper).selectByIdForUpdate(SHIPMENT_ID);
         order.verify(recordMapper).selectByOrgIdAndIdempotencyKey(CARRIER_ORG, KEY);
@@ -210,6 +212,9 @@ class ShipmentTemperatureServiceTest {
         order.verify(recordMapper).insert(any(TemperatureRecord.class));
         order.verify(auditService).recordAudit(eq(901L), eq(CARRIER_ORG), eq("TEMPERATURE_RECORD"), eq("SHIPMENT"),
                 eq(SHIPMENT_ID), any(), eq("SUCCESS"), anyString());
+        // PB3：持续超温判定在同一事务内、插入与审计之后，基于该运输任务的全部记录（持久化快照）
+        order.verify(recordMapper).selectByShipmentId(SHIPMENT_ID);
+        order.verify(excursionAlertService).raiseSustainedExcursionAlerts(any(Shipment.class), any(), any());
 
         verify(shipmentMapper, never()).updateLifecycleByIdAndVersion(any(), any(), any());
         verify(shipmentMapper, never()).bumpManifestVersion(anyLong(), anyLong());
@@ -352,7 +357,7 @@ class ShipmentTemperatureServiceTest {
         assertThat(replayed.rule().lowerLimit()).isEqualByComparingTo("-25.00");
         verify(shipmentMapper, never()).selectByIdForUpdate(any());
         verify(recordMapper, never()).insert(any());
-        verifyNoInteractions(auditService, ruleStageMapper);
+        verifyNoInteractions(auditService, ruleStageMapper, excursionAlertService);
     }
 
     @Test
@@ -377,6 +382,7 @@ class ShipmentTemperatureServiceTest {
 
         assertThat(service.record(SHIPMENT_ID, r, KEY, carrier).id()).isEqualTo(7001L);
         verify(recordMapper, never()).insert(any());
+        verifyNoInteractions(excursionAlertService);
     }
 
     @Test
@@ -391,7 +397,7 @@ class ShipmentTemperatureServiceTest {
         assertThat(service.record(SHIPMENT_ID, r, KEY, carrier).id()).isEqualTo(7001L);
         assertThatThrownBy(() -> service.record(SHIPMENT_ID, r, KEY, carrier))
                 .satisfies(e -> assertBusiness(e, 409, "IDEMPOTENCY_CONFLICT"));
-        verifyNoInteractions(auditService);
+        verifyNoInteractions(auditService, excursionAlertService);
     }
 
     @Test

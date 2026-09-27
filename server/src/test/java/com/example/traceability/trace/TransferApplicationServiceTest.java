@@ -90,6 +90,9 @@ class TransferApplicationServiceTest {
     @Mock
     private com.example.traceability.trace.mapper.PublicTraceCodeMapper publicTraceCodeMapper;
 
+    @Mock
+    private com.example.traceability.identity.mapper.SiteMapper siteMapper;
+
     private final tools.jackson.databind.ObjectMapper objectMapper = new tools.jackson.databind.ObjectMapper();
 
     private TransferApplicationService transferService;
@@ -110,6 +113,7 @@ class TransferApplicationServiceTest {
                 auditService,
                 publicTraceCodeMapper,
                 shipmentMapper,
+                siteMapper,
                 objectMapper
         );
 

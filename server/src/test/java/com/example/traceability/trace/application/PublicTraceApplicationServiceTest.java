@@ -88,6 +88,9 @@ class PublicTraceApplicationServiceTest {
     @Mock
     private PublicTraceCodeIdempotencyMapper idempotencyMapper;
 
+    @Mock
+    private com.example.traceability.quality.mapper.RecallMapper recallMapper;
+
     @InjectMocks
     private PublicTraceApplicationService service;
 

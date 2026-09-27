@@ -41,6 +41,8 @@ async function handleLogout() {
           <RouterLink to="/app/batches" class="nav-link" active-class="nav-link-active">批次</RouterLink>
           <RouterLink to="/app/shipments" class="nav-link" active-class="nav-link-active" data-testid="nav-shipments">运输任务</RouterLink>
           <RouterLink v-if="!isCarrier" to="/app/transfers/inbound" class="nav-link" active-class="nav-link-active" data-testid="nav-inbound">待接收交接</RouterLink>
+          <RouterLink to="/app/alerts" class="nav-link" active-class="nav-link-active" data-testid="nav-alerts">告警</RouterLink>
+          <RouterLink v-if="!isCarrier" to="/app/recalls" class="nav-link" active-class="nav-link-active" data-testid="nav-recalls">模拟召回</RouterLink>
         </nav>
 
         <div class="enterprise-user" data-testid="session-user">

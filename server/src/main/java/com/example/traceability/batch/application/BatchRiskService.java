@@ -6,6 +6,7 @@ import com.example.traceability.batch.domain.BatchFlowStatus;
 import com.example.traceability.batch.domain.BatchRiskSourceType;
 import com.example.traceability.batch.domain.BatchRiskStatus;
 import com.example.traceability.batch.domain.BatchRiskTransition;
+import com.example.traceability.batch.domain.PendingAlertHold;
 import com.example.traceability.batch.dto.BatchRiskTransitionRequest;
 import com.example.traceability.batch.dto.BatchRiskTransitionResponse;
 import com.example.traceability.batch.mapper.BatchMapper;
@@ -19,6 +20,7 @@ import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
@@ -28,12 +30,15 @@ import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -45,8 +50,18 @@ import java.util.regex.Pattern;
  * → 条件更新批次风险状态（版本 +1）→ 写 RISK_FREEZE / RISK_RELEASE 审计。
  * 转换不改变数量、责任组织、流转状态与公开追溯码，不生成 TraceEvent（尤其不是表示速冻工序的 FREEZE 事件），
  * 也不向祖先、后代或同源批次传播。冻结期间的业务阻断全部复用 Phase A 既有守卫（交接 / 批次操作 / 销售 /
- * 仓储 / 首次激活公开码），本服务不重复实现。未来 Alert（PB3，系统路径）与 Recall（PB5）必须调用本服务的核心，
- * 不得另建写入口。
+ * 仓储 / 首次激活公开码），本服务不重复实现。
+ * </p>
+ * <p>
+ * PB3 系统路径 {@link #freezeForAlert}：在途持续超温告警创建时，在调用方（温度登记）同一事务内把 Shipment → Transfer → Batch
+ * 确定的受影响批次 NORMAL → FROZEN（来源 ALERT、类型化来源外键 source_alert_id、无操作人、保留前缀 {@code SYS:} 系统幂等键）。
+ * 已冻结或已召回的批次不重复转换。PB4 {@link #releaseForAlert}：告警归属组织的质量管理员依据检验结论对受影响批次形成放行结论；
+ * 处于未处置告警中的批次不能再经人工接口解除冻结（必须走告警放行）。
+ * 独立评审修复：风险事项属于批次（{@link #openHolds}）——未解除的告警风险事项（批次所在的、尚未对该批次形成放行结论的未处置告警）
+ * 与尚未经人工解除的人工风险冻结。某个告警的放行结论只解除它自己的风险事项；只有解除了批次最后一个风险事项的结论才经风险核心
+ * FROZEN → NORMAL（来源 ALERT、有操作人），其余情况批次保持 FROZEN（契约 §4.2：FROZEN 表示等待调查或质量结论）。
+ * PB5 {@link #recallForCase}：模拟召回把发起组织持有的批次 NORMAL / FROZEN → RECALLED（来源 RECALL、有操作人），
+ * RECALLED 为风险终态，之后任何路径都不能再转换（CLOSED + RECALLED 允许，不重新打开批次）。
  * </p>
  * <p>
  * 锁顺序与死锁安全：
@@ -57,8 +72,9 @@ import java.util.regex.Pattern;
  *   <li>PB1 不存在 batch → shipment / transfer / batch_operation / 其他 batch 的加锁路径。</li>
  * </ul>
  * 因此 PB1 不引入任何反向业务锁边，与既有 shipment → transfer → batch、batch_operation → batch（升序）、
- * batch → trace_event、batch → public_trace_code 顺序不成环。未来多批次的系统 / 召回路径必须先按批次 ID 升序
- * 取得全部批次行锁，再插入风险转换行；已持有 shipment → transfer → batches 的调用方可直接调用风险核心而不改变该顺序。
+ * batch → trace_event、batch → public_trace_code 顺序不成环。多批次的系统 / 召回路径必须先按批次 ID 升序
+ * 取得全部批次行锁，再插入风险转换行；PB3 告警冻结的调用方持有 shipment → temperature_record → alert，
+ * 之后才按批次 ID 升序锁定批次，不存在任何 batch → shipment / alert 的反向边。
  * 唯一的残余等待环是 InnoDB 自身的同键插入模式：三个事务插入同一 (org_id, idempotency_key) 且先插入者回滚时，
  * 两个等待者可能在该唯一索引上互为死锁，数据库回滚其中一个的整个事务；本服务把它映射为可重试的 409，而不是 500。
  * </p>
@@ -74,6 +90,7 @@ public class BatchRiskService {
 
     static final String AUDIT_ACTION_FREEZE = "RISK_FREEZE";
     static final String AUDIT_ACTION_RELEASE = "RISK_RELEASE";
+    static final String AUDIT_ACTION_RECALL = "RISK_RECALL";
     static final String AUDIT_OBJECT_TYPE = "BATCH";
     static final int REASON_MAX_LENGTH = 500;
     /** 服务端生成的系统幂等键前缀（例如 PB3 的 {@code SYS:ALERT:{alertId}:BATCH:{batchId}}），人工请求不得使用。 */
@@ -83,18 +100,20 @@ public class BatchRiskService {
     private static final Pattern IDEMPOTENCY_KEY_PATTERN = Pattern.compile("^[A-Za-z0-9._:-]{16,128}$");
 
     /**
-     * 人工风险转换动作：目标状态由接口路径决定。
+     * 风险转换动作：人工接口由路径决定，系统路径（PB3 告警自动冻结）复用同一动作的状态校验与审计动作。
      */
-    enum ManualAction {
+    enum RiskAction {
         FREEZE(BatchRiskStatus.FROZEN, BatchRiskStatus.NORMAL, AUDIT_ACTION_FREEZE, "风险冻结"),
-        RELEASE(BatchRiskStatus.NORMAL, BatchRiskStatus.FROZEN, AUDIT_ACTION_RELEASE, "解除冻结");
+        RELEASE(BatchRiskStatus.NORMAL, BatchRiskStatus.FROZEN, AUDIT_ACTION_RELEASE, "解除冻结"),
+        /** PB5：NORMAL / FROZEN → RECALLED（expectedFrom 为 null 表示两者之一）。 */
+        RECALL(BatchRiskStatus.RECALLED, null, AUDIT_ACTION_RECALL, "模拟召回");
 
         final BatchRiskStatus target;
         final BatchRiskStatus expectedFrom;
         final String auditAction;
         final String label;
 
-        ManualAction(BatchRiskStatus target, BatchRiskStatus expectedFrom, String auditAction, String label) {
+        RiskAction(BatchRiskStatus target, BatchRiskStatus expectedFrom, String auditAction, String label) {
             this.target = target;
             this.expectedFrom = expectedFrom;
             this.auditAction = auditAction;
@@ -104,6 +123,41 @@ public class BatchRiskService {
 
     /** 核心转换结果：{@code replayed} 为 true 表示命中并发同键的已提交转换，本次未写入。 */
     private record Applied(BatchRiskTransition transition, boolean replayed) {
+    }
+
+    /**
+     * 告警自动冻结的单批次结果（PB3）。
+     *
+     * @param batch            持锁读取的批次（转换前事实）
+     * @param riskStatusBefore 快照时风险状态
+     * @param transition       本次自动冻结写入的转换；快照时已非 NORMAL（已冻结 / 已召回）时为 null，未写入任何转换
+     */
+    public record AlertFreezeOutcome(Batch batch, String riskStatusBefore, BatchRiskTransition transition) {
+    }
+
+    /**
+     * 批次当前未解除的风险事项（统一读取模型；Phase B 独立评审修复）。
+     *
+     * @param alertHolds       未解除的告警风险事项（按告警 ID 升序）；批次已 RECALLED 时为空（召回解除全部风险事项）
+     * @param manualFreezeHold 批次处于 FROZEN 且当前冻结期由人工风险冻结开启、尚未人工解除
+     */
+    public record RiskHolds(List<PendingAlertHold> alertHolds, boolean manualFreezeHold) {
+
+        public boolean isEmpty() {
+            return alertHolds.isEmpty() && !manualFreezeHold;
+        }
+    }
+
+    /**
+     * 告警放行结论的结果（Phase B 独立评审修复）。
+     *
+     * @param batch               持锁读取的批次（放行前事实）
+     * @param transition          本结论解除了批次最后一个风险事项时写入的放行转换（FROZEN → NORMAL）；否则为 null，批次保持 FROZEN
+     * @param remainingAlertHolds 仍未解除的其他告警风险事项（按告警 ID 升序）
+     * @param manualFreezeHold    人工风险冻结仍未解除
+     */
+    public record AlertReleaseOutcome(Batch batch, BatchRiskTransition transition, List<PendingAlertHold> remainingAlertHolds,
+                                      boolean manualFreezeHold) {
     }
 
     private final BatchMapper batchMapper;
@@ -132,7 +186,7 @@ public class BatchRiskService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public BatchRiskTransitionResponse freeze(Long batchId, BatchRiskTransitionRequest req, String idempotencyKey,
                                               TraceSecurityPrincipal principal) {
-        return manualTransition(ManualAction.FREEZE, batchId, req, idempotencyKey, principal);
+        return manualTransition(RiskAction.FREEZE, batchId, req, idempotencyKey, principal);
     }
 
     /**
@@ -141,7 +195,7 @@ public class BatchRiskService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public BatchRiskTransitionResponse release(Long batchId, BatchRiskTransitionRequest req, String idempotencyKey,
                                                TraceSecurityPrincipal principal) {
-        return manualTransition(ManualAction.RELEASE, batchId, req, idempotencyKey, principal);
+        return manualTransition(RiskAction.RELEASE, batchId, req, idempotencyKey, principal);
     }
 
     /**
@@ -187,7 +241,7 @@ public class BatchRiskService {
      * 或批次已交接给其他组织之后）返回本组织原转换记录，不产生新写入。
      * </p>
      */
-    private BatchRiskTransitionResponse manualTransition(ManualAction action, Long batchId, BatchRiskTransitionRequest req,
+    private BatchRiskTransitionResponse manualTransition(RiskAction action, Long batchId, BatchRiskTransitionRequest req,
                                                          String idempotencyKey, TraceSecurityPrincipal principal) {
         checkWriteAccess(principal);
         String cleanKey = validateIdempotencyKey(idempotencyKey);
@@ -216,10 +270,15 @@ public class BatchRiskService {
             throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权",
                     "只有批次当前责任组织的质量管理员可以" + action.label);
         }
+        // PB4：处于未处置告警中的批次只能依据检验结论经告警放行，人工接口不能绕过质量结论解除冻结
+        if (action == RiskAction.RELEASE && transitionMapper.countPendingAlertDecisions(batch.getId()) > 0) {
+            throw new BusinessException(HttpStatus.CONFLICT, "ALERT_DECISION_REQUIRED", "需经告警质量结论放行",
+                    "批次处于尚未处置的持续超温告警中，请在告警中依据检验结论放行，不能直接解除冻结");
+        }
 
         // 4. 风险核心：状态校验 → 追加台账 → 批次条件更新
         LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS);
-        Applied applied = applyTransition(batch, action, BatchRiskSourceType.MANUAL, principal.getUserId(),
+        Applied applied = applyTransition(batch, action, BatchRiskSourceType.MANUAL, principal.getUserId(), null, null,
                 reason, cleanKey, requestHash, nowUtc);
         if (applied.replayed()) {
             return BatchRiskTransitionResponse.fromEntity(applied.transition());
@@ -239,16 +298,190 @@ public class BatchRiskService {
         return BatchRiskTransitionResponse.fromEntity(t);
     }
 
+    // =========================================================================
+    // 系统路径：在途持续超温告警自动冻结（PB3）
+    // =========================================================================
+
+    /**
+     * 告警创建时自动冻结受影响批次（契约 §10.2 步骤 3–4、§13 步骤 3–4）。
+     * <p>
+     * 必须在调用方已开启的 READ COMMITTED 事务内调用（温度登记：已持有运输任务行锁并已插入告警行）。
+     * 先按批次 ID 升序取得全部批次行锁，再逐个转换：NORMAL → FROZEN（来源 ALERT、source_alert_id、无操作人、
+     * 系统幂等键 {@code SYS:ALERT:{alertId}:BATCH:{batchId}}），写 RISK_FREEZE 审计（系统操作，无操作人）；
+     * 已冻结或已召回的批次不写入任何转换。流转状态、数量、责任组织与公开追溯码均不变，不生成 TraceEvent。
+     * 批次缺失或当前责任组织不是告警归属组织（在途期间不可能发生）时失败关闭，整个温度登记回滚。
+     * </p>
+     *
+     * @return 每个受影响批次一条结果，按批次 ID 升序
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public List<AlertFreezeOutcome> freezeForAlert(Long alertId, String alertNo, Long alertOrgId, Collection<Long> batchIds,
+                                                   LocalDateTime nowUtc) {
+        Objects.requireNonNull(alertId, "alertId 不能为空");
+        List<Long> ordered = batchIds.stream().distinct().sorted().toList();
+        List<Batch> locked = new ArrayList<>(ordered.size());
+        for (Long batchId : ordered) {
+            Batch batch = batchMapper.selectByIdIgnoreTenantForUpdate(batchId);
+            if (batch == null || !Objects.equals(batch.getOrgId(), alertOrgId)) {
+                throw new BusinessException(HttpStatus.INTERNAL_SERVER_ERROR, "ALERT_SCOPE_INTEGRITY", "告警影响范围数据不一致",
+                        "运输任务装载批次缺失或其当前责任组织不是运输任务发货方，已拒绝本次温度登记");
+            }
+            locked.add(batch);
+        }
+        String reason = "在途持续超温告警 " + alertNo + " 系统自动风险冻结";
+        List<AlertFreezeOutcome> outcomes = new ArrayList<>(locked.size());
+        for (Batch batch : locked) {
+            String before = batch.getRiskStatus();
+            if (!BatchRiskStatus.NORMAL.name().equals(before)) {
+                outcomes.add(new AlertFreezeOutcome(batch, before, null));
+                continue;
+            }
+            String key = RESERVED_SYSTEM_KEY_PREFIX + "ALERT:" + alertId + ":BATCH:" + batch.getId();
+            String hash = computeSystemRequestHash("ALERT_FREEZE", alertId, batch.getId());
+            Applied applied = applyTransition(batch, RiskAction.FREEZE, BatchRiskSourceType.ALERT, null, alertId, null,
+                    reason, key, hash, nowUtc);
+            if (applied.replayed()) {
+                throw new BusinessException(HttpStatus.INTERNAL_SERVER_ERROR, "ALERT_SCOPE_INTEGRITY", "告警影响范围数据不一致",
+                        "新建告警的系统冻结键已被占用，已拒绝本次温度登记");
+            }
+            BatchRiskTransition t = applied.transition();
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("transitionId", t.getId());
+            summary.put("fromStatus", t.getFromStatus());
+            summary.put("toStatus", t.getToStatus());
+            summary.put("flowStatus", t.getFlowStatus());
+            summary.put("sourceType", t.getSourceType());
+            summary.put("sourceAlertId", alertId);
+            auditService.recordAudit(null, batch.getOrgId(), AUDIT_ACTION_FREEZE, AUDIT_OBJECT_TYPE, batch.getId(),
+                    nowUtc, "SUCCESS", serializeSummary(summary));
+            outcomes.add(new AlertFreezeOutcome(batch, before, t));
+        }
+        return outcomes;
+    }
+
+    /**
+     * 批次当前未解除的风险事项（统一读取模型）：告警放行判定（持有批次行锁后）、告警详情与批次风险事项查询（只读快照）共用。
+     * 调用方传入的风险状态必须与本次读取来自同一事务视图（持锁读取的批次，或只读快照中的批次）。
+     */
+    public RiskHolds openHolds(Long batchId, String riskStatus) {
+        if (BatchRiskStatus.RECALLED.name().equals(riskStatus)) {
+            return new RiskHolds(List.of(), false);
+        }
+        List<PendingAlertHold> alertHolds = transitionMapper.selectPendingAlertHolds(batchId);
+        boolean manual = BatchRiskStatus.FROZEN.name().equals(riskStatus)
+                && BatchRiskSourceType.MANUAL.name().equals(transitionMapper.selectLatestFreezeSourceType(batchId));
+        return new RiskHolds(alertHolds, manual);
+    }
+
+    /**
+     * 告警放行结论（PB4；Phase B 独立评审修复；契约 §4.2 / §10.2 步骤 7 / §13 步骤 10）。
+     * <p>
+     * 必须在调用方已开启的 READ COMMITTED 事务内调用（告警放行：已持有告警行锁）。锁定批次行后先校验当前责任组织，再执行
+     * 调用方的锁后守卫（依据检验结论的判定：检验报告提交同样先锁批次行，因此守卫读到的是放行时刻的最新结论），然后在同一批次行锁下
+     * 读取批次的其他未解除风险事项：
+     * <ul>
+     *   <li>仍有其他未处置告警未对该批次形成放行结论，或人工风险冻结尚未人工解除：只返回结论结果，不写任何转换，批次保持 FROZEN；</li>
+     *   <li>本结论解除了最后一个风险事项：经风险核心 FROZEN → NORMAL（来源 ALERT、有操作人）并写 RISK_RELEASE 审计，
+     *       系统幂等键 {@code SYS:ALERT-RELEASE:{alertId}:BATCH:{batchId}}。</li>
+     * </ul>
+     * 读取稳定：创建告警风险事项（告警冻结 / 快照）、形成其他告警的放行结论与召回都先锁同一批次行；仍有未解除风险事项的告警不能形成处置结论。
+     * 锁顺序 alert → batch，不获取任何其他锁。
+     * </p>
+     *
+     * @param guardAfterLock 批次行锁之后、判定之前执行的守卫（抛出业务异常即拒绝放行）
+     * @return 放行结论结果（{@code transition} 为 null 表示批次仍被其他风险事项保持 FROZEN）
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public AlertReleaseOutcome releaseForAlert(Long alertId, Long batchId, Long actorUserId, Long actorOrgId, String reason,
+                                               Consumer<Batch> guardAfterLock, LocalDateTime nowUtc) {
+        Objects.requireNonNull(alertId, "alertId 不能为空");
+        Batch batch = batchMapper.selectByIdIgnoreTenantForUpdate(batchId);
+        if (batch == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + batchId + " 的批次");
+        }
+        if (!Objects.equals(batch.getOrgId(), actorOrgId)) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权",
+                    "只有批次当前责任组织的质量管理员可以放行");
+        }
+        guardAfterLock.accept(batch);
+        RiskHolds holds = openHolds(batch.getId(), batch.getRiskStatus());
+        List<PendingAlertHold> remaining = holds.alertHolds().stream().filter(h -> !alertId.equals(h.getAlertId())).toList();
+        if (!remaining.isEmpty() || holds.manualFreezeHold()) {
+            return new AlertReleaseOutcome(batch, null, remaining, holds.manualFreezeHold());
+        }
+        String key = RESERVED_SYSTEM_KEY_PREFIX + "ALERT-RELEASE:" + alertId + ":BATCH:" + batchId;
+        String hash = computeSystemRequestHash("ALERT_RELEASE", alertId, batchId);
+        Applied applied = applyTransition(batch, RiskAction.RELEASE, BatchRiskSourceType.ALERT, actorUserId, alertId, null,
+                reason, key, hash, nowUtc);
+        if (applied.replayed()) {
+            throw invalidTransition("该告警已放行过此批次");
+        }
+        BatchRiskTransition t = applied.transition();
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("transitionId", t.getId());
+        summary.put("fromStatus", t.getFromStatus());
+        summary.put("toStatus", t.getToStatus());
+        summary.put("flowStatus", t.getFlowStatus());
+        summary.put("sourceType", t.getSourceType());
+        summary.put("sourceAlertId", alertId);
+        auditService.recordAudit(actorUserId, actorOrgId, AUDIT_ACTION_RELEASE, AUDIT_OBJECT_TYPE, batch.getId(),
+                nowUtc, "SUCCESS", serializeSummary(summary));
+        return new AlertReleaseOutcome(batch, t, List.of(), false);
+    }
+
+    /**
+     * 模拟召回转换（PB5；契约 §4.2 / §13 步骤 11–12）：NORMAL / FROZEN → RECALLED，来源 RECALL、有操作人。
+     * <p>
+     * 必须在调用方已开启的 READ COMMITTED 事务内调用；调用方（召回服务）已按批次 ID 升序持有全部待召回批次的行锁并完成证据校验，
+     * 这里的锁定读只是在已持有的锁上取得最新行。批次当前责任组织必须是召回发起组织；ACTIVE 与 CLOSED 均可（已售罄批次保持 CLOSED，
+     * 同时记录 RECALLED），不改变数量、流转状态与责任组织，不生成 TraceEvent。系统幂等键 {@code SYS:RECALL:{recallId}:BATCH:{batchId}}。
+     * </p>
+     *
+     * @return 写入的 RECALLED 转换
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public BatchRiskTransition recallForCase(Long recallId, Long batchId, Long actorUserId, Long actorOrgId, String reason,
+                                             LocalDateTime nowUtc) {
+        Objects.requireNonNull(recallId, "recallId 不能为空");
+        Batch batch = batchMapper.selectByIdIgnoreTenantForUpdate(batchId);
+        if (batch == null) {
+            throw new ResourceNotFoundException("未找到 ID 为 " + batchId + " 的批次");
+        }
+        if (!Objects.equals(batch.getOrgId(), actorOrgId)) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权",
+                    "只有批次当前责任组织的质量管理员可以对该批次发起模拟召回");
+        }
+        String key = RESERVED_SYSTEM_KEY_PREFIX + "RECALL:" + recallId + ":BATCH:" + batchId;
+        String hash = computeSystemRequestHash("RECALL", recallId, batchId);
+        Applied applied = applyTransition(batch, RiskAction.RECALL, BatchRiskSourceType.RECALL, actorUserId, null, recallId,
+                reason, key, hash, nowUtc);
+        if (applied.replayed()) {
+            throw invalidTransition("该召回已转换过此批次");
+        }
+        BatchRiskTransition t = applied.transition();
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("transitionId", t.getId());
+        summary.put("fromStatus", t.getFromStatus());
+        summary.put("toStatus", t.getToStatus());
+        summary.put("flowStatus", t.getFlowStatus());
+        summary.put("sourceType", t.getSourceType());
+        summary.put("sourceRecallId", recallId);
+        auditService.recordAudit(actorUserId, actorOrgId, AUDIT_ACTION_RECALL, AUDIT_OBJECT_TYPE, batch.getId(),
+                nowUtc, "SUCCESS", serializeSummary(summary));
+        return t;
+    }
+
     /**
      * 风险状态转换核心（唯一写入口）。
      * <p>
      * 前提：调用方已在 READ COMMITTED 事务内持有该批次行锁（FOR UPDATE），并已完成权限、责任组织与幂等复读。
      * 本方法不再获取任何业务锁；插入台账行时只会在幂等唯一索引上等待（锁在批次行锁之后获取）。
-     * 状态矩阵：ACTIVE / CLOSED 上 NORMAL ⇄ FROZEN；DRAFT 不参与；RECALLED 为终态；方向不符 409。
+     * 状态矩阵：ACTIVE / CLOSED 上 NORMAL ⇄ FROZEN、NORMAL / FROZEN → RECALLED（仅召回来源）；DRAFT 不参与；RECALLED 为终态；方向不符 409。
      * </p>
      */
-    private Applied applyTransition(Batch locked, ManualAction action, BatchRiskSourceType sourceType, Long actorUserId,
-                                    String reason, String idempotencyKey, String requestHash, LocalDateTime nowUtc) {
+    private Applied applyTransition(Batch locked, RiskAction action, BatchRiskSourceType sourceType, Long actorUserId,
+                                    Long sourceAlertId, Long sourceRecallId, String reason, String idempotencyKey,
+                                    String requestHash, LocalDateTime nowUtc) {
         String flowStatus = locked.getFlowStatus();
         String fromStatus = locked.getRiskStatus();
         if (!BatchFlowStatus.ACTIVE.name().equals(flowStatus) && !BatchFlowStatus.CLOSED.name().equals(flowStatus)) {
@@ -257,8 +490,12 @@ public class BatchRiskService {
         if (BatchRiskStatus.RECALLED.name().equals(fromStatus)) {
             throw invalidTransition("批次已进入模拟召回（RECALLED 为风险终态），不能" + action.label);
         }
-        if (!action.expectedFrom.name().equals(fromStatus)) {
-            throw invalidTransition(action == ManualAction.FREEZE
+        if (action == RiskAction.RECALL) {
+            if (!BatchRiskStatus.NORMAL.name().equals(fromStatus) && !BatchRiskStatus.FROZEN.name().equals(fromStatus)) {
+                throw invalidTransition("批次当前风险状态不能进入模拟召回 (riskStatus=" + fromStatus + ")");
+            }
+        } else if (!action.expectedFrom.name().equals(fromStatus)) {
+            throw invalidTransition(action == RiskAction.FREEZE
                     ? "批次已处于风险冻结状态 (riskStatus=" + fromStatus + ")"
                     : "批次当前未处于风险冻结状态，无需解除 (riskStatus=" + fromStatus + ")");
         }
@@ -270,6 +507,8 @@ public class BatchRiskService {
         t.setFromStatus(fromStatus);
         t.setToStatus(action.target.name());
         t.setSourceType(sourceType.name());
+        t.setSourceAlertId(sourceAlertId);
+        t.setSourceRecallId(sourceRecallId);
         t.setActorUserId(actorUserId);
         t.setReason(reason);
         t.setIdempotencyKey(idempotencyKey);
@@ -368,8 +607,22 @@ public class BatchRiskService {
     /**
      * 规范化请求语义哈希：动作、批次与去除首尾空白后的原因；冻结与解除共用同一幂等键空间。
      */
-    static String computeRequestHash(ManualAction action, Long batchId, String reason) {
+    static String computeRequestHash(RiskAction action, Long batchId, String reason) {
         String canonical = String.join("\u001F", "BATCH_RISK_TRANSITION", "v1", action.name(), String.valueOf(batchId), reason);
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("缺少 SHA-256 算法支持", e);
+        }
+    }
+
+    /**
+     * 系统路径请求语义哈希：来源动作、来源对象与批次（系统键由服务端生成，哈希只用于台账形状一致）。
+     */
+    static String computeSystemRequestHash(String systemAction, Long sourceId, Long batchId) {
+        String canonical = String.join("\u001F", "BATCH_RISK_TRANSITION", "v1", "SYSTEM", systemAction,
+                String.valueOf(sourceId), String.valueOf(batchId));
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             return HexFormat.of().formatHex(digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));

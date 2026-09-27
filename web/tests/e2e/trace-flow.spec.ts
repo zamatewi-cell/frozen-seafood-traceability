@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { mockSuccessTrace, mockRecalledTrace, mockEmptyTimelineTrace, mockClosedRecalledTrace, mockClosedFrozenTrace } from './fixtures'
+import { mockSuccessTrace, mockRecalledTrace, mockEmptyTimelineTrace, mockClosedRecalledTrace, mockClosedFrozenTrace, mockRecallDisposedTrace } from './fixtures'
 
 test.describe('Consumer Trace Flow', () => {
   test('manual entry flow on /trace with keyboard and click submission', async ({ page }) => {
@@ -194,5 +194,23 @@ test.describe('Consumer Trace Flow', () => {
     await expect(notFoundCard).toBeVisible()
     await expect(notFoundCard).toContainText('未找到追溯信息')
     expect(apiCalled).toBe(false) // 客户端直接拦截
+  })
+
+  test('closed simulated recall shows the controlled disposition and both statuses without any internal recall fact (PB6)', async ({ page }) => {
+    await page.route(`**/api/public/v1/public/traces/${mockRecallDisposedTrace.publicTraceId}`, (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: mockRecallDisposedTrace, meta: { requestId: 'req-e2e-pb6', timestamp: '2026-09-26T08:00:00Z' } })
+    }))
+    await page.goto(`/trace/${mockRecallDisposedTrace.publicTraceId}`)
+    const disposition = page.getByTestId('public-recall-disposition')
+    await expect(disposition).toHaveAttribute('data-status', 'CLOSED')
+    await expect(disposition).toContainText('处置已完成')
+    await expect(disposition).toContainText('非真实召回结论')
+    await expect(disposition).toContainText('2026-09-26')
+    await expect(page.getByTestId('public-flow-status')).toHaveText('已关闭')
+    await expect(page.getByTestId('public-risk-status')).toHaveText('模拟召回')
+    await expect(page.locator('body')).not.toContainText('RCL-')
+    await expect(page.locator('body')).not.toContainText('法定召回已完成')
   })
 })

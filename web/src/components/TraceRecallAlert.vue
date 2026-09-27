@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import AppIcons from '@/components/icons/AppIcons.vue'
 
+import type { PublicRecallDisposition } from '@/types/trace'
+
 defineProps<{
   notice?: string | null
+  /** PB6：模拟召回处置进展（受控状态、固定文案与处置完成日期）。 */
+  disposition?: PublicRecallDisposition | null
 }>()
 </script>
 
@@ -18,6 +22,10 @@ defineProps<{
       </div>
       <p class="recall-text">
         {{ notice || '此批次海产品已启动系统模拟召回演练，流通环节已暂停，请联系销售商或质量管理部门处理（本提示为系统教学演练模拟信息）。' }}
+      </p>
+      <p v-if="disposition" class="recall-disposition" data-testid="public-recall-disposition" :data-status="disposition.status">
+        <strong>{{ disposition.status === 'CLOSED' ? '处置已完成' : '处置进行中' }}：</strong>{{ disposition.label }}
+        <span v-if="disposition.closedDate">（{{ disposition.closedDate }}）</span>
       </p>
       <div class="recall-subnote">
         <AppIcons name="info" size="14" color="#b91c1c" />
@@ -73,6 +81,12 @@ defineProps<{
   line-height: 1.5;
   color: #7f1d1d;
   font-weight: 500;
+}
+.recall-disposition {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #7f1d1d;
 }
 .recall-subnote {
   display: flex;

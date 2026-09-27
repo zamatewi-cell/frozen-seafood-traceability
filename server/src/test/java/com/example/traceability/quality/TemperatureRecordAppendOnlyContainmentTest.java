@@ -34,7 +34,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * 扫描全部生产 SQL 所在位置（{@code src/main/java} 与 {@code src/main/resources} 中的非迁移 XML / SQL）：
  * 任何对 {@code temperature_record} 的 UPDATE / DELETE、条件构造器写入或越权注入温度记录 mapper 都会让本测试失败。
- * 同时固定 PB2 的范围：温度服务不调用风险核心、不写批次风险状态、不生成 TraceEvent、不引用 Alert；
+ * 同时固定温度服务的范围：温度服务自身不调用风险核心、不写批次风险状态、不生成 TraceEvent，持续超温判定只经
+ * {@code TemperatureExcursionAlertService}（PB3）委托，而告警系统路径只经风险核心冻结批次、同样不生成 TraceEvent；
  * Java 侧开放的数据来源与判定取值与 V13 的 CHECK 约束严格一致；幂等复读与到达的最新测量时间读取都真正访问数据库，
  * 且唯一的锁定读只锁温度记录行，不锁规则表。
  * </p>
@@ -137,13 +138,13 @@ class TemperatureRecordAppendOnlyContainmentTest {
     }
 
     @Test
-    @DisplayName("PB2 边界：温度服务不注入风险核心 / 批次写 mapper / 追溯事件 / 告警，不含 risk_status 或 FOR UPDATE 批次读取")
-    void temperatureServiceStaysWithinPb2() throws IOException {
+    @DisplayName("温度服务边界：不注入风险核心 / 批次写 mapper / 追溯事件，告警只经持续超温系统路径委托，不含 risk_status 或 FOR UPDATE 批次读取")
+    void temperatureServiceStaysWithinBoundary() throws IOException {
         // 只检查代码：Javadoc / 注释中说明“不做什么”的文字不算引用
-        String src = Files.readString(MAIN_JAVA.resolve(
-                "com/example/traceability/quality/application/ShipmentTemperatureService.java"), StandardCharsets.UTF_8)
-                .replaceAll("(?s)/\\*.*?\\*/", "")
-                .replaceAll("//[^\\n]*", "");
+        String src = code("com/example/traceability/quality/application/ShipmentTemperatureService.java")
+                .replace("TemperatureExcursionAlertService", "")
+                .replace("excursionAlertService.raiseSustainedExcursionAlerts", "")
+                .replace("excursionAlertService", "");
         for (String forbidden : List.of("BatchRiskService", "BatchRiskStateMapper", "BatchRiskTransitionMapper",
                 "TraceEventApplicationService", "TraceEventMapper", "Alert", "risk_status", "setRiskStatus",
                 "selectByIdForUpdate(transfer", "selectByIdIgnoreTenantForUpdate", "Quarantine", "Recall", "InspectionReport")) {
@@ -152,6 +153,25 @@ class TemperatureRecordAppendOnlyContainmentTest {
         Set<String> fieldTypes = Set.copyOf(Arrays.stream(ShipmentTemperatureService.class.getDeclaredFields())
                 .map(Field::getType).map(Class::getSimpleName).toList());
         assertThat(fieldTypes).doesNotContain("BatchRiskService", "TraceEventApplicationService");
+    }
+
+    @Test
+    @DisplayName("告警系统路径（PB3）只经风险核心冻结批次：不引用风险 mapper / 追溯事件 / 批次写入，不含 risk_status")
+    void excursionAlertPathUsesRiskCoreOnly() throws IOException {
+        String src = code("com/example/traceability/quality/application/TemperatureExcursionAlertService.java");
+        assertThat(src).contains("batchRiskService.freezeForAlert(");
+        for (String forbidden : List.of("BatchRiskStateMapper", "BatchRiskTransitionMapper", "BatchMapper",
+                "TraceEventApplicationService", "TraceEventMapper", "risk_status", "setRiskStatus", "TemperatureRecordMapper",
+                "ShipmentMapper", "updateByIdAndVersion", "PublicTraceCode")) {
+            assertThat(src).as("TemperatureExcursionAlertService must not reference %s", forbidden)
+                    .doesNotContainPattern("(?<![A-Za-z])" + Pattern.quote(forbidden) + "(?![A-Za-z])");
+        }
+    }
+
+    private static String code(String relative) throws IOException {
+        return Files.readString(MAIN_JAVA.resolve(relative), StandardCharsets.UTF_8)
+                .replaceAll("(?s)/\\*.*?\\*/", "")
+                .replaceAll("//[^\\n]*", "");
     }
 
     @Test

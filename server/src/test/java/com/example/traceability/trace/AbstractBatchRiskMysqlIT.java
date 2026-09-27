@@ -89,22 +89,40 @@ abstract class AbstractBatchRiskMysqlIT extends AbstractTransferShipmentMysqlIT 
      */
     protected void assertLedgerConsistent(Long batchId) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "SELECT from_status, to_status, source_type, actor_user_id FROM batch_risk_transition WHERE batch_id = ? ORDER BY id", batchId);
+                "SELECT from_status, to_status, source_type, source_alert_id, actor_user_id FROM batch_risk_transition "
+                        + "WHERE batch_id = ? ORDER BY id", batchId);
         String previous = null;
         for (Map<String, Object> r : rows) {
             if (previous != null) {
                 assertThat(r.get("from_status")).as("ledger chain continuity").isEqualTo(previous);
             }
-            assertThat(r.get("source_type")).isEqualTo("MANUAL");
-            assertThat(r.get("actor_user_id")).isNotNull();
+            if ("RECALL".equals(r.get("source_type"))) {
+                // PB5 模拟召回：类型化召回来源，质量管理员操作人，只转为 RECALLED
+                assertThat(r.get("to_status")).isEqualTo("RECALLED");
+                assertThat(r.get("actor_user_id")).isNotNull();
+            } else if ("ALERT".equals(r.get("source_type"))) {
+                // PB3 系统自动冻结（无操作人）/ PB4 依据检验结论放行（质量管理员操作人）：类型化告警来源
+                assertThat(r.get("source_alert_id")).isNotNull();
+                if ("FROZEN".equals(r.get("to_status"))) {
+                    assertThat(r.get("actor_user_id")).isNull();
+                } else {
+                    assertThat(r.get("actor_user_id")).isNotNull();
+                }
+            } else {
+                assertThat(r.get("source_type")).isEqualTo("MANUAL");
+                assertThat(r.get("actor_user_id")).isNotNull();
+                assertThat(r.get("source_alert_id")).isNull();
+            }
             previous = (String) r.get("to_status");
         }
         if (previous != null) {
             assertThat(riskStatus(batchId)).as("batch.risk_status equals the newest ledger to_status").isEqualTo(previous);
         }
         long freezes = rows.stream().filter(r -> "FROZEN".equals(r.get("to_status"))).count();
+        long recalls = rows.stream().filter(r -> "RECALLED".equals(r.get("to_status"))).count();
         assertThat(auditRows(batchId, "RISK_FREEZE")).isEqualTo((int) freezes);
-        assertThat(auditRows(batchId, "RISK_RELEASE")).isEqualTo(rows.size() - (int) freezes);
+        assertThat(auditRows(batchId, "RISK_RECALL")).isEqualTo((int) recalls);
+        assertThat(auditRows(batchId, "RISK_RELEASE")).isEqualTo(rows.size() - (int) freezes - (int) recalls);
     }
 
     // =========================================================================

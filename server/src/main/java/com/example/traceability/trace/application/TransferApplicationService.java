@@ -10,7 +10,9 @@ import com.example.traceability.batch.mapper.BatchOperationItemMapper;
 import com.example.traceability.common.exception.BusinessException;
 import com.example.traceability.common.exception.ResourceNotFoundException;
 import com.example.traceability.identity.domain.Organization;
+import com.example.traceability.identity.domain.Site;
 import com.example.traceability.identity.mapper.OrganizationMapper;
+import com.example.traceability.identity.mapper.SiteMapper;
 import com.example.traceability.identity.security.TraceSecurityPrincipal;
 import com.example.traceability.trace.domain.Shipment;
 import com.example.traceability.trace.domain.ShipmentStatus;
@@ -20,6 +22,7 @@ import com.example.traceability.trace.domain.TransferStatus;
 import com.example.traceability.trace.dto.TransferAcceptRequest;
 import com.example.traceability.trace.dto.TransferCreateRequest;
 import com.example.traceability.trace.dto.TransferPatchRequest;
+import com.example.traceability.trace.dto.TransferQuarantineRequest;
 import com.example.traceability.trace.dto.TransferRejectRequest;
 import com.example.traceability.trace.dto.TransferResponse;
 import com.example.traceability.trace.dto.TransferSubmitRequest;
@@ -56,7 +59,8 @@ import java.util.stream.Collectors;
 /**
  * 企业间整批交接应用服务。
  * <p>
- * 负责整批交接生命周期（DRAFT -> PENDING -> ACCEPTED / REJECTED）业务编排。Transfer 只表达责任交接，
+ * 负责整批交接生命周期（DRAFT -> PENDING -> ACCEPTED / REJECTED，Phase B PB4 起 PENDING -> QUARANTINED -> ACCEPTED / REJECTED）
+ * 业务编排。Transfer 只表达责任交接，
  * 物理运输由 Shipment 承担（统一业务契约 v1.1 §7）：
  * <ul>
  *   <li>创建交接草稿：批次快照锁定，排他活跃校验，防已消耗批次流转，uk_transfer_open_batch 冲突安全捕获；
@@ -67,6 +71,9 @@ import java.util.stream.Collectors;
  *   <li>接收方接受：关联运输任务必须已 DELIVERED；实收计量单位匹配与正数量校验，差异强制说明，
  *       原子转移批次及公开追溯码当前责任组织；不生成 ARRIVAL（ARRIVAL 唯一来源为 Shipment 到达）；</li>
  *   <li>接收方拒收：关联运输任务必须已 DELIVERED；保存拒收原因，不转移批次，不写追溯事件；</li>
+ *   <li>接收方隔离收货（PB4）：关联运输任务必须已 DELIVERED；登记实收数量、隔离场所（接收方启用场所）与原因，
+ *       批次当前责任组织仍为发送方、数量与风险状态不变，不写追溯事件；隔离交接仍属未结束交接（批次不能再发起交接、加工或销售）。
+ *       隔离后依据质量结论：批次风险恢复正常后才能 ACCEPT（沿用隔离时登记的实收事实），任何风险状态下都可以 REJECT；</li>
  *   <li>统一行锁顺序 shipment → transfer → batch，避免与运输任务发运 / 装载清单变更并发时死锁；</li>
  *   <li>多动作统一幂等：基于 SHA-256 规范化语义哈希（消除 BigDecimal 尾随零歧义），结合行级锁后当前读消除快照盲区；</li>
  *   <li>SQL 跨租户数据隔离防越权与审计 JSON 安全序列化。</li>
@@ -91,6 +98,7 @@ public class TransferApplicationService {
     private final AuditApplicationService auditService;
     private final PublicTraceCodeMapper publicTraceCodeMapper;
     private final ShipmentMapper shipmentMapper;
+    private final SiteMapper siteMapper;
     private final ObjectMapper objectMapper;
 
     public TransferApplicationService(
@@ -102,6 +110,7 @@ public class TransferApplicationService {
             AuditApplicationService auditService,
             PublicTraceCodeMapper publicTraceCodeMapper,
             ShipmentMapper shipmentMapper,
+            SiteMapper siteMapper,
             ObjectMapper objectMapper
     ) {
         this.transferMapper = Objects.requireNonNull(transferMapper, "transferMapper 不能为空");
@@ -112,6 +121,7 @@ public class TransferApplicationService {
         this.auditService = Objects.requireNonNull(auditService, "auditService 不能为空");
         this.publicTraceCodeMapper = Objects.requireNonNull(publicTraceCodeMapper, "publicTraceCodeMapper 不能为空");
         this.shipmentMapper = Objects.requireNonNull(shipmentMapper, "shipmentMapper 不能为空");
+        this.siteMapper = Objects.requireNonNull(siteMapper, "siteMapper 不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper 不能为空");
     }
 
@@ -750,12 +760,13 @@ public class TransferApplicationService {
                     "仅指定接收企业有权接受货物交接"
             );
         }
-        if (transfer.getStatus() != TransferStatus.PENDING) {
+        boolean fromQuarantine = transfer.getStatus() == TransferStatus.QUARANTINED;
+        if (transfer.getStatus() != TransferStatus.PENDING && !fromQuarantine) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
                     "INVALID_STATE_TRANSITION",
                     "非法状态流转",
-                    "仅 PENDING 状态交接允许接受，当前状态为: " + transfer.getStatus()
+                    "仅 PENDING 或 QUARANTINED 状态交接允许接受，当前状态为: " + transfer.getStatus()
             );
         }
         if (!Objects.equals(transfer.getVersion(), req.expectedVersion())) {
@@ -805,9 +816,20 @@ public class TransferApplicationService {
         // 防御性：已开始终端销售的批次不可能存在未结束交接，若出现则拒绝接受
         BatchSaleGuard.rejectIfSaleStarted(batch, "接受交接");
 
-        // 9. 实收数量差异强制说明
+        // 9. 实收数量差异强制说明；经隔离收货的交接沿用隔离时登记的实收事实（数量必须一致，差异原因不重复填写）
+        if (fromQuarantine && req.receivedQuantity().compareTo(transfer.getReceivedQuantity()) != 0) {
+            throw new BusinessException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "QUARANTINE_RECEIPT_MISMATCH",
+                    "实收数量与隔离登记不一致",
+                    "隔离收货时已登记实收数量 " + transfer.getReceivedQuantity().stripTrailingZeros().toPlainString()
+                            + "，接受时的实收数量必须一致"
+            );
+        }
         boolean hasQuantityDiff = req.receivedQuantity().compareTo(transfer.getQuantity()) != 0;
-        if (hasQuantityDiff) {
+        if (fromQuarantine) {
+            diffReason = transfer.getDifferenceReason();
+        } else if (hasQuantityDiff) {
             if (diffReason == null || diffReason.isBlank()) {
                 throw new BusinessException(
                         HttpStatus.UNPROCESSABLE_ENTITY,
@@ -827,14 +849,16 @@ public class TransferApplicationService {
 
         Long expectedSenderOrgId = transfer.getSenderOrgId();
         Long expectedReceiverOrgId = transfer.getReceiverOrgId();
-        String expectedStatus = TransferStatus.PENDING.name();
+        String expectedStatus = transfer.getStatus().name();
 
-        // 10. 更新交接记录状态与决定字段
-        transfer.setReceivedAt(receivedAtUtc);
+        // 10. 更新交接记录状态与决定字段（经隔离收货时保留隔离登记的到货时间与实收事实）
+        if (!fromQuarantine) {
+            transfer.setReceivedAt(receivedAtUtc);
+            transfer.setReceivedQuantity(req.receivedQuantity());
+            transfer.setDifferenceReason(diffReason);
+        }
         transfer.setDecisionRecordedAt(nowUtc);
         transfer.setDecidedBy(principal.getUserId());
-        transfer.setReceivedQuantity(req.receivedQuantity());
-        transfer.setDifferenceReason(diffReason);
         transfer.setStatus(TransferStatus.ACCEPTED);
         transfer.setUpdatedBy(principal.getUserId());
 
@@ -926,6 +950,125 @@ public class TransferApplicationService {
     }
 
     /**
+     * 接收方隔离收货 (POST /api/v1/transfers/{transferId}/quarantine)，PENDING → QUARANTINED（Phase B PB4；契约 v1.1 §7.3 / §10.3）。
+     * <p>
+     * 校验顺序：角色 → 幂等键 → 幂等预读 → shipment(FOR SHARE) → transfer(FOR UPDATE) → 锁后幂等复读 → 接收方 → PENDING → 版本 →
+     * 运输任务已到达 → 计量单位 → 到货时间（不早于运输到达、不晚于当前时间 5 分钟）→ 实收差异说明 → 隔离场所属于本组织且启用 →
+     * 条件更新 → 幂等记录 → 审计。不锁定、不修改批次：批次当前责任组织仍为发送方，数量与风险状态不变；不生成追溯事件。
+     * 批次风险状态不限（冻结批次正是隔离收货的主要场景）。
+     * </p>
+     */
+    @Transactional
+    public TransferResponse quarantineTransfer(
+            Long transferId,
+            TransferQuarantineRequest req,
+            String idempotencyKey,
+            TraceSecurityPrincipal principal
+    ) {
+        checkReceiverRole(principal);
+        String cleanKey = validateIdempotencyKey(idempotencyKey);
+        Long receiverOrgId = principal.getOrgId();
+
+        String action = "QUARANTINE";
+        String diffReason = req.differenceReason() != null && !req.differenceReason().isBlank() ? req.differenceReason().trim() : null;
+        String cleanReason = req.reason().trim();
+        LocalDateTime receivedAtUtc = req.occurredAt().atZoneSameInstant(ZoneOffset.UTC).toLocalDateTime()
+                .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        String requestHash = computeHash(action, transferId, req.receivedQuantity(), req.unitCode(), receivedAtUtc,
+                diffReason, req.quarantineSiteId(), cleanReason, req.expectedVersion());
+
+        // 1. 幂等普通读预检
+        TransferIdempotency existingIdem = idempotencyMapper.selectByOrgIdAndKey(receiverOrgId, cleanKey);
+        if (existingIdem != null) {
+            if (Objects.equals(existingIdem.getAction(), action) && Objects.equals(existingIdem.getRequestHash(), requestHash)) {
+                Transfer existingTransfer = transferMapper.selectById(existingIdem.getTransferId());
+                if (existingTransfer != null) {
+                    return toResponse(existingTransfer);
+                }
+            }
+            throw new BusinessException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "幂等隔离收货冲突",
+                    "当前幂等键已被本组织用于其他动作或不同语义的隔离收货请求");
+        }
+
+        // 2. shipment(FOR SHARE) → transfer(FOR UPDATE)，锁后当前读排他幂等检查
+        LockedTransfer locked = lockShipmentThenTransfer(transferId, false);
+        Transfer transfer = locked.transfer();
+        Shipment shipment = locked.shipment();
+        TransferIdempotency lockedIdem = idempotencyMapper.selectByOrgIdAndKeyForUpdate(receiverOrgId, cleanKey);
+        if (lockedIdem != null) {
+            if (Objects.equals(lockedIdem.getAction(), action) && Objects.equals(lockedIdem.getRequestHash(), requestHash)) {
+                Transfer existingTransfer = transferMapper.selectById(transferId);
+                return toResponse(existingTransfer != null ? existingTransfer : transfer);
+            }
+            throw new BusinessException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "并发幂等冲突",
+                    "当前幂等键已被本组织其他并发隔离收货请求占用");
+        }
+
+        // 3. 身份、状态、版本与运输到达
+        if (!Objects.equals(transfer.getReceiverOrgId(), receiverOrgId)) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "ORG_SCOPE_DENIED", "组织数据访问越权",
+                    "仅指定接收企业有权隔离收货");
+        }
+        if (transfer.getStatus() != TransferStatus.PENDING) {
+            throw new BusinessException(HttpStatus.CONFLICT, "INVALID_STATE_TRANSITION", "非法状态流转",
+                    "仅 PENDING 状态交接允许隔离收货，当前状态为: " + transfer.getStatus());
+        }
+        if (!Objects.equals(transfer.getVersion(), req.expectedVersion())) {
+            throw new BusinessException(HttpStatus.CONFLICT, "VERSION_CONFLICT", "资源版本冲突",
+                    "交接凭单版本已发生变化，请刷新后重试");
+        }
+        requireDeliveredShipment(shipment, "隔离收货");
+
+        // 4. 计量单位、到货时间与实收差异
+        if (!Objects.equals(req.unitCode(), transfer.getUnitCode())) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "UNIT_CODE_MISMATCH", "计量单位不匹配",
+                    "实收计量单位(" + req.unitCode() + ")与发货计量单位(" + transfer.getUnitCode() + ")不一致");
+        }
+        LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        if (receivedAtUtc.isAfter(nowUtc.plusMinutes(5)) || (shipment.getUnloadedAt() != null && receivedAtUtc.isBefore(shipment.getUnloadedAt()))) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_BUSINESS_TIME", "业务时间不合法",
+                    "到货时间不能早于运输任务确认到达时间，也不能晚于当前时间");
+        }
+        boolean hasQuantityDiff = req.receivedQuantity().compareTo(transfer.getQuantity()) != 0;
+        if (hasQuantityDiff && diffReason == null) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "DIFFERENCE_REASON_REQUIRED", "数量差异原因未填",
+                    "实收数量(" + req.receivedQuantity().stripTrailingZeros().toPlainString() + ")与发货数量("
+                            + transfer.getQuantity().stripTrailingZeros().toPlainString() + ")存在差异，必须说明原因");
+        }
+        if (!hasQuantityDiff) {
+            diffReason = null;
+        }
+
+        // 5. 隔离场所：接收方本组织的启用场所
+        Site site = siteMapper.selectByIdIgnoreTenant(req.quarantineSiteId());
+        if (site == null || !Objects.equals(site.getOrgId(), receiverOrgId) || !"ACTIVE".equals(site.getStatus())
+                || Objects.equals(site.getIsDeleted(), 1)) {
+            throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "QUARANTINE_SITE_INVALID", "隔离场所不可用",
+                    "隔离场所必须是本组织启用的场所");
+        }
+
+        // 6. 条件更新（组织、状态与版本谓词）
+        int updated = transferMapper.quarantineByIdAndVersion(transfer.getId(), receiverOrgId, req.expectedVersion(),
+                receivedAtUtc, req.receivedQuantity(), diffReason, site.getId(), cleanReason, nowUtc, principal.getUserId());
+        if (updated != 1) {
+            throw new BusinessException(HttpStatus.CONFLICT, "VERSION_CONFLICT", "资源版本冲突", "隔离收货发生并发冲突");
+        }
+
+        // 7. 幂等记录与审计（不生成追溯事件：隔离不是 §11 列出的追溯事实）
+        saveIdempotencyRecord(receiverOrgId, cleanKey, action, transfer.getId(), requestHash, nowUtc);
+        Map<String, Object> auditSummary = new LinkedHashMap<>();
+        auditSummary.put("receivedQuantity", req.receivedQuantity().stripTrailingZeros().toPlainString());
+        auditSummary.put("differenceReason", diffReason != null ? diffReason : "");
+        auditSummary.put("quarantineSiteId", site.getId());
+        auditSummary.put("reason", cleanReason);
+        auditService.recordAudit(principal.getUserId(), receiverOrgId, "QUARANTINE", "TRANSFER", transfer.getId(), nowUtc,
+                "SUCCESS", serializeSummary(auditSummary));
+
+        Transfer latest = transferMapper.selectById(transferId);
+        return toResponse(latest != null ? latest : transfer);
+    }
+
+    /**
      * 接收方拒收交接 (POST /api/v1/transfers/{transferId}/reject)。
      */
     @Transactional
@@ -998,12 +1141,13 @@ public class TransferApplicationService {
                     "仅指定接收企业有权拒收货物"
             );
         }
-        if (transfer.getStatus() != TransferStatus.PENDING) {
+        boolean rejectFromQuarantine = transfer.getStatus() == TransferStatus.QUARANTINED;
+        if (transfer.getStatus() != TransferStatus.PENDING && !rejectFromQuarantine) {
             throw new BusinessException(
                     HttpStatus.CONFLICT,
                     "INVALID_STATE_TRANSITION",
                     "非法状态流转",
-                    "仅 PENDING 状态交接允许拒收，当前状态为: " + transfer.getStatus()
+                    "仅 PENDING 或 QUARANTINED 状态交接允许拒收，当前状态为: " + transfer.getStatus()
             );
         }
         if (!Objects.equals(transfer.getVersion(), req.expectedVersion())) {
@@ -1022,9 +1166,12 @@ public class TransferApplicationService {
 
         Long expectedSenderOrgId = transfer.getSenderOrgId();
         Long expectedReceiverOrgId = transfer.getReceiverOrgId();
-        String expectedStatus = TransferStatus.PENDING.name();
+        String expectedStatus = transfer.getStatus().name();
 
-        transfer.setReceivedAt(rejectedAtUtc);
+        // 经隔离收货后拒收：保留隔离登记的到货时间与实收事实（货物已物理到达）
+        if (!rejectFromQuarantine) {
+            transfer.setReceivedAt(rejectedAtUtc);
+        }
         transfer.setDecisionRecordedAt(nowUtc);
         transfer.setDecidedBy(principal.getUserId());
         transfer.setRejectionReason(cleanReason);

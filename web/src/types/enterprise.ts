@@ -169,8 +169,11 @@ export interface Sale {
  * 批次公开追溯码（企业端视图）。一批一码、跨交接不换码；DISABLED 为终态（消费者查询与未知码一致返回未找到）。
  * RECALLED 码状态属于 Phase B，当前切片不会写入。
  */
-/** 风险状态转换来源类型：PB1 只有人工（MANUAL）；ALERT / RECALL 随后续阶段的数据库约束同时加入。 */
-export type BatchRiskSourceType = 'MANUAL'
+/**
+ * 风险状态转换来源类型：MANUAL（PB1，质量管理员人工处置）、ALERT（PB3 在途持续超温告警系统自动冻结，无操作人；
+ * PB4 依据检验结论放行，有操作人）、RECALL（PB5 模拟召回，转为风险终态 RECALLED）。
+ */
+export type BatchRiskSourceType = 'MANUAL' | 'ALERT' | 'RECALL'
 
 /**
  * 批次风险状态转换（PB1：人工 NORMAL ⇄ FROZEN）。orgId 为转换时的责任组织，flowStatus 为转换时的流转状态快照（转换不改变流转状态）。
@@ -183,8 +186,13 @@ export interface BatchRiskTransition {
   fromStatus: BatchRiskStatus
   toStatus: BatchRiskStatus
   sourceType: BatchRiskSourceType
+  /** 来源告警（sourceType = ALERT 时存在）。 */
+  sourceAlertId?: number
+  /** 来源召回（sourceType = RECALL 时存在）。 */
+  sourceRecallId?: number
   reason: string
-  actorUserId: number | null
+  /** 系统路径（ALERT）没有操作人。 */
+  actorUserId?: number | null
   occurredAt: string
 }
 
@@ -208,7 +216,8 @@ export interface SiteSummary {
   status: string
 }
 
-export type TransferStatus = 'DRAFT' | 'PENDING' | 'ACCEPTED' | 'REJECTED'
+/** QUARANTINED（PB4）：货物已到达并隔离，责任组织仍为发送方，依据质量结论接受或拒收。 */
+export type TransferStatus = 'DRAFT' | 'PENDING' | 'QUARANTINED' | 'ACCEPTED' | 'REJECTED'
 export type ShipmentStatus = 'PLANNED' | 'IN_TRANSIT' | 'DELIVERED' | 'CANCELLED'
 
 export const SHIPMENT_STATUSES: readonly ShipmentStatus[] = ['PLANNED', 'IN_TRANSIT', 'DELIVERED', 'CANCELLED']
@@ -238,6 +247,14 @@ export interface Transfer {
   receivedQuantity?: number
   differenceReason?: string
   rejectionReason?: string
+  /** 隔离收货事实（PB4：QUARANTINED 及其后续决定保留）。 */
+  quarantineSiteId?: number
+  quarantineReason?: string
+  quarantinedRecordedAt?: string
+  quarantinedBy?: number
+  /** 批次当前流转 / 风险状态（接收方据此判断冻结批次不能直接接受）。 */
+  batchFlowStatus?: BatchFlowStatus
+  batchRiskStatus?: BatchRiskStatus
   version: number
   createdAt: string
   updatedAt: string
@@ -299,7 +316,7 @@ export type ShipmentRole = 'SENDER' | 'CARRIER' | 'RECEIVER'
 
 /**
  * Shipment 在途温度记录的单点判定（Phase B PB2）：只说明这一次测量是否落在测量时适用的运输温控规则范围内，
- * 不等于持续超温，也不产生告警。MISSING_CONTEXT 表示测量时没有唯一适用的规则，未判定。
+ * 不等于持续超温，单点本身不产生告警（持续超温由服务端按连续越界时长判定，见 Alert）。MISSING_CONTEXT 表示测量时没有唯一适用的规则，未判定。
  */
 export type TemperatureEvaluation = 'NORMAL' | 'HIGH' | 'LOW' | 'MISSING_CONTEXT'
 /** PB2 开放的温度数据来源：人工登记与教学模拟数据（本系统未接入真实温度设备）。 */
@@ -407,4 +424,191 @@ export interface BatchOperation {
   updatedBy?: number
   items: BatchOperationItem[]
   relations: BatchRelation[]
+}
+
+/** Shipment 级在途持续超温告警类型（Phase B PB3）。 */
+export type AlertType = 'TEMP_OVER_UPPER' | 'TEMP_UNDER_LOWER'
+/** 告警处置状态：OPEN（待确认）→ ACKNOWLEDGED（质量管理员已确认、处置中）→ RESOLVED（已形成处置结论）。 */
+export type AlertStatus = 'OPEN' | 'ACKNOWLEDGED' | 'RESOLVED'
+export const ALERT_STATUSES: readonly AlertStatus[] = ['OPEN', 'ACKNOWLEDGED', 'RESOLVED']
+
+/** 告警创建时经 Shipment → Transfer → Batch 快照的受影响批次，附批次与交接的当前事实。 */
+export interface AlertAffectedBatch {
+  batchId: number
+  traceBatchNo: string
+  transferId: number
+  transferNo: string
+  transferStatus: string
+  /** 快照时风险状态；NORMAL 的批次由本告警自动冻结（autoFrozen）。 */
+  riskStatusBefore: BatchRiskStatus
+  autoFrozen: boolean
+  freezeTransitionId?: number
+  currentOrgId: number
+  currentFlowStatus: BatchFlowStatus
+  currentRiskStatus: BatchRiskStatus
+  quantity: number
+  unitCode: string
+  /** PB4：本告警是否已依据检验结论对该批次形成放行结论、关联本告警的最新检验结论与报告数。 */
+  released: boolean
+  /** 放行结论解除了批次最后一个风险事项时的放行转换；形成结论时批次仍被其他风险事项冻结则不输出。 */
+  releaseTransitionId?: number
+  latestInspectionConclusion?: InspectionConclusion
+  inspectionCount: number
+  /** 批次仍处于 FROZEN 时，除本告警外仍未解除的风险事项（只对批次当前责任组织与平台输出）。 */
+  pendingHolds?: AlertPendingHold[]
+}
+
+/** 仍使批次保持 FROZEN 的其他风险事项：其他未处置告警尚未形成放行结论，或人工风险冻结尚未人工解除。 */
+export interface AlertPendingHold {
+  type: 'ALERT' | 'MANUAL_FREEZE'
+  alertId?: number
+  alertNo?: string
+}
+
+/** 告警处置动作（追加式历史）。 */
+export interface AlertActionItem {
+  id: number
+  action: 'ACKNOWLEDGE' | 'RELEASE_BATCH' | 'RESOLVE' | string
+  orgId: number
+  batchId?: number
+  riskTransitionId?: number
+  inspectionReportId?: number
+  actorUserId: number
+  note?: string
+  occurredAt: string
+}
+
+/**
+ * Shipment 级在途持续超温告警（企业端）。判定依据（rule）全部来自告警创建时复制的温度记录快照；
+ * 列表不含 batches / actions，详情包含。
+ */
+export interface Alert {
+  id: number
+  alertNo: string
+  alertType: AlertType
+  severity: string
+  status: AlertStatus
+  reason: string
+  /** 归属组织：运输任务发货方（受影响批次当时的责任组织）。 */
+  orgId: number
+  shipmentId: number
+  shipmentNo: string
+  receiverOrgId: number
+  carrierOrgId: number
+  stageCode: 'TRANSPORT'
+  episodeStartRecordId: number
+  sustainedRecordId: number
+  episodeStartedAt: string
+  sustainedAt: string
+  durationSeconds: number
+  rule: TemperatureRuleBasis
+  triggeredAt: string
+  acknowledgedAt?: string
+  acknowledgedBy?: number
+  resolvedAt?: string
+  resolvedBy?: number
+  resolution?: string
+  version: number
+  batches?: AlertAffectedBatch[]
+  actions?: AlertActionItem[]
+}
+
+/** 检验结论（PB4）：报告只是证据，不自动放行、冻结或召回。 */
+export type InspectionConclusion = 'PASS' | 'FAIL'
+/** 提交身份：批次当前责任组织，或该批次隔离交接的接收方（隔离期间只有证据提交权限）。 */
+export type InspectionSubmitterRole = 'CURRENT_ORG' | 'QUARANTINE_RECEIVER'
+
+export interface InspectionReport {
+  id: number
+  batchId: number
+  orgId: number
+  submitterRole: InspectionSubmitterRole
+  transferId?: number
+  alertId?: number
+  reportNo: string
+  institutionName: string
+  inspectedAt: string
+  itemsSummary: string
+  conclusion: InspectionConclusion
+  dataSource: 'MANUAL' | 'SIMULATED'
+  actorUserId: number
+  recordedAt: string
+}
+
+/** 模拟召回（PB5）：教学演练案件，不代表真实法定召回。 */
+export type RecallStatus = 'IN_PROGRESS' | 'CLOSED'
+export type RecallPublicDisposition = 'DESTROYED' | 'RETURNED'
+export type RecallScopeRole = 'SEED' | 'DESCENDANT' | 'ANCESTOR'
+export type RecallScopeAction = 'RECALLED' | 'ALREADY_RECALLED' | 'NOTIFY_HOLDER' | 'TRACE_ONLY'
+
+/** 召回影响范围行：快照（持有组织、状态、数量、未结束交接、公开码）+ 批次当前事实。 */
+export interface RecallScopeItem {
+  batchId: number
+  traceBatchNo: string
+  productName?: string
+  scopeRole: RecallScopeRole
+  depth: number
+  holderOrgId: number
+  flowStatus: BatchFlowStatus
+  riskStatusBefore: BatchRiskStatus
+  /** 当前流转 / 风险状态：只对发起组织、平台与该批次的当前责任组织输出；历史持有方只看发起时快照。 */
+  currentFlowStatus?: BatchFlowStatus
+  currentRiskStatus?: BatchRiskStatus
+  action: RecallScopeAction
+  riskTransitionId?: number
+  declaredQuantity: number
+  remainingQuantity: number
+  soldQuantity: number
+  unitCode: string
+  openTransferId?: number
+  openTransferNo?: string
+  openTransferStatus?: TransferStatus
+  shipmentStatus?: ShipmentStatus
+  publicCodeActive: boolean
+  /** 查看组织当前负责该批次（召回通知需要由它处置）。 */
+  heldByViewer?: boolean
+}
+
+export interface RecallSummary {
+  seedCount: number
+  descendantCount: number
+  ancestorCount: number
+  recalledCount: number
+  notifiedCount: number
+  openTransferCount: number
+  publicCodeCount: number
+  remainingQuantity: number
+  soldQuantity: number
+}
+
+export interface Recall {
+  id: number
+  recallNo: string
+  ownerOrgId: number
+  sourceAlertId?: number
+  reason: string
+  status: RecallStatus
+  startedAt: string
+  startedBy: number
+  closedAt?: string
+  closedBy?: number
+  publicDisposition?: RecallPublicDisposition
+  /** 内部处置总结：只对发起组织与平台可见。 */
+  resultSummary?: string
+  version: number
+  /** 查看组织与召回的关系：发起组织、范围批次的当前责任组织、发起时的持有组织（历史快照）或平台只读。 */
+  viewerRelation?: RecallViewerRelation
+  summary?: RecallSummary
+  scope?: RecallScopeItem[]
+}
+
+export type RecallViewerRelation = 'OWNER' | 'CURRENT_HOLDER' | 'HISTORICAL_HOLDER' | 'PLATFORM'
+
+/** 批次当前未解除的风险事项与收到的上游召回通知（只对批次当前责任组织与平台输出）。 */
+export interface BatchRiskHolds {
+  batchId: number
+  riskStatus: BatchRiskStatus
+  alertHolds: Array<{ alertId: number; alertNo: string; alertStatus: AlertStatus }>
+  manualFreezeHold: boolean
+  recallNotices: Array<{ recallId: number; recallNo: string; recallStatus: RecallStatus; ownerOrgId: number; notifiedAt: string; depth: number }>
 }

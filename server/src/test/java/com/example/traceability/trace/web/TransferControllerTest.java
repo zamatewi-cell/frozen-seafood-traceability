@@ -203,7 +203,7 @@ class TransferControllerTest {
                 5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.DRAFT,
                 null, null, null, null, null, null,
-                null, null, null, 0L, now, now
+                null, null, null, null, null, null, null, null, null, 0L, now, now
         );
 
         when(transferService.createDraft(any(TransferCreateRequest.class), eq("idem-create-12345678"), any()))
@@ -235,7 +235,7 @@ class TransferControllerTest {
                 5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.PENDING,
                 now, now, 101L, null, null, null,
-                null, null, null, 1L, now, now
+                null, null, null, null, null, null, null, null, null, 1L, now, now
         );
 
         when(transferService.listTransfers(eq("SENT"), eq("PENDING"), eq(null), eq(1L), eq(20), any()))
@@ -317,7 +317,7 @@ class TransferControllerTest {
                 5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.DRAFT,
                 null, null, null, null, null, null,
-                null, null, null, 0L, now, now
+                null, null, null, null, null, null, null, null, null, 0L, now, now
         );
 
         when(transferService.getTransferDetail(eq(5001L), any())).thenReturn(item);
@@ -338,7 +338,7 @@ class TransferControllerTest {
                 5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 25L,
                 new BigDecimal("500.000"), "kg", TransferStatus.DRAFT,
                 null, null, null, null, null, null,
-                null, null, null, 1L, now, now
+                null, null, null, null, null, null, null, null, null, 1L, now, now
         );
 
         when(transferService.patchDraft(eq(5001L), any(), any())).thenReturn(item);
@@ -374,7 +374,7 @@ class TransferControllerTest {
                 5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.PENDING,
                 null, now, 101L, null, null, null,
-                null, null, null, 1L, now, now
+                null, null, null, null, null, null, null, null, null, 1L, now, now
         );
 
         when(transferService.submitTransfer(eq(5001L), any(), eq("idem-submit-12345678"), any())).thenReturn(item);
@@ -405,7 +405,7 @@ class TransferControllerTest {
                 5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.ACCEPTED,
                 receivedAt.minusHours(2), now.minusHours(2), 101L, receivedAt, now, 201L,
-                new BigDecimal("495.000"), "冷链干耗5kg", null, 2L, now, now
+                new BigDecimal("495.000"), "冷链干耗5kg", null, null, null, null, null, null, null, 2L, now, now
         );
 
         when(transferService.acceptTransfer(eq(5001L), any(), eq("idem-accept-12345678"), any())).thenReturn(item);
@@ -434,7 +434,7 @@ class TransferControllerTest {
                 5001L, "TRF-20260914-001", 1001L, "TB-1001", 9001L, "SHP-TEST-0001", ShipmentStatus.PLANNED, 10L, 20L,
                 new BigDecimal("500.000"), "kg", TransferStatus.REJECTED,
                 rejectedAt.minusHours(2), now.minusHours(2), 101L, rejectedAt, now, 201L,
-                null, null, "货物温度偏高解冻", 2L, now, now
+                null, null, "货物温度偏高解冻", null, null, null, null, null, null, 2L, now, now
         );
 
         when(transferService.rejectTransfer(eq(5001L), any(), eq("idem-reject-12345678"), any())).thenReturn(item);

@@ -6,6 +6,7 @@ import WarehouseEventPanel from '@/components/enterprise/WarehouseEventPanel.vue
 import SalePanel from '@/components/enterprise/SalePanel.vue'
 import PublicTraceCodePanel from '@/components/enterprise/PublicTraceCodePanel.vue'
 import BatchRiskPanel from '@/components/enterprise/BatchRiskPanel.vue'
+import InspectionReportPanel from '@/components/enterprise/InspectionReportPanel.vue'
 import { getBatch, listBatchEvents, submitBatch } from '@/api/batches'
 import { listBatchOperations } from '@/api/batchOperations'
 import { listSites } from '@/api/directory'
@@ -33,7 +34,14 @@ import {
   formatTraceEventType,
   formatTransferStatus
 } from '@/utils/formatters'
-import { canInitiateTransfer, canManageSourceBatches, canOperateBatch, canRecordSale, canRecordWarehouseEvent } from '@/utils/permissions'
+import {
+  canInitiateTransfer,
+  canManageSourceBatches,
+  canOperateBatch,
+  canRecordSale,
+  canRecordWarehouseEvent,
+  canSubmitInspection
+} from '@/utils/permissions'
 import { takeBatchFlash, type BatchFlash } from './batchFlash'
 import { recalledBatchListQuery } from './batchQuery'
 
@@ -517,9 +525,20 @@ onBeforeUnmount(() => {
         :batch="batch"
         :user="user"
         :org-label="directory.organizationLabel"
+        :resolve-orgs="directory.resolveOrganizations"
         @changed="onRiskChanged"
         @conflict="onRiskConflict"
       />
+
+      <section
+        v-if="batch.flowStatus !== 'DRAFT' && (batch.orgId === user?.orgId || user?.scopes.includes('PLATFORM'))"
+        class="ent-card"
+        aria-labelledby="inspection-title"
+        data-testid="batch-inspection-card"
+      >
+        <h2 id="inspection-title" class="ent-card-title">检验报告</h2>
+        <InspectionReportPanel :batch-id="batch.id" :can-submit="canSubmitInspection(user, batch.orgId)" />
+      </section>
 
       <section v-if="canSubmit" class="ent-card activation-card" aria-labelledby="activation-title" data-testid="activation-card">
         <h2 id="activation-title" class="ent-card-title">提交激活</h2>

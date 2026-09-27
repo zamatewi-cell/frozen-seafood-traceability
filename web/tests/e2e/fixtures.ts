@@ -79,3 +79,14 @@ export const mockEmptyTimelineTrace: PublicTrace = {
   publicTraceId: 'EMPTY23C4P4Q6T7XZ2M7K3B2AC',
   timeline: []
 }
+
+/** PB6：模拟召回关闭后的公开处置进展（受控状态、固定文案与完成日期）。 */
+export const mockRecallDisposedTrace: PublicTrace = {
+  ...mockClosedRecalledTrace,
+  publicTraceId: 'RCLDSP2C4P4Q6T7XZ2M7K3B2AC',
+  recallDisposition: {
+    status: 'CLOSED',
+    label: '模拟召回处置已完成：涉及产品已按教学演练流程完成退回处置（系统教学演练模拟信息，非真实召回结论）。',
+    closedDate: '2026-09-26'
+  }
+}

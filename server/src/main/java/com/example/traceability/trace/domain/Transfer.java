@@ -78,6 +78,19 @@ public class Transfer {
     @TableField("rejection_reason")
     private String rejectionReason;
 
+    /** 隔离场所（PB4：QUARANTINED 及其后续决定保留）。 */
+    @TableField("quarantine_site_id")
+    private Long quarantineSiteId;
+
+    @TableField("quarantine_reason")
+    private String quarantineReason;
+
+    @TableField("quarantined_recorded_at")
+    private LocalDateTime quarantinedRecordedAt;
+
+    @TableField("quarantined_by")
+    private Long quarantinedBy;
+
     @TableField("idempotency_key")
     private String idempotencyKey;
 
@@ -320,5 +333,37 @@ public class Transfer {
 
     public void setIsLegacy(Integer isLegacy) {
         this.isLegacy = isLegacy;
+    }
+
+    public Long getQuarantineSiteId() {
+        return quarantineSiteId;
+    }
+
+    public void setQuarantineSiteId(Long quarantineSiteId) {
+        this.quarantineSiteId = quarantineSiteId;
+    }
+
+    public String getQuarantineReason() {
+        return quarantineReason;
+    }
+
+    public void setQuarantineReason(String quarantineReason) {
+        this.quarantineReason = quarantineReason;
+    }
+
+    public LocalDateTime getQuarantinedRecordedAt() {
+        return quarantinedRecordedAt;
+    }
+
+    public void setQuarantinedRecordedAt(LocalDateTime quarantinedRecordedAt) {
+        this.quarantinedRecordedAt = quarantinedRecordedAt;
+    }
+
+    public Long getQuarantinedBy() {
+        return quarantinedBy;
+    }
+
+    public void setQuarantinedBy(Long quarantinedBy) {
+        this.quarantinedBy = quarantinedBy;
     }
 }

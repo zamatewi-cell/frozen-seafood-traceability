@@ -1,8 +1,8 @@
 # 冷冻海产品溯源系统
 
-面向高校实训的冷冻海产品供应链追溯原型。系统以“批次、追溯事件、批次关系”为核心，目标覆盖来源、加工速冻、仓储、运输、交接、检测、销售、消费者查询和模拟召回。当前已经实现部分后端基础模块及消费者查询页，尚未形成完整企业端正常业务链和异常召回链。
+面向高校实训的冷冻海产品供应链追溯原型。系统以批次、结构化业务单据、追溯事件和批次关系为核心，已实现来源建批、加工与拆分、自有冷库记录、运输交接、终端销售、消费者查询，以及在途温度异常、隔离检验和模拟召回的 Demo MVP 链路。
 
-> 当前阶段：`业务模型纠偏后的 Demo MVP 重构阶段`。统一业务契约 v1.1 与 Demo MVP 路线图已经确认。后续先完成 Phase 0 基础模型纠偏，再以端到端纵向 Slice 形成 Phase A 正常业务闭环；温度异常、告警、隔离和模拟召回属于 Phase B。数据库中已有表结构或文档中的规划项不代表对应功能已经实现。
+> 当前阶段：`Demo MVP 实现完成，进入 PR / CI 与交付验收`。Phase 0 业务模型、Phase A 正常链路和 Phase B 异常链路均已有生产代码与真实浏览器验收路径。项目仍是教学演练原型；已知限制见 [CHANGELOG](CHANGELOG.md)，完成 PR / CI 验收前不把本分支描述为已合并发布。
 
 ## 项目边界
 
@@ -12,19 +12,18 @@
 - 演示数据必须虚构或脱敏，不上传真实个人信息、密钥、企业证照原件。
 - 当前目录中的“肉类食品溯源”材料仅供结构参考，不是本项目需求来源，也不会提交到仓库。
 
-## 目标 MVP 业务闭环（规划）
+## Demo MVP 业务闭环
 
 ```mermaid
 flowchart LR
-    A[捕捞/养殖/进口来源] --> B[加工与速冻]
-    B --> C[冷库入库]
-    C --> D[冷链运输]
-    D --> E[经销/零售验收]
+    A[来源建批] --> B[加工/拆分]
+    B --> C[自有冷库记录]
+    C --> D[Shipment 运输与 Transfer 交接]
+    D --> E[终端销售]
     E --> F[消费者扫码查询]
-    B -.拆分/合并.-> B
-    C -.温度异常.-> G[告警与处置]
-    D -.温度异常.-> G
-    G --> H[冻结批次/模拟召回]
+    D -.在途持续超温.-> G[告警/冻结/隔离检验]
+    G --> H[放行或模拟召回]
+    H --> F
 ```
 
 ## 已形成的项目文档
@@ -41,17 +40,16 @@ flowchart LR
 - [可交互原型](prototype/README.md)：经确认视觉稿转化的产品走查原型，不是生产 Vue 工程。
 - [参与贡献](CONTRIBUTING.md)：成员日常协作的精简入口。
 
-## 计划中的仓库结构
+## 主要仓库目录
 
 ```text
 .
-├─ server/                 # Spring Boot 服务端（已建立工程骨架与 8 大业务包）
-├─ web/                    # Vue 3 Web 端（已建立 Vue 3 + TS + Vite 8 生产工程与消费者查询页）
-├─ database/               # 版本化迁移与演示数据
-├─ tests/                  # 跨端验收与测试资产
-├─ deploy/                 # 部署配置和运维说明（含 deploy/docker-compose.yml 数据库环境编排）
-├─ docs/                   # 产品、调研、设计、测试与答辩资料
-└─ .github/                # Issue / PR 模板与后端 CI 流水线
+├─ server/                 # Spring Boot 服务端、Flyway V1–V17 与 MySQL 测试
+├─ web/                    # Vue 3 企业端/消费者端、Vitest、Playwright 与真实浏览器冒烟
+├─ deploy/                 # Docker Compose 数据库环境编排
+├─ docs/                   # 业务契约、路线图、OpenAPI 与历史设计资料
+├─ prototype/              # 交互原型，非生产 Vue 工程
+└─ .github/                # Issue / PR 模板及前后端 CI
 ```
 
 ## 本地数据库快速启动
@@ -96,13 +94,11 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --wait
   - 当前 Slice 范围限制：`MERGE` / `REPACK` 仍保留在操作类型枚举中，但执行时返回 422 `OPERATION_TYPE_NOT_SUPPORTED`；这是本 Slice 的开发范围限制，不是永久业务规则。多输入加工的来源字段与产品继承规则将在后续单独定义。
 - [x] 完成 Phase A Slice 4：自有冷库 WAREHOUSE_IN / WAREHOUSE_OUT（无迁移；沿用通用追溯事件接口并收紧：仅批次当前责任组织、批次 ACTIVE + NORMAL、`siteId` 必填且必须是本组织启用的 `COLD_STORE`、`dataSource = MANUAL`、不接受 `detailsJson`；仓储事件不改变批次责任组织、数量、状态与版本，不产生批次 / 谱系 / 交接 / 运输记录；仓储事件更正是审计更正，CLOSED 批次仍可在 IN ↔ OUT 之间更正，但不能跨类更正；人工接口同时禁止伪造 SALE；批次详情自有冷库入库 / 出库面板；真实浏览器验收 B2 / B3 各一次入库与出库）
   - Slice 4 最小实现解释（契约未定义）：统一业务契约 v1.1 没有定义仓储状态机，因此当前不强制 IN / OUT 配对或顺序（无前序 IN 的 OUT、连续 IN、A 库入 B 库出均接受），不派生“当前在库”状态，也不新增批次当前场所字段；运输途中能否记录仓储事件未定义，服务端与页面均不限制。不支持第三方仓储、委托保管与仓储温度记录（Phase B）。
-- [ ] 完成 Phase 0：Batch 双状态、双编号及企业端基础壳纠偏
-- [ ] 完成 Phase A：来源建批至消费者查询的正常业务闭环
-- [ ] 完成 Phase B：温度异常、隔离与模拟召回闭环
+- [x] 完成 Phase 0：Batch 双状态、双编号及企业端基础壳纠偏
+- [x] 完成 Phase A：来源建批至消费者查询的正常业务闭环
+- [x] 完成 Phase B：在途温度异常、隔离检验与模拟召回闭环
 - [ ] 完成综合测试、部署和答辩材料
 
 ## 下一步
 
-按照 [Demo MVP 实施路线图](docs/DEMO_MVP_ROADMAP.md) 从 Phase 0 开始：先收敛 Batch 双状态、双编号和企业端基础壳，再按“来源建批 → Transfer + Shipment → PROCESS/SPLIT → 自有冷库 → 终端 Sale → PublicTraceCode 与消费者查询”的纵向 Slice 推进 Phase A。
-
-在 Phase A 完成并通过 3～5 分钟真实业务演示前，暂停 FR-COLD-001A、TemperatureRecord、Alert、QUARANTINED、Freeze/Recall、InspectionReport、第三方仓储和企业端完整图谱。当前 Sale 尚不存在，TemperatureRecord、Alert、InspectionReport、Recall 也没有可执行 Java/API，不得描述为已完成功能。
+完成当前 PR 的 CI 与合并验收，并依据 [业务契约](docs/BUSINESS_CONTRACT_V1.1.md) 和 [CHANGELOG](CHANGELOG.md) 准备演示账号、操作步骤与已知限制。真实 IoT 接入、第三方独立仓储、法定召回执行和生产级合规认证不属于本期 Demo MVP。

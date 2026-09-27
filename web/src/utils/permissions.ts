@@ -1,4 +1,4 @@
-import type { Batch, CurrentUser, Shipment, Transfer } from '@/types/enterprise'
+import type { Alert, AlertAffectedBatch, Batch, CurrentUser, Recall, Shipment, Transfer } from '@/types/enterprise'
 
 /**
  * 前端入口可见性判断，只用于隐藏不可执行的按钮；服务端仍独立校验全部权限。
@@ -70,13 +70,23 @@ export function canRecordWarehouseEvent(user: CurrentUser | null | undefined, ba
     && batch.riskStatus === 'NORMAL')
 }
 
-/** 交接接收方的操作员或质量管理员可以接受 / 拒收（运输任务必须已到达，服务端校验）。 */
+/** 交接接收方的操作员或质量管理员可以接受 / 隔离收货 / 拒收（运输任务必须已到达，服务端校验）；PB4 起 QUARANTINED 也可决定。 */
 export function canDecideTransfer(user: CurrentUser | null | undefined, transfer: Transfer | null | undefined): boolean {
   return Boolean(user && transfer
     && transfer.receiverOrgId === user.orgId
-    && transfer.status === 'PENDING'
+    && (transfer.status === 'PENDING' || transfer.status === 'QUARANTINED')
     && !user.scopes.includes('PLATFORM')
     && (user.roles.includes('OPERATOR') || user.roles.includes('QUALITY_MANAGER')))
+}
+
+/** 接受：批次风险必须正常（冻结 / 召回批次只能隔离收货或拒收；隔离后等待发货方依据检验结论放行）。 */
+export function canAcceptTransfer(user: CurrentUser | null | undefined, transfer: Transfer | null | undefined): boolean {
+  return canDecideTransfer(user, transfer) && (transfer?.batchRiskStatus ?? 'NORMAL') === 'NORMAL'
+}
+
+/** 隔离收货（PB4）：只对 PENDING 交接开放，批次风险状态不限。 */
+export function canQuarantineTransfer(user: CurrentUser | null | undefined, transfer: Transfer | null | undefined): boolean {
+  return canDecideTransfer(user, transfer) && transfer?.status === 'PENDING'
 }
 
 export type ShipmentViewerRole = 'SENDER' | 'CARRIER' | 'RECEIVER' | 'NONE'
@@ -138,4 +148,79 @@ export function canActivatePublicTraceCode(user: CurrentUser | null | undefined,
   return Boolean(canManagePublicTraceCode(user, batch)
     && batch?.flowStatus === 'ACTIVE'
     && batch.riskStatus === 'NORMAL')
+}
+
+/**
+ * 告警处置（Phase B PB3 起）：告警归属组织（运输任务发货方，即受影响批次的当前责任组织）的质量管理员
+ * （QUALITY_MANAGER，非平台 / 系统管理员）。接收方与承运方只读。服务端仍独立校验全部前提。
+ */
+export function canHandleAlert(user: CurrentUser | null | undefined, alert: Alert | null | undefined): boolean {
+  return Boolean(user && alert
+    && user.roles.includes('QUALITY_MANAGER')
+    && !user.roles.includes('SYSTEM_ADMIN')
+    && !user.scopes.includes('PLATFORM')
+    && alert.orgId === user.orgId)
+}
+
+/** 确认告警：OPEN → ACKNOWLEDGED。 */
+export function canAcknowledgeAlert(user: CurrentUser | null | undefined, alert: Alert | null | undefined): boolean {
+  return canHandleAlert(user, alert) && alert?.status === 'OPEN'
+}
+
+/** 依据检验结论放行（PB4）：告警处置中、批次仍冻结且未放行、关联本告警的最新结论为 PASS、批次当前责任组织为本组织。 */
+export function canReleaseAlertBatch(user: CurrentUser | null | undefined, alert: Alert | null | undefined,
+  batch: AlertAffectedBatch | null | undefined): boolean {
+  return Boolean(canHandleAlert(user, alert) && alert?.status === 'ACKNOWLEDGED' && batch
+    && batch.currentOrgId === user?.orgId
+    && batch.currentRiskStatus === 'FROZEN'
+    && !batch.released
+    && batch.latestInspectionConclusion === 'PASS')
+}
+
+/** 形成处置结论（PB4）：告警处置中，且每个受影响批次都已放行或已进入模拟召回。 */
+export function canResolveAlert(user: CurrentUser | null | undefined, alert: Alert | null | undefined): boolean {
+  return Boolean(canHandleAlert(user, alert) && alert?.status === 'ACKNOWLEDGED'
+    && (alert.batches ?? []).every((b) => b.released || b.currentRiskStatus === 'RECALLED'))
+}
+
+/**
+ * 提交检验报告（PB4）：质量管理员（非平台 / 系统管理员），组织为批次当前责任组织，或该批次隔离交接的接收方。
+ * 服务端按批次行锁下的当前事实最终判定提交身份。
+ */
+export function canSubmitInspection(user: CurrentUser | null | undefined, currentOrgId: number | null | undefined,
+  quarantineReceiverOrgId?: number | null): boolean {
+  return Boolean(user
+    && user.roles.includes('QUALITY_MANAGER')
+    && !user.roles.includes('SYSTEM_ADMIN')
+    && !user.scopes.includes('PLATFORM')
+    && (currentOrgId === user.orgId || (quarantineReceiverOrgId !== null && quarantineReceiverOrgId !== undefined
+      && quarantineReceiverOrgId === user.orgId)))
+}
+
+/**
+ * 发起模拟召回（PB5）：批次当前责任组织的质量管理员（非平台 / 系统管理员），批次已生效（ACTIVE / CLOSED）且尚未召回。
+ * NORMAL 批次还需要证据（最新检验不合格或已被上游召回圈定），由服务端在批次行锁下判定。
+ */
+export function canStartRecall(user: CurrentUser | null | undefined,
+  batch: { orgId?: number; currentOrgId?: number; flowStatus?: string; currentFlowStatus?: string; riskStatus?: string; currentRiskStatus?: string } | null | undefined): boolean {
+  if (!user || !batch) return false
+  const orgId = batch.currentOrgId ?? batch.orgId
+  const flow = batch.currentFlowStatus ?? batch.flowStatus
+  const risk = batch.currentRiskStatus ?? batch.riskStatus
+  return user.roles.includes('QUALITY_MANAGER')
+    && !user.roles.includes('SYSTEM_ADMIN')
+    && !user.scopes.includes('PLATFORM')
+    && orgId === user.orgId
+    && (flow === 'ACTIVE' || flow === 'CLOSED')
+    && risk !== 'RECALLED'
+}
+
+/** 关闭模拟召回（PB5）：发起组织的质量管理员，召回处置中。 */
+export function canCloseRecall(user: CurrentUser | null | undefined, recall: Recall | null | undefined): boolean {
+  return Boolean(user && recall
+    && user.roles.includes('QUALITY_MANAGER')
+    && !user.roles.includes('SYSTEM_ADMIN')
+    && !user.scopes.includes('PLATFORM')
+    && recall.ownerOrgId === user.orgId
+    && recall.status === 'IN_PROGRESS')
 }

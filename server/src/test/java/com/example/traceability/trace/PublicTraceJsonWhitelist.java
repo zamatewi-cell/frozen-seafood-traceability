@@ -18,18 +18,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 public final class PublicTraceJsonWhitelist {
 
-    private static final Map<String, Set<String>> ALLOWED = Map.of(
-            "$", Set.of("data", "meta"),
-            "$.meta", Set.of("requestId", "timestamp"),
-            "$.data", Set.of("publicTraceId", "product", "batch", "lineage", "timeline", "temperatureSummary",
-                    "flowStatus", "riskStatus", "recallNotice", "queriedAt", "disclosure"),
-            "$.data.product", Set.of("name", "category", "specification"),
-            "$.data.batch", Set.of("publicBatchNo", "originType", "maskedOrigin", "productionDate"),
-            "$.data.lineage", Set.of("nodes", "edges"),
-            "$.data.lineage.nodes[]", Set.of("nodeKey", "generation", "role", "productName"),
-            "$.data.lineage.edges[]", Set.of("fromNodeKey", "toNodeKey", "operationType", "occurredAt"),
-            "$.data.timeline[]", Set.of("eventType", "event", "occurredAt", "dataSourceLabel", "nodeKey"),
-            "$.data.temperatureSummary", Set.of("result", "ruleNote")
+    private static final Map<String, Set<String>> ALLOWED = Map.ofEntries(
+            Map.entry("$", Set.of("data", "meta")),
+            Map.entry("$.meta", Set.of("requestId", "timestamp")),
+            Map.entry("$.data", Set.of("publicTraceId", "product", "batch", "lineage", "timeline", "temperatureSummary",
+                    "flowStatus", "riskStatus", "recallNotice", "recallDisposition", "queriedAt", "disclosure")),
+            Map.entry("$.data.recallDisposition", Set.of("status", "label", "closedDate")),
+            Map.entry("$.data.product", Set.of("name", "category", "specification")),
+            Map.entry("$.data.batch", Set.of("publicBatchNo", "originType", "maskedOrigin", "productionDate")),
+            Map.entry("$.data.lineage", Set.of("nodes", "edges")),
+            Map.entry("$.data.lineage.nodes[]", Set.of("nodeKey", "generation", "role", "productName")),
+            Map.entry("$.data.lineage.edges[]", Set.of("fromNodeKey", "toNodeKey", "operationType", "occurredAt")),
+            Map.entry("$.data.timeline[]", Set.of("eventType", "event", "occurredAt", "dataSourceLabel", "nodeKey")),
+            Map.entry("$.data.temperatureSummary", Set.of("result", "ruleNote"))
     );
 
     private PublicTraceJsonWhitelist() {

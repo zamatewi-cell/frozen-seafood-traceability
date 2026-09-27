@@ -48,6 +48,13 @@ public record TransferResponse(
         BigDecimal receivedQuantity,
         String differenceReason,
         String rejectionReason,
+        Long quarantineSiteId,
+        String quarantineReason,
+        @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX", timezone = "UTC")
+        OffsetDateTime quarantinedRecordedAt,
+        Long quarantinedBy,
+        String batchFlowStatus,
+        String batchRiskStatus,
         Long version,
         @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSXXX", timezone = "UTC")
         OffsetDateTime createdAt,
@@ -60,7 +67,8 @@ public record TransferResponse(
     }
 
     /**
-     * 以交接实体及可选的关联运输任务、批次补全展示字段（shipmentNo / shipmentStatus / traceBatchNo）。
+     * 以交接实体及可选的关联运输任务、批次补全展示字段（shipmentNo / shipmentStatus / traceBatchNo，以及 PB4 起的批次当前
+     * 流转 / 风险状态：接收方据此判断冻结批次不能直接接受，只能隔离收货或拒收）。
      */
     public static TransferResponse fromEntity(Transfer t, Shipment shipment, Batch batch) {
         if (t == null) {
@@ -90,6 +98,12 @@ public record TransferResponse(
                 t.getReceivedQuantity(),
                 t.getDifferenceReason(),
                 t.getRejectionReason(),
+                t.getQuarantineSiteId(),
+                t.getQuarantineReason(),
+                t.getQuarantinedRecordedAt() != null ? t.getQuarantinedRecordedAt().atOffset(ZoneOffset.UTC) : null,
+                t.getQuarantinedBy(),
+                batch != null ? batch.getFlowStatus() : null,
+                batch != null ? batch.getRiskStatus() : null,
                 t.getVersion(),
                 t.getCreatedAt() != null ? t.getCreatedAt().atOffset(ZoneOffset.UTC) : null,
                 t.getUpdatedAt() != null ? t.getUpdatedAt().atOffset(ZoneOffset.UTC) : null

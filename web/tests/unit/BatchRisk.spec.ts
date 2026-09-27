@@ -58,6 +58,11 @@ function backend(options: { user?: Json; batch?: Json; history?: Json[]; overrid
     'GET /api/v1/batches/21/sales': () => ({ status: 200, body: envelope([]) }),
     'GET /api/v1/batches/21/public-trace-code': () => problem(404, 'PUBLIC_TRACE_CODE_NOT_FOUND', '该批次尚未激活公开追溯码'),
     'GET /api/v1/batches/21/risk-transitions': () => ({ status: 200, body: envelope(state.history) }),
+    'GET /api/v1/batches/21/risk-holds': () => ({ status: 200, body: envelope({
+      batchId: 21, riskStatus: state.batch.riskStatus, alertHolds: [],
+      manualFreezeHold: state.batch.riskStatus === 'FROZEN', recallNotices: []
+    }) }),
+    'GET /api/v1/batches/21/inspection-reports': () => ({ status: 200, body: envelope([]) }),
     'GET /api/v1/products/5': () => ({ status: 200, body: envelope({ id: 5, productCode: 'P', publicName: '冷冻大黄鱼', category: 'FISH', specification: '500g', sourceType: 'DOMESTIC_CAPTURE', baseUnitCode: 'kg', status: 'ACTIVE', version: 0 }) }),
     'GET /api/v1/organizations/30': () => ({ status: 200, body: envelope({ id: 30, orgNo: 'ORG_PROC_01', name: '东海水产加工有限公司', orgType: 'PROCESSOR', status: 'ACTIVE' }) }),
     'GET /api/v1/transfers': () => ({ status: 200, body: envelope([], { number: 1, size: 20, totalElements: 0, totalPages: 0 }) }),
@@ -287,5 +292,23 @@ describe('consumer FROZEN wording', () => {
     expect(formatPublicRiskStatus('FROZEN').label).toBe('模拟冻结')
     expect(formatPublicRiskStatus('NORMAL').label).toBe('正常')
     expect(formatRiskStatus('FROZEN').label).toBe('冻结')
+  })
+})
+
+describe('PB3 alert-sourced transitions in the risk history', () => {
+  it('labels a system alert freeze without an actor and links to the alert', async () => {
+    backend({
+      batch: { riskStatus: 'FROZEN' },
+      history: [transition(1, 'NORMAL', 'FROZEN', {
+        sourceType: 'ALERT', sourceAlertId: 5001, actorUserId: undefined, reason: '在途持续超温告警 ALT-1 系统自动风险冻结'
+      })]
+    })
+    const view = await mountDetail()
+    const row = view.find('[data-testid="risk-transition-row"]')
+    expect(row.text()).toContain('告警自动冻结')
+    const source = row.find('[data-testid="risk-transition-source"]')
+    expect(source.attributes('data-source-type')).toBe('ALERT')
+    expect(source.text()).toContain('在途持续超温告警（系统自动，无操作人）')
+    expect(row.find('[data-testid="risk-transition-alert-link"]').attributes('href')).toBe('/app/alerts/5001')
   })
 })
