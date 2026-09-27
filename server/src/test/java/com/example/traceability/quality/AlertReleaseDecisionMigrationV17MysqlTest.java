@@ -6,9 +6,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -22,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>RELEASE_BATCH 可以不引用放行转换（其他风险事项仍未解除时只记录本告警的放行结论），但仍必须有批次与依据检验报告；</li>
  *   <li>ACKNOWLEDGE / RESOLVE 形状不变；放行转换非空时仍必须来源于同一告警；同一告警同一批次仍只能有一个放行结论。</li>
  * </ol>
- * 不修改 V1–V16。
+ * 同时核对 V17 只有一条 ALTER TABLE（删除与添加约束在同一条原子 DDL 中完成）。不修改 V1–V16。
  * </p>
  */
 @SpringBootTest
@@ -143,6 +148,21 @@ class AlertReleaseDecisionMigrationV17MysqlTest extends AbstractFlywayUpgradeMys
                 """);
     }
 
+    /** V17 脚本去掉注释行后按分号切分出的各条语句的首行。 */
+    private static List<String> v17Statements() throws IOException {
+        try (InputStream in = AlertReleaseDecisionMigrationV17MysqlTest.class.getResourceAsStream("/db/migration/V17__alert_release_decision.sql")) {
+            assertThat(in).isNotNull();
+            String sql = new String(in.readAllBytes(), StandardCharsets.UTF_8).lines()
+                    .filter(line -> !line.strip().startsWith("--"))
+                    .collect(Collectors.joining("\n"));
+            return Arrays.stream(sql.split(";"))
+                    .map(String::strip)
+                    .filter(statement -> !statement.isEmpty())
+                    .map(statement -> statement.lines().findFirst().orElseThrow().strip())
+                    .toList();
+        }
+    }
+
     private void action(long alertId, String action, String batchId, String transitionId, String reportId, String key) throws SQLException {
         exec("INSERT INTO alert_action (alert_id, org_id, action, batch_id, risk_transition_id, inspection_report_id, actor_user_id, note, "
                 + "idempotency_key, request_hash, occurred_at) VALUES (" + alertId + ", 730, '" + action + "', " + batchId + ", " + transitionId
@@ -166,6 +186,12 @@ class AlertReleaseDecisionMigrationV17MysqlTest extends AbstractFlywayUpgradeMys
         assertThat(businessTables()).containsExactlyElementsOf(tables);
         assertThat(fingerprints(untouched, true)).as("V17 only relaxes alert_action").isEqualTo(before);
         assertThat(queryString(ACTION_ROWS)).as("existing actions are not backfilled or rewritten").isEqualTo(actionsBefore);
+        // 旧约束的删除与新约束的添加在同一条 ALTER TABLE 中（原子 DDL）：升级后恰有一个同名约束，且已不再要求放行转换
+        assertThat(v17Statements()).as("V17 is one ALTER TABLE statement").containsExactly("ALTER TABLE `alert_action`");
+        assertThat(queryLong("SELECT count(*) FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() "
+                + "AND CONSTRAINT_NAME = 'chk_alert_action_shape'")).isEqualTo(1);
+        assertThat(queryLong("SELECT count(*) FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() "
+                + "AND CONSTRAINT_NAME = 'chk_alert_action_shape' AND LOWER(CHECK_CLAUSE) LIKE '%risk_transition_id` is not null%'")).isZero();
 
         // 1. 其他风险事项仍未解除：只记录本告警的放行结论（无转换），仍须有批次与依据检验报告
         action(3001, "RELEASE_BATCH", "901", "NULL", "6002", "k-v17-new-0000001");

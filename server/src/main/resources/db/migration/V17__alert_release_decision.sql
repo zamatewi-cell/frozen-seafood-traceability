@@ -10,13 +10,12 @@
 --   2. 只放宽 chk_alert_action_shape：RELEASE_BATCH 仍必须有批次与依据检验报告，放行转换改为可空。
 --      既有行全部满足新约束（放宽，不回填）；外键 fk_alert_action_transition（非空时仍必须引用来源于同一告警的转换）、
 --      fk_alert_action_batch、fk_alert_action_report 与唯一约束 uk_alert_action_release（同一告警同一批次最多一个放行结论）不变。
---   3. 不修改 V1–V16 文件；不改动任何其他表。
+--   3. 删除旧约束与添加新约束在同一条 ALTER TABLE 中完成（MySQL 原子 DDL），不存在表上暂无该约束的中间状态。
+--   4. 不修改 V1–V16 文件；不改动任何其他表。
 -- =============================================================================
 
 ALTER TABLE `alert_action`
-    DROP CHECK `chk_alert_action_shape`;
-
-ALTER TABLE `alert_action`
+    DROP CHECK `chk_alert_action_shape`,
     ADD CONSTRAINT `chk_alert_action_shape` CHECK (
         (`action` IN ('ACKNOWLEDGE', 'RESOLVE')
             AND `batch_id` IS NULL AND `risk_transition_id` IS NULL AND `inspection_report_id` IS NULL) OR
