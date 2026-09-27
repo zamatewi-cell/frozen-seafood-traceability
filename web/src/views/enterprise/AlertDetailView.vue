@@ -453,8 +453,9 @@ onBeforeUnmount(() => controller?.abort())
               <button type="button" class="ent-button" data-testid="alert-release-cancel" @click="closeRelease">取消</button>
             </div>
             <div v-else class="ent-flash warning" role="alert" data-testid="alert-release-confirm-panel">
-              确认依据关联本告警的最新合格检验结论放行批次 {{ b.traceBatchNo }}？批次风险状态恢复为正常，数量、责任组织与流转状态不变；
-              交接保持原状态，由接收方随后决定接受。
+              确认依据关联本告警的最新合格检验结论，对批次 {{ b.traceBatchNo }} 形成本告警的放行结论？服务端还将核对批次最新检验报告不是不合格；
+              只有这一结论解除了批次最后一个风险事项（其他未处置告警、人工风险冻结）时，批次风险状态才恢复为正常，否则批次保持冻结。
+              数量、责任组织与流转状态不变；交接保持原状态，由接收方随后决定接受。
               <div class="ent-actions">
                 <button type="button" class="ent-button ent-primary" :disabled="busy" data-testid="alert-release-confirm" @click="submitRelease(b)">
                   {{ busy ? '提交中…' : '确认放行' }}

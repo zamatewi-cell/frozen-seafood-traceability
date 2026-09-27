@@ -119,10 +119,42 @@ describe('BatchRiskPanel risk holds (review fix)', () => {
     expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(true)
   })
 
-  it('does not offer manual release when the holds answer belongs to another batch', async () => {
+  it('does not offer manual release or show holds when the holds answer belongs to another batch', async () => {
     batchBackend(processorQm, batch(), { batchId: 22, riskStatus: 'FROZEN', alertHolds: [], manualFreezeHold: true, recallNotices: [] })
     const view = await mountAt('/app/batches/21')
     expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(false)
+    expect(view.find('[data-testid="risk-holds"]').exists()).toBe(false)
+  })
+
+  it.each([
+    ['the holds read fails', { status: 500, body: { status: 500, code: 'INTERNAL_ERROR', title: '服务器错误' } }],
+    ['an alert hold appears', { status: 200, body: envelope({ batchId: 21, riskStatus: 'FROZEN',
+      alertHolds: [{ alertId: 5002, alertNo: 'ALT-2', alertStatus: 'OPEN' }], manualFreezeHold: true, recallNotices: [] }) }]
+  ])('closes an open manual release form and sends nothing when, after a reload, %s', async (_case, second) => {
+    let historyFailures = 1
+    let holdsCalls = 0
+    const { calls } = batchBackend(processorQm, batch(), null, {
+      'GET /api/v1/batches/21/risk-transitions': () => (historyFailures-- > 0
+        ? { status: 500, body: { status: 500, code: 'INTERNAL_ERROR', title: '服务器错误' } }
+        : { status: 200, body: envelope([]) }),
+      'GET /api/v1/batches/21/risk-holds': () => (holdsCalls++ === 0
+        ? { status: 200, body: envelope({ batchId: 21, riskStatus: 'FROZEN', alertHolds: [], manualFreezeHold: true, recallNotices: [] }) }
+        : second)
+    })
+    const view = await mountAt('/app/batches/21')
+    await view.get('[data-testid="risk-release-open"]').trigger('click')
+    await view.get('[data-testid="field-risk-reason"]').setValue('复检合格')
+    await view.get('[data-testid="risk-form"]').trigger('submit')
+    await flushPromises()
+    expect(view.find('[data-testid="risk-confirm"]').exists()).toBe(true)
+
+    await view.get('[data-testid="risk-history-retry"]').trigger('click')
+    await flushPromises()
+    expect(holdsCalls).toBe(2)
+    expect(view.find('[data-testid="risk-form"]').exists()).toBe(false)
+    expect(view.find('[data-testid="risk-confirm"]').exists()).toBe(false)
+    expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(false)
+    expect(calls.some((c) => c.method === 'POST' && c.path.endsWith('/risk/release'))).toBe(false)
   })
 
   it('shows upstream recall notices to the current responsible organization with the next step', async () => {
