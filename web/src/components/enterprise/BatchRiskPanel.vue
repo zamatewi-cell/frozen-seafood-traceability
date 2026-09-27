@@ -171,9 +171,10 @@ function sourceLabel(t: BatchRiskTransition): string {
   return '质量管理员人工处置'
 }
 
-// 风险事项重新变为未知（重新读取中 / 读取失败）或出现未处置告警时，关闭已打开的解除表单，不在未知状态下提交解除
-watch(canRelease, (allowed) => {
-  if (!allowed && mode.value === 'RELEASE' && !submitting.value) close()
+// 风险事项重新变为未知（重新读取中 / 读取失败）或出现未处置告警时，关闭已打开的解除表单，不在未知状态下提交解除；
+// 解除请求在途时等请求结束（失败后表单不能停留在已失效的确认状态）
+watch([canRelease, submitting], ([allowed, busy]) => {
+  if (!allowed && !busy && mode.value === 'RELEASE') close()
 })
 
 watch(() => [props.batch.id, props.batch.version], () => {

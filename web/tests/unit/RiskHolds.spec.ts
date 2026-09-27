@@ -21,7 +21,7 @@ const retailerQm = { ...sampleUser, userId: 22, username: 'retail_qm', orgId: 60
   roles: ['QUALITY_MANAGER'] }
 
 type Json = Record<string, unknown>
-type Overrides = Record<string, (call: RecordedCall) => FakeResponse>
+type Overrides = Record<string, (call: RecordedCall) => FakeResponse | Promise<FakeResponse>>
 
 const org = (id: number, name: string, orgType: string) => ({ status: 200, body: envelope({ id, orgNo: `ORG-${id}`, name, orgType, status: 'ACTIVE' }) })
 
@@ -155,6 +155,40 @@ describe('BatchRiskPanel risk holds (review fix)', () => {
     expect(view.find('[data-testid="risk-confirm"]').exists()).toBe(false)
     expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(false)
     expect(calls.some((c) => c.method === 'POST' && c.path.endsWith('/risk/release'))).toBe(false)
+  })
+
+  it('closes the release form when an in-flight release fails after the holds became unknown meanwhile', async () => {
+    let historyFailures = 1
+    let holdsCalls = 0
+    let finishRelease: (response: FakeResponse) => void = () => {}
+    const serverError = { status: 500, body: { status: 500, code: 'INTERNAL_ERROR', title: '服务器错误' } }
+    const { calls } = batchBackend(processorQm, batch(), null, {
+      'GET /api/v1/batches/21/risk-transitions': () => (historyFailures-- > 0 ? serverError : { status: 200, body: envelope([]) }),
+      'GET /api/v1/batches/21/risk-holds': () => (holdsCalls++ === 0
+        ? { status: 200, body: envelope({ batchId: 21, riskStatus: 'FROZEN', alertHolds: [], manualFreezeHold: true, recallNotices: [] }) }
+        : serverError),
+      'POST /api/v1/batches/21/risk/release': () => new Promise<FakeResponse>((resolve) => { finishRelease = resolve })
+    })
+    const view = await mountAt('/app/batches/21')
+    await view.get('[data-testid="risk-release-open"]').trigger('click')
+    await view.get('[data-testid="field-risk-reason"]').setValue('复检合格')
+    await view.get('[data-testid="risk-form"]').trigger('submit')
+    await flushPromises()
+    await view.get('[data-testid="risk-confirm"]').trigger('click')
+    await flushPromises()
+    expect(view.get('[data-testid="risk-confirm"]').text()).toBe('提交中…')
+
+    await view.get('[data-testid="risk-history-retry"]').trigger('click')
+    await flushPromises()
+    expect(holdsCalls).toBe(2)
+    expect(view.find('[data-testid="risk-confirm-panel"]').exists()).toBe(true)
+
+    finishRelease(serverError)
+    await flushPromises()
+    expect(view.find('[data-testid="risk-form"]').exists()).toBe(false)
+    expect(view.find('[data-testid="risk-release-open"]').exists()).toBe(false)
+    expect(view.find('[data-testid="risk-error"]').exists()).toBe(true)
+    expect(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/risk/release'))).toHaveLength(1)
   })
 
   it('shows upstream recall notices to the current responsible organization with the next step', async () => {
